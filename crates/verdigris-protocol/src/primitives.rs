@@ -38,6 +38,32 @@ pub fn write_i64(value: i64, out: &mut Vec<u8>) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
+pub fn read_f32(buf: &[u8]) -> Result<Option<(f32, usize)>, ProtocolError> {
+    if buf.len() < 4 {
+        return Ok(None);
+    }
+    let mut bytes = [0u8; 4];
+    bytes.copy_from_slice(&buf[..4]);
+    Ok(Some((f32::from_be_bytes(bytes), 4)))
+}
+
+pub fn write_f32(value: f32, out: &mut Vec<u8>) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+pub fn read_f64(buf: &[u8]) -> Result<Option<(f64, usize)>, ProtocolError> {
+    if buf.len() < 8 {
+        return Ok(None);
+    }
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&buf[..8]);
+    Ok(Some((f64::from_be_bytes(bytes), 8)))
+}
+
+pub fn write_f64(value: f64, out: &mut Vec<u8>) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
 pub fn read_string(buf: &[u8], max_len: usize) -> Result<Option<(String, usize)>, ProtocolError> {
     let (len, header) = match read_var_int(buf)? {
         Some(v) => v,
@@ -107,6 +133,36 @@ mod tests {
     #[test]
     fn i64_incomplete() {
         assert_eq!(read_i64(&[0, 0, 0]).unwrap(), None);
+    }
+
+    #[test]
+    fn f32_round_trip() {
+        let mut buf = Vec::new();
+        write_f32(1.5, &mut buf);
+        assert_eq!(buf, vec![0x3F, 0xC0, 0x00, 0x00]);
+        let (value, consumed) = read_f32(&buf).unwrap().unwrap();
+        assert_eq!(value, 1.5);
+        assert_eq!(consumed, 4);
+    }
+
+    #[test]
+    fn f32_incomplete() {
+        assert_eq!(read_f32(&[0, 0, 0]).unwrap(), None);
+    }
+
+    #[test]
+    fn f64_round_trip() {
+        let mut buf = Vec::new();
+        write_f64(100.0, &mut buf);
+        assert_eq!(buf, vec![0x40, 0x59, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        let (value, consumed) = read_f64(&buf).unwrap().unwrap();
+        assert_eq!(value, 100.0);
+        assert_eq!(consumed, 8);
+    }
+
+    #[test]
+    fn f64_incomplete() {
+        assert_eq!(read_f64(&[0, 0, 0, 0, 0, 0, 0]).unwrap(), None);
     }
 
     #[test]

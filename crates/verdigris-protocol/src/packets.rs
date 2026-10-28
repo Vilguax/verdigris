@@ -1,4 +1,8 @@
 use crate::error::ProtocolError;
+use crate::play::{
+    AcceptTeleportation, ChunkBatchReceived, decode_accept_teleportation,
+    decode_chunk_batch_received, decode_player_loaded, packet_ids as play_ids,
+};
 use crate::primitives::{read_i64, read_string, read_u16};
 use crate::varint::read_var_int;
 use crate::{MAX_ADDRESS_LEN, MAX_STRING_LEN, State};
@@ -30,13 +34,17 @@ pub struct Handshake {
     pub intent: Intent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Serverbound {
     Handshake(Handshake),
     StatusRequest,
     PingRequest { payload: i64 },
     LoginStart { name: String, uuid: u128 },
     LoginAcknowledged,
+    PlayAcceptTeleportation(AcceptTeleportation),
+    PlayerLoaded,
+    PlayChunkBatchReceived(ChunkBatchReceived),
+    PlayIgnored { id: i32 },
 }
 
 fn take_var_int(cursor: &mut &[u8]) -> Result<i32, ProtocolError> {
@@ -121,10 +129,26 @@ pub fn decode_serverbound(state: State, body: &[u8]) -> Result<Serverbound, Prot
             }
             Ok(Serverbound::LoginAcknowledged)
         }
-        (State::Configuration | State::Play, id) => {
-            Err(ProtocolError::UnknownPacketId { state, id })
-        }
+        (State::Play, _) => decode_play(id, cursor),
+        (State::Configuration, id) => Err(ProtocolError::UnknownPacketId { state, id }),
         (state, id) => Err(ProtocolError::UnknownPacketId { state, id }),
+    }
+}
+
+fn decode_play(id: i32, body: &[u8]) -> Result<Serverbound, ProtocolError> {
+    if id == play_ids::serverbound::ACCEPT_TELEPORTATION {
+        Ok(Serverbound::PlayAcceptTeleportation(
+            decode_accept_teleportation(body)?,
+        ))
+    } else if id == play_ids::serverbound::PLAYER_LOADED {
+        decode_player_loaded(body)?;
+        Ok(Serverbound::PlayerLoaded)
+    } else if id == play_ids::serverbound::CHUNK_BATCH_RECEIVED {
+        Ok(Serverbound::PlayChunkBatchReceived(
+            decode_chunk_batch_received(body)?,
+        ))
+    } else {
+        Ok(Serverbound::PlayIgnored { id })
     }
 }
 
@@ -308,6 +332,83 @@ mod tests {
         assert_eq!(
             decode_serverbound(State::Handshaking, &body),
             Err(ProtocolError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn decode_play_accept_teleportation() {
+        let mut body = Vec::new();
+        write_var_int(0x00, &mut body);
+        write_var_int(5, &mut body);
+        for value in [0.5f64, 100.0, 0.5] {
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+        body.extend_from_slice(&0.0f32.to_be_bytes());
+        body.extend_from_slice(&0.0f32.to_be_bytes());
+        match decode_serverbound(State::Play, &body).unwrap() {
+            Serverbound::PlayAcceptTeleportation(accept) => {
+                assert_eq!(accept.teleport_id, 5);
+                assert_eq!((accept.x, accept.y, accept.z), (0.5, 100.0, 0.5));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_play_player_loaded() {
+        let mut body = Vec::new();
+        write_var_int(0x2C, &mut body);
+        assert_eq!(
+            decode_serverbound(State::Play, &body).unwrap(),
+            Serverbound::PlayerLoaded
+        );
+    }
+
+    #[test]
+    fn decode_play_chunk_batch_received() {
+        let mut body = Vec::new();
+        write_var_int(0x0B, &mut body);
+        body.extend_from_slice(&8.0f32.to_be_bytes());
+        match decode_serverbound(State::Play, &body).unwrap() {
+            Serverbound::PlayChunkBatchReceived(received) => {
+                assert_eq!(received.desired_chunks_per_tick, 8.0);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_play_unknown_id_is_ignored() {
+        let mut body = Vec::new();
+        write_var_int(0x7F, &mut body);
+        body.extend_from_slice(&[0xDE, 0xAD]);
+        assert_eq!(
+            decode_serverbound(State::Play, &body).unwrap(),
+            Serverbound::PlayIgnored { id: 0x7F }
+        );
+    }
+
+    #[test]
+    fn decode_play_malformed_known_packet_is_error() {
+        let mut body = Vec::new();
+        write_var_int(0x2C, &mut body);
+        body.push(0xFF);
+        assert_eq!(
+            decode_serverbound(State::Play, &body),
+            Err(ProtocolError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn decode_configuration_unknown_id_is_error() {
+        let mut body = Vec::new();
+        write_var_int(0x7E, &mut body);
+        assert_eq!(
+            decode_serverbound(State::Configuration, &body),
+            Err(ProtocolError::UnknownPacketId {
+                state: State::Configuration,
+                id: 0x7E
+            })
         );
     }
 }

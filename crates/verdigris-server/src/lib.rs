@@ -6,14 +6,18 @@ use tokio::time::{Duration, Instant, timeout, timeout_at};
 use tracing::{Instrument, debug, error, info, info_span, warn};
 use tracing_subscriber::EnvFilter;
 
+use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
-    COMPRESSION_THRESHOLD, EncodeError, Intent, PROTOCOL_VERSION, SET_COMPRESSION_ID, Serverbound,
-    State, StatusInfo, build_compressed_packet, build_packet, client_has_core,
+    COMPRESSION_THRESHOLD, EncodeError, GAME_EVENT_WAIT_FOR_CHUNKS, Intent, PROTOCOL_VERSION,
+    SET_COMPRESSION_ID, Serverbound, State, StatusInfo, build_compressed_packet, build_packet,
+    chunk_batch_finished_payload, chunk_batch_start_payload, client_has_core,
     config_disconnect_payload, decode_compressed_frame, decode_frame, decode_known_packs,
-    decode_serverbound, known_packs_payload, login_disconnect_payload, login_success_payload,
-    network_data, offline_uuid, packet_ids, pong_payload, random_session_id, read_var_int,
-    registry_data_payload, server_known_pack, set_compression_payload, status_json,
-    status_response_payload, update_tags_payload, validate_name,
+    decode_serverbound, game_event_payload, known_packs_payload, level_chunk_with_light_payload,
+    login_disconnect_payload, login_play_payload, login_success_payload, network_data,
+    offline_uuid, packet_ids, player_position_payload, pong_payload, random_session_id,
+    read_var_int, registry_data_payload, server_known_pack, set_chunk_cache_center_payload,
+    set_compression_payload, status_json, status_response_payload, update_tags_payload,
+    validate_name,
 };
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
@@ -29,8 +33,15 @@ pub const REASON_LOGIN_TIMEOUT: &str = "login délai dépassé";
 pub const REASON_CONFIG_UNEXPECTED: &str = "paquet de configuration inattendu";
 pub const REASON_CONFIG_NOT_VANILLA: &str = "un client vanilla 26.3 est requis";
 pub const REASON_CONFIG_TIMEOUT: &str = "délai de configuration dépassé";
-pub const REASON_PLAY_WORLD_UNAVAILABLE: &str = "le monde n'est pas encore disponible";
 const LOGIN_SUCCESS_ID: i32 = 0x02;
+
+const PLAY_PLAYER_ID: i32 = 1;
+const PLAY_GAME_TYPE_SPECTATOR: i32 = 3;
+const PLAY_VIEW_DISTANCE: i32 = 4;
+const PLAY_MAX_PLAYERS: i32 = 20;
+const PLAY_TELEPORT_ID: i32 = 1;
+const PLAY_SPAWN: [f64; 3] = [0.5, 100.0, 0.5];
+const PLAY_CHUNK_REACH: i32 = 4;
 pub const REASON_PROTOCOL_ERROR_PREFIX: &str = "Paquet invalide: ";
 pub const REASON_CONNECTION_LOST: &str = "Connexion interrompue";
 pub const REASON_READ_TIMEOUT: &str = "Délai de lecture dépassé";
@@ -288,6 +299,12 @@ async fn dispatch(
         Serverbound::LoginAcknowledged => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
         }
+        Serverbound::PlayAcceptTeleportation(_)
+        | Serverbound::PlayerLoaded
+        | Serverbound::PlayChunkBatchReceived(_)
+        | Serverbound::PlayIgnored { .. } => {
+            Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
+        }
     }
 }
 
@@ -529,8 +546,201 @@ async fn run_configuration(
     }
 
     set_state(state, State::Play);
-    info!("entrée en play");
-    disconnect(stream, framing, *state, REASON_PLAY_WORLD_UNAVAILABLE).await;
+    info!("entrée en jeu");
+    enter_play(stream, framing, state, buf, chunk).await;
+}
+
+async fn enter_play(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: &mut State,
+    buf: &mut Vec<u8>,
+    chunk: &mut [u8],
+) {
+    let login = match login_play_payload(
+        PLAY_PLAYER_ID,
+        PLAY_VIEW_DISTANCE,
+        PLAY_VIEW_DISTANCE,
+        PLAY_GAME_TYPE_SPECTATOR,
+        PLAY_MAX_PLAYERS,
+    ) {
+        Ok(payload) => payload,
+        Err(err) => {
+            let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
+            disconnect(stream, framing, *state, &reason).await;
+            return;
+        }
+    };
+    if write_packet(stream, framing, *state, play_cb::LOGIN, &login)
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let position = player_position_payload(PLAY_TELEPORT_ID, PLAY_SPAWN, [0.0; 3], 0.0, 0.0, 0);
+    if write_packet(stream, framing, *state, play_cb::PLAYER_POSITION, &position)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    info!(
+        x = PLAY_SPAWN[0],
+        y = PLAY_SPAWN[1],
+        z = PLAY_SPAWN[2],
+        teleport_id = PLAY_TELEPORT_ID,
+        "position de spawn"
+    );
+
+    let game_event = game_event_payload(GAME_EVENT_WAIT_FOR_CHUNKS, 0.0);
+    if write_packet(stream, framing, *state, play_cb::GAME_EVENT, &game_event)
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let center = set_chunk_cache_center_payload(0, 0);
+    if write_packet(
+        stream,
+        framing,
+        *state,
+        play_cb::SET_CHUNK_CACHE_CENTER,
+        &center,
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
+    if write_packet(
+        stream,
+        framing,
+        *state,
+        play_cb::CHUNK_BATCH_START,
+        &chunk_batch_start_payload(),
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
+    let mut sent: i32 = 0;
+    for x in -PLAY_CHUNK_REACH..=PLAY_CHUNK_REACH {
+        for z in -PLAY_CHUNK_REACH..=PLAY_CHUNK_REACH {
+            let payload = match level_chunk_with_light_payload(x, z) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
+                    disconnect(stream, framing, *state, &reason).await;
+                    return;
+                }
+            };
+            if write_packet(
+                stream,
+                framing,
+                *state,
+                play_cb::LEVEL_CHUNK_WITH_LIGHT,
+                &payload,
+            )
+            .await
+            .is_err()
+            {
+                return;
+            }
+            sent += 1;
+        }
+    }
+
+    if write_packet(
+        stream,
+        framing,
+        *state,
+        play_cb::CHUNK_BATCH_FINISHED,
+        &chunk_batch_finished_payload(sent),
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+    info!(chunks = sent, "monde vide envoyé");
+
+    run_play(stream, framing, state, buf, chunk).await;
+}
+
+async fn run_play(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: &mut State,
+    buf: &mut Vec<u8>,
+    chunk: &mut [u8],
+) {
+    let threshold = match framing {
+        Framing::Compressed(threshold) => *threshold,
+        Framing::Uncompressed => {
+            disconnect(stream, framing, *state, REASON_CONFIG_UNEXPECTED).await;
+            return;
+        }
+    };
+
+    loop {
+        let deadline = Instant::now() + READ_TIMEOUT;
+        match read_config_packet(stream, threshold, buf, chunk, deadline).await {
+            ReadOutcome::Packet(body) => match decode_serverbound(State::Play, &body) {
+                Ok(packet) => handle_play_packet(packet),
+                Err(err) => {
+                    let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
+                    disconnect(stream, framing, *state, &reason).await;
+                    return;
+                }
+            },
+            ReadOutcome::Eof => {
+                disconnect(stream, framing, *state, REASON_CONNECTION_LOST).await;
+                return;
+            }
+            ReadOutcome::Protocol(reason) => {
+                disconnect(stream, framing, *state, &reason).await;
+                return;
+            }
+            ReadOutcome::Timeout => {
+                disconnect(stream, framing, *state, REASON_READ_TIMEOUT).await;
+                return;
+            }
+        }
+    }
+}
+
+fn handle_play_packet(packet: Serverbound) {
+    match packet {
+        Serverbound::PlayAcceptTeleportation(accept) => {
+            if accept.teleport_id == PLAY_TELEPORT_ID {
+                info!(teleport_id = accept.teleport_id, "téléportation confirmée");
+            } else {
+                warn!(
+                    recu = accept.teleport_id,
+                    attendu = PLAY_TELEPORT_ID,
+                    "téléportation inattendue"
+                );
+            }
+        }
+        Serverbound::PlayerLoaded => info!("joueur chargé"),
+        Serverbound::PlayChunkBatchReceived(received) => {
+            info!(
+                chunks_par_tick = received.desired_chunks_per_tick as f64,
+                "lot de chunks reçu"
+            );
+        }
+        Serverbound::PlayIgnored { id } => {
+            trace_packet("paquet play ignoré", State::Play, id, 0);
+        }
+        other => {
+            debug!(packet = ?other, "paquet play inattendu ignoré");
+        }
+    }
 }
 
 async fn write_packet(

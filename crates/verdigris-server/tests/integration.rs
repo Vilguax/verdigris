@@ -6,12 +6,10 @@ use tokio::time::{Duration, timeout};
 
 use verdigris_protocol::{
     MAX_STRING_LEN, MAX_USERNAME_LEN, decode_compressed_frame, decode_frame,
-    encode_compressed_frame, encode_frame, offline_uuid, read_i64, read_string, read_var_int,
-    write_i64, write_string, write_u16, write_var_int,
+    encode_compressed_frame, encode_frame, offline_uuid, read_f64, read_i64, read_string,
+    read_var_int, write_f32, write_f64, write_i64, write_string, write_u16, write_var_int,
 };
-use verdigris_server::{
-    REASON_CONFIG_NOT_VANILLA, REASON_LOGIN_INVALID_NAME, REASON_PLAY_WORLD_UNAVAILABLE, run,
-};
+use verdigris_server::{REASON_CONFIG_NOT_VANILLA, REASON_LOGIN_INVALID_NAME, run};
 
 async fn spawn_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -85,6 +83,71 @@ fn compressed_finish_configuration_frame() -> Vec<u8> {
     let mut body = Vec::new();
     write_var_int(0x03, &mut body);
     encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_accept_teleportation_frame(
+    teleport_id: i32,
+    x: f64,
+    y: f64,
+    z: f64,
+    yaw: f32,
+    pitch: f32,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x00, &mut body);
+    write_var_int(teleport_id, &mut body);
+    write_f64(x, &mut body);
+    write_f64(y, &mut body);
+    write_f64(z, &mut body);
+    write_f32(yaw, &mut body);
+    write_f32(pitch, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_player_loaded_frame() -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x2C, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_unknown_play_frame() -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x7F, &mut body);
+    body.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+async fn drive_to_play(client: &mut TcpStream, buf: &mut Vec<u8>) {
+    drive_to_login_acknowledged(client, buf, "Verdi").await;
+
+    let (known_packs_id, known_packs_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(known_packs_id, 0x0F);
+    assert_core_known_packs(&known_packs_body);
+
+    client
+        .write_all(&compressed_known_packs_frame(&[(
+            "minecraft",
+            "core",
+            "26.3",
+        )]))
+        .await
+        .unwrap();
+
+    for _ in 0..verdigris_protocol::network::network_data().registries.len() {
+        let (registry_id, _) = read_one_compressed_frame(client, buf).await;
+        assert_eq!(registry_id, 0x07);
+    }
+
+    let (tags_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(tags_id, 0x0E);
+
+    let (finish_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(finish_id, 0x03);
+
+    client
+        .write_all(&compressed_finish_configuration_frame())
+        .await
+        .unwrap();
 }
 
 async fn drive_to_login_acknowledged(client: &mut TcpStream, buf: &mut Vec<u8>, name: &str) {
@@ -259,64 +322,104 @@ async fn offline_login_success_carries_offline_identity() {
 }
 
 #[tokio::test]
-async fn configuration_full_sequence_reaches_play_disconnect() {
+async fn play_sequence_sends_empty_world_and_stays_open() {
     let addr = spawn_server().await;
     let mut client = TcpStream::connect(addr).await.unwrap();
 
     let mut buf = Vec::new();
-    drive_to_login_acknowledged(&mut client, &mut buf, "Verdi").await;
+    drive_to_play(&mut client, &mut buf).await;
 
-    let (known_packs_id, known_packs_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    let (login_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
     assert_eq!(
-        known_packs_id, 0x0F,
-        "configuration starts with clientbound Known Packs 0x0F"
+        login_id, 0x32,
+        "entrée en play commence par Login play 0x32"
     );
-    assert_core_known_packs(&known_packs_body);
 
-    client
-        .write_all(&compressed_known_packs_frame(&[(
-            "minecraft",
-            "core",
-            "26.3",
-        )]))
-        .await
-        .unwrap();
+    let (position_id, position_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(
+        position_id, 0x49,
+        "Login play is followed by Player Position"
+    );
+    let mut cursor = &position_body[..];
+    let (teleport_id, consumed) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[consumed..];
+    let (x, consumed) = read_f64(cursor).unwrap().unwrap();
+    cursor = &cursor[consumed..];
+    let (y, consumed) = read_f64(cursor).unwrap().unwrap();
+    cursor = &cursor[consumed..];
+    let (z, _) = read_f64(cursor).unwrap().unwrap();
+    assert_eq!(
+        (x, y, z),
+        (0.5, 100.0, 0.5),
+        "spawn position is (0.5,100,0.5)"
+    );
 
-    for index in 0..verdigris_protocol::network::network_data().registries.len() {
-        let (registry_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    let (game_event_id, game_event_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(game_event_id, 0x27, "position is followed by Game Event");
+    assert_eq!(
+        game_event_body[0], 13,
+        "game event type is 13 (wait for chunks)"
+    );
+
+    let (center_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(
+        center_id, 0x60,
+        "Game Event is followed by Set Chunk Cache Center"
+    );
+
+    let (batch_start_id, batch_start_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(
+        batch_start_id, 0x0C,
+        "cache center is followed by Chunk Batch Start"
+    );
+    assert!(
+        batch_start_body.is_empty(),
+        "Chunk Batch Start has no payload"
+    );
+
+    for index in 0..81 {
+        let (chunk_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
         assert_eq!(
-            registry_id, 0x07,
-            "registry data #{index} must be Registry Data 0x07"
+            chunk_id, 0x2E,
+            "chunk #{index} must be Level Chunk With Light 0x2E"
         );
     }
 
-    let (tags_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
-    assert_eq!(tags_id, 0x0E, "registries are followed by Update Tags 0x0E");
-
-    let (finish_id, finish_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    let (batch_finished_id, batch_finished_body) =
+        read_one_compressed_frame(&mut client, &mut buf).await;
     assert_eq!(
-        finish_id, 0x03,
-        "tags are followed by Finish Configuration 0x03"
+        batch_finished_id, 0x0B,
+        "chunks are followed by Chunk Batch Finished"
     );
-    assert!(
-        finish_body.is_empty(),
-        "Finish Configuration has no payload"
-    );
+    let (count, _) = read_var_int(&batch_finished_body).unwrap().unwrap();
+    assert_eq!(count, 81, "Chunk Batch Finished reports the 81 chunks sent");
 
     client
-        .write_all(&compressed_finish_configuration_frame())
+        .write_all(&compressed_accept_teleportation_frame(
+            teleport_id,
+            0.5,
+            100.0,
+            0.5,
+            0.0,
+            0.0,
+        ))
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_player_loaded_frame())
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_unknown_play_frame())
         .await
         .unwrap();
 
-    let (disconnect_id, disconnect_body) = read_one_compressed_frame(&mut client, &mut buf).await;
-    assert_eq!(disconnect_id, 0x20, "play disconnect is id 0x20");
-    assert_eq!(disconnect_body[0], 0x08, "play disconnect is an nbt string");
+    let mut scratch = [0u8; 64];
+    let outcome = timeout(Duration::from_millis(1000), client.read(&mut scratch)).await;
     assert!(
-        contains_subslice(&disconnect_body, REASON_PLAY_WORLD_UNAVAILABLE.as_bytes()),
-        "play disconnect must say the world is unavailable"
+        outcome.is_err(),
+        "connection must stay open in play without sending a disconnect or FIN"
     );
-
-    expect_clean_eof(&mut client).await;
 }
 
 #[tokio::test]
