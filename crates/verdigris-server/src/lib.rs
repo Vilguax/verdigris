@@ -1,15 +1,17 @@
-use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, Instant, timeout, timeout_at};
+use tracing::{Instrument, debug, error, info, info_span, warn};
+use tracing_subscriber::EnvFilter;
 
 use verdigris_protocol::{
     COMPRESSION_THRESHOLD, EncodeError, Intent, PROTOCOL_VERSION, SET_COMPRESSION_ID, Serverbound,
     State, StatusInfo, build_compressed_packet, build_packet, config_disconnect_payload,
     decode_compressed_frame, decode_frame, decode_serverbound, login_disconnect_payload,
-    login_success_payload, offline_uuid, pong_payload, random_session_id, set_compression_payload,
-    status_json, status_response_payload, validate_name,
+    login_success_payload, offline_uuid, pong_payload, random_session_id, read_var_int,
+    set_compression_payload, status_json, status_response_payload, validate_name,
 };
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
@@ -58,27 +60,73 @@ impl core::fmt::Display for WriteError {
     }
 }
 
+pub fn build_env_filter(value: Option<&str>) -> EnvFilter {
+    match value {
+        Some(raw) if !raw.trim().is_empty() => {
+            EnvFilter::try_new(raw).unwrap_or_else(|_| EnvFilter::new("info"))
+        }
+        _ => EnvFilter::new("info"),
+    }
+}
+
+pub fn init_logging() {
+    let filter = build_env_filter(std::env::var("VERDIGRIS_LOG").ok().as_deref());
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+}
+
+fn peek_id(body: &[u8]) -> i32 {
+    match read_var_int(body) {
+        Ok(Some((id, _))) => id,
+        _ => -1,
+    }
+}
+
+fn trace_packet(message: &'static str, state: State, id: i32, size: usize) {
+    debug!(state = ?state, id = %format!("{id:#x}"), size, "{message}");
+}
+
+fn set_state(state: &mut State, next: State) {
+    *state = next;
+    info!(status = ?next, "transition d'état");
+}
+
 pub async fn serve(bind: &str) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
     run(listener).await
 }
 
 pub async fn run(listener: TcpListener) -> std::io::Result<()> {
+    let counter = AtomicU64::new(0);
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
-                tokio::spawn(async move {
-                    handle_connection(stream, peer).await;
-                });
+                let conn_id = counter.fetch_add(1, Ordering::Relaxed);
+                let span = info_span!("conn", conn_id, peer = %peer);
+                tokio::spawn(
+                    async move {
+                        handle_connection(stream).await;
+                    }
+                    .instrument(span),
+                );
             }
             Err(err) => {
-                eprintln!("[debug] accept error: {err}");
+                error!("accept error: {err}");
             }
         }
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, _peer: SocketAddr) {
+async fn handle_connection(stream: TcpStream) {
+    let started = Instant::now();
+    info!("connexion acceptée");
+    serve_connection(stream).await;
+    info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "fin de connexion"
+    );
+}
+
+async fn serve_connection(mut stream: TcpStream) {
     let mut buf: Vec<u8> = Vec::new();
     let mut state = State::Handshaking;
     let mut framing = Framing::Uncompressed;
@@ -97,6 +145,7 @@ async fn handle_connection(mut stream: TcpStream, _peer: SocketAddr) {
                 }
             };
             buf.drain(..consumed);
+            trace_packet("paquet reçu", state, peek_id(&body), body.len());
             match dispatch(
                 &mut stream,
                 &mut state,
@@ -170,25 +219,32 @@ async fn dispatch(
     };
 
     match packet {
-        Serverbound::Handshake(handshake) => match handshake.intent {
-            Intent::Status => {
-                *state = State::Status;
-                Next::Continue
-            }
-            Intent::Login => {
-                *state = State::Login;
-                if handshake.protocol_version != PROTOCOL_VERSION {
-                    Next::Terminate(REASON_VERSION_INCOMPATIBLE.to_owned())
-                } else {
+        Serverbound::Handshake(handshake) => {
+            info!(
+                protocol = handshake.protocol_version,
+                intent = ?handshake.intent,
+                "handshake"
+            );
+            match handshake.intent {
+                Intent::Status => {
+                    set_state(state, State::Status);
                     Next::Continue
                 }
+                Intent::Login => {
+                    set_state(state, State::Login);
+                    if handshake.protocol_version != PROTOCOL_VERSION {
+                        Next::Terminate(REASON_VERSION_INCOMPATIBLE.to_owned())
+                    } else {
+                        Next::Continue
+                    }
+                }
+                Intent::Transfer => {
+                    set_state(state, State::Login);
+                    Next::Terminate(REASON_TRANSFER_UNSUPPORTED.to_owned())
+                }
+                Intent::Unknown(_) => Next::Terminate(String::new()),
             }
-            Intent::Transfer => {
-                *state = State::Login;
-                Next::Terminate(REASON_TRANSFER_UNSUPPORTED.to_owned())
-            }
-            Intent::Unknown(_) => Next::Terminate(String::new()),
-        },
+        }
         Serverbound::StatusRequest => {
             let info = StatusInfo {
                 motd: DEFAULT_MOTD,
@@ -197,7 +253,7 @@ async fn dispatch(
             };
             let json = status_json(&info);
             match status_response_payload(&json) {
-                Ok(payload) => match write_packet(stream, framing, 0x00, &payload).await {
+                Ok(payload) => match write_packet(stream, framing, *state, 0x00, &payload).await {
                     Ok(()) => Next::Continue,
                     Err(_) => Next::Terminate(String::new()),
                 },
@@ -205,11 +261,11 @@ async fn dispatch(
             }
         }
         Serverbound::PingRequest { payload } => {
-            let _ = write_packet(stream, framing, 0x01, &pong_payload(payload)).await;
+            let _ = write_packet(stream, framing, *state, 0x01, &pong_payload(payload)).await;
             Next::Terminate(String::new())
         }
         Serverbound::LoginStart { name, .. } => {
-            begin_login(stream, framing, awaiting_ack, &name).await
+            begin_login(stream, framing, *state, awaiting_ack, &name).await
         }
         Serverbound::LoginAcknowledged => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
@@ -220,24 +276,27 @@ async fn dispatch(
 async fn begin_login(
     stream: &mut TcpStream,
     framing: &mut Framing,
+    state: State,
     awaiting_ack: &mut bool,
     name: &str,
 ) -> Next {
+    info!(player = name, "login start");
     if validate_name(name).is_err() {
         return Next::Terminate(REASON_LOGIN_INVALID_NAME.to_owned());
     }
     let set_compression = set_compression_payload(COMPRESSION_THRESHOLD);
-    if write_packet(stream, framing, SET_COMPRESSION_ID, &set_compression)
+    if write_packet(stream, framing, state, SET_COMPRESSION_ID, &set_compression)
         .await
         .is_err()
     {
         return Next::Terminate(String::new());
     }
     *framing = Framing::Compressed(COMPRESSION_THRESHOLD as usize);
+    info!(threshold = COMPRESSION_THRESHOLD, "compression activée");
     let uuid = offline_uuid(name);
     let session_id = random_session_id();
     let payload = login_success_payload(uuid, name, session_id);
-    match write_packet(stream, framing, LOGIN_SUCCESS_ID, &payload).await {
+    match write_packet(stream, framing, state, LOGIN_SUCCESS_ID, &payload).await {
         Ok(()) => {
             *awaiting_ack = true;
             Next::Continue
@@ -249,7 +308,7 @@ async fn begin_login(
 fn finish_login(state: &mut State, body: &[u8]) -> Next {
     match decode_serverbound(State::Login, body) {
         Ok(Serverbound::LoginAcknowledged) => {
-            *state = State::Configuration;
+            set_state(state, State::Configuration);
             Next::Terminate(REASON_CONFIG_UNAVAILABLE.to_owned())
         }
         _ => Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned()),
@@ -259,9 +318,11 @@ fn finish_login(state: &mut State, body: &[u8]) -> Next {
 async fn write_packet(
     stream: &mut TcpStream,
     framing: &Framing,
+    state: State,
     id: i32,
     payload: &[u8],
 ) -> Result<(), WriteError> {
+    trace_packet("paquet émis", state, id, payload.len());
     let framed = match framing {
         Framing::Uncompressed => build_packet(id, payload).map_err(WriteError::Encode)?,
         Framing::Compressed(threshold) => {
@@ -273,6 +334,7 @@ async fn write_packet(
 }
 
 async fn disconnect(stream: &mut TcpStream, framing: &Framing, state: State, reason: &str) {
+    info!(reason, "déconnexion");
     let packet = match state {
         State::Login => Some((0x00, login_disconnect_payload(reason))),
         State::Configuration => Some((0x02, config_disconnect_payload(reason))),
@@ -283,7 +345,7 @@ async fn disconnect(stream: &mut TcpStream, framing: &Framing, state: State, rea
     let graceful = match packet {
         Some((id, payload)) => {
             let sent = timeout_at(deadline, async {
-                write_packet(stream, framing, id, &payload).await?;
+                write_packet(stream, framing, state, id, &payload).await?;
                 stream.flush().await.map_err(WriteError::Io)?;
                 Ok::<(), WriteError>(())
             })
@@ -291,7 +353,7 @@ async fn disconnect(stream: &mut TcpStream, framing: &Framing, state: State, rea
             match sent {
                 Ok(Ok(())) => true,
                 Ok(Err(err)) => {
-                    eprintln!("[debug] disconnect write failed: {err}");
+                    warn!("disconnect write failed: {err}");
                     false
                 }
                 Err(_) => false,
@@ -316,5 +378,22 @@ async fn drain(stream: &mut TcpStream, deadline: Instant) {
             Ok(Err(_)) => break,
             Err(_) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_env_filter;
+
+    #[test]
+    fn invalid_filter_falls_back_to_info() {
+        let invalid = build_env_filter(Some("!!!nope"));
+        let default = build_env_filter(None);
+        assert_eq!(invalid.to_string(), default.to_string());
+    }
+
+    #[test]
+    fn valid_filter_is_preserved() {
+        assert_eq!(build_env_filter(Some("debug")).to_string(), "debug");
     }
 }
