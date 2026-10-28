@@ -1,7 +1,7 @@
 use crate::error::ProtocolError;
 use crate::primitives::{read_i64, read_string, read_u16};
 use crate::varint::read_var_int;
-use crate::{MAX_ADDRESS_LEN, MAX_USERNAME_LEN, State};
+use crate::{MAX_ADDRESS_LEN, MAX_STRING_LEN, State};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intent {
@@ -36,6 +36,7 @@ pub enum Serverbound {
     StatusRequest,
     PingRequest { payload: i64 },
     LoginStart { name: String, uuid: u128 },
+    LoginAcknowledged,
 }
 
 fn take_var_int(cursor: &mut &[u8]) -> Result<i32, ProtocolError> {
@@ -110,9 +111,15 @@ pub fn decode_serverbound(state: State, body: &[u8]) -> Result<Serverbound, Prot
             Ok(Serverbound::PingRequest { payload })
         }
         (State::Login, 0x00) => {
-            let name = take_string(&mut cursor, MAX_USERNAME_LEN)?;
+            let name = take_string(&mut cursor, MAX_STRING_LEN)?;
             let uuid = take_u128(&mut cursor)?;
             Ok(Serverbound::LoginStart { name, uuid })
+        }
+        (State::Login, 0x03) => {
+            if !cursor.is_empty() {
+                return Err(ProtocolError::TrailingBytes);
+            }
+            Ok(Serverbound::LoginAcknowledged)
         }
         (state, id) => Err(ProtocolError::UnknownPacketId { state, id }),
     }
@@ -234,6 +241,19 @@ mod tests {
     }
 
     #[test]
+    fn decode_login_start_accepts_name_over_sixteen() {
+        let long = "a".repeat(17);
+        let mut body = Vec::new();
+        write_var_int(0x00, &mut body);
+        write_string(&long, &mut body);
+        body.extend_from_slice(&[0u8; 16]);
+        match decode_serverbound(State::Login, &body).unwrap() {
+            Serverbound::LoginStart { name, .. } => assert_eq!(name, long),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn login_start_missing_uuid_is_eof() {
         let mut body = Vec::new();
         write_var_int(0x00, &mut body);
@@ -241,6 +261,27 @@ mod tests {
         assert_eq!(
             decode_serverbound(State::Login, &body),
             Err(ProtocolError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn decode_login_acknowledged() {
+        let mut body = Vec::new();
+        write_var_int(0x03, &mut body);
+        assert_eq!(
+            decode_serverbound(State::Login, &body).unwrap(),
+            Serverbound::LoginAcknowledged
+        );
+    }
+
+    #[test]
+    fn login_acknowledged_with_trailing_rejected() {
+        let mut body = Vec::new();
+        write_var_int(0x03, &mut body);
+        body.push(0xFF);
+        assert_eq!(
+            decode_serverbound(State::Login, &body),
+            Err(ProtocolError::TrailingBytes)
         );
     }
 

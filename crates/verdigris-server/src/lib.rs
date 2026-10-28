@@ -7,7 +7,8 @@ use tokio::time::{Duration, Instant, timeout, timeout_at};
 use verdigris_protocol::{
     EncodeError, Intent, PROTOCOL_VERSION, Serverbound, State, StatusInfo, build_packet,
     config_disconnect_payload, decode_frame, decode_serverbound, login_disconnect_payload,
-    pong_payload, status_json, status_response_payload,
+    login_success_payload, offline_uuid, pong_payload, random_session_id, status_json,
+    status_response_payload, validate_name,
 };
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
@@ -16,8 +17,13 @@ pub const DEFAULT_MAX_PLAYERS: i32 = 20;
 
 pub const REASON_VERSION_INCOMPATIBLE: &str =
     "Version incompatible: ce serveur attend Minecraft 26.3 (protocole 777)";
-pub const REASON_LOGIN_UNAVAILABLE: &str = "La connexion des joueurs n'est pas encore disponible";
 pub const REASON_TRANSFER_UNSUPPORTED: &str = "Transfert non supporté";
+pub const REASON_LOGIN_INVALID_NAME: &str = "login nom invalide";
+pub const REASON_LOGIN_UNEXPECTED_PACKET: &str = "login paquet inattendu";
+pub const REASON_LOGIN_TIMEOUT: &str = "login délai dépassé";
+pub const REASON_CONFIG_UNAVAILABLE: &str =
+    "la configuration du serveur n'est pas encore disponible";
+const LOGIN_SUCCESS_ID: i32 = 0x02;
 pub const REASON_PROTOCOL_ERROR_PREFIX: &str = "Paquet invalide: ";
 pub const REASON_CONNECTION_LOST: &str = "Connexion interrompue";
 pub const REASON_READ_TIMEOUT: &str = "Délai de lecture dépassé";
@@ -69,6 +75,7 @@ pub async fn run(listener: TcpListener) -> std::io::Result<()> {
 async fn handle_connection(mut stream: TcpStream, _peer: SocketAddr) {
     let mut buf: Vec<u8> = Vec::new();
     let mut state = State::Handshaking;
+    let mut awaiting_ack = false;
     let mut chunk = [0u8; READ_CHUNK];
 
     loop {
@@ -83,7 +90,7 @@ async fn handle_connection(mut stream: TcpStream, _peer: SocketAddr) {
                 }
             };
             buf.drain(..consumed);
-            match dispatch(&mut stream, &mut state, &body).await {
+            match dispatch(&mut stream, &mut state, &mut awaiting_ack, &body).await {
                 Next::Continue => {}
                 Next::Terminate(reason) => {
                     disconnect(&mut stream, state, &reason).await;
@@ -105,7 +112,12 @@ async fn handle_connection(mut stream: TcpStream, _peer: SocketAddr) {
                 return;
             }
             Err(_) => {
-                disconnect(&mut stream, state, REASON_READ_TIMEOUT).await;
+                let reason = if awaiting_ack {
+                    REASON_LOGIN_TIMEOUT
+                } else {
+                    REASON_READ_TIMEOUT
+                };
+                disconnect(&mut stream, state, reason).await;
                 return;
             }
         };
@@ -113,7 +125,16 @@ async fn handle_connection(mut stream: TcpStream, _peer: SocketAddr) {
     }
 }
 
-async fn dispatch(stream: &mut TcpStream, state: &mut State, body: &[u8]) -> Next {
+async fn dispatch(
+    stream: &mut TcpStream,
+    state: &mut State,
+    awaiting_ack: &mut bool,
+    body: &[u8],
+) -> Next {
+    if *awaiting_ack {
+        return finish_login(state, body);
+    }
+
     let packet = match decode_serverbound(*state, body) {
         Ok(packet) => packet,
         Err(err) => return Next::Terminate(format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}")),
@@ -158,7 +179,36 @@ async fn dispatch(stream: &mut TcpStream, state: &mut State, body: &[u8]) -> Nex
             let _ = write_packet(stream, 0x01, &pong_payload(payload)).await;
             Next::Terminate(String::new())
         }
-        Serverbound::LoginStart { .. } => Next::Terminate(REASON_LOGIN_UNAVAILABLE.to_owned()),
+        Serverbound::LoginStart { name, .. } => begin_login(stream, awaiting_ack, &name).await,
+        Serverbound::LoginAcknowledged => {
+            Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
+        }
+    }
+}
+
+async fn begin_login(stream: &mut TcpStream, awaiting_ack: &mut bool, name: &str) -> Next {
+    if validate_name(name).is_err() {
+        return Next::Terminate(REASON_LOGIN_INVALID_NAME.to_owned());
+    }
+    let uuid = offline_uuid(name);
+    let session_id = random_session_id();
+    let payload = login_success_payload(uuid, name, session_id);
+    match write_packet(stream, LOGIN_SUCCESS_ID, &payload).await {
+        Ok(()) => {
+            *awaiting_ack = true;
+            Next::Continue
+        }
+        Err(_) => Next::Terminate(String::new()),
+    }
+}
+
+fn finish_login(state: &mut State, body: &[u8]) -> Next {
+    match decode_serverbound(State::Login, body) {
+        Ok(Serverbound::LoginAcknowledged) => {
+            *state = State::Configuration;
+            Next::Terminate(REASON_CONFIG_UNAVAILABLE.to_owned())
+        }
+        _ => Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned()),
     }
 }
 

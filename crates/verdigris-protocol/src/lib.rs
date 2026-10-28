@@ -1,6 +1,7 @@
 pub mod clientbound;
 pub mod error;
 pub mod framing;
+pub mod login;
 pub mod packets;
 pub mod primitives;
 pub mod status;
@@ -29,6 +30,9 @@ pub use clientbound::{
 };
 pub use error::ProtocolError;
 pub use framing::{decode_frame, encode_frame};
+pub use login::{
+    InvalidName, login_success_payload, offline_uuid, random_session_id, validate_name,
+};
 pub use packets::{Handshake, Intent, Serverbound, decode_serverbound};
 pub use primitives::{read_i64, read_string, read_u16, write_i64, write_string, write_u16};
 pub use status::{

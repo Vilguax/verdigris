@@ -5,10 +5,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, timeout};
 
 use verdigris_protocol::{
-    MAX_STRING_LEN, decode_frame, encode_frame, read_i64, read_string, read_var_int, write_i64,
-    write_string, write_u16, write_var_int,
+    MAX_STRING_LEN, MAX_USERNAME_LEN, decode_frame, encode_frame, offline_uuid, read_i64,
+    read_string, read_var_int, write_i64, write_string, write_u16, write_var_int,
 };
-use verdigris_server::{REASON_LOGIN_UNAVAILABLE, run};
+use verdigris_server::{REASON_CONFIG_UNAVAILABLE, REASON_LOGIN_INVALID_NAME, run};
 
 async fn spawn_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -47,6 +47,12 @@ fn login_start_frame(name: &str) -> Vec<u8> {
     write_var_int(0x00, &mut body);
     write_string(name, &mut body);
     body.extend_from_slice(&[0u8; 16]);
+    encode_frame(&body)
+}
+
+fn login_acknowledged_frame() -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x03, &mut body);
     encode_frame(&body)
 }
 
@@ -111,39 +117,52 @@ async fn partial_handshake_is_buffered() {
 }
 
 #[tokio::test]
-async fn refused_login_does_not_affect_status() {
-    let addr = spawn_server().await;
-
-    let mut bad = TcpStream::connect(addr).await.unwrap();
-    bad.write_all(&handshake_frame(2)).await.unwrap();
-    bad.write_all(&login_start_frame("Verdi")).await.unwrap();
-    bad.shutdown().await.unwrap();
-    let (id, _body) = read_one_frame(&mut bad).await;
-    assert_eq!(id, 0x00, "login intent must receive a disconnect packet");
-
-    let mut good = TcpStream::connect(addr).await.unwrap();
-    good.write_all(&handshake_frame(1)).await.unwrap();
-    good.write_all(&status_request_frame()).await.unwrap();
-    let (status_id, status_body) = read_one_frame(&mut good).await;
-    assert_eq!(status_id, 0x00);
-    let (json, _) = read_string(&status_body, MAX_STRING_LEN).unwrap().unwrap();
-    assert!(json.contains("\"name\":\"26.3\""));
-}
-
-#[tokio::test]
-async fn login_refused_with_clean_shutdown() {
+async fn offline_login_success_then_configuration_disconnect() {
     let addr = spawn_server().await;
     let mut client = TcpStream::connect(addr).await.unwrap();
 
     client.write_all(&handshake_frame(2)).await.unwrap();
     client.write_all(&login_start_frame("Verdi")).await.unwrap();
-    client.shutdown().await.unwrap();
 
-    let (id, body) = read_one_frame(&mut client).await;
-    assert_eq!(id, 0x00, "login refusal must be a Disconnect 0x00");
-    let (json, _) = read_string(&body, MAX_STRING_LEN).unwrap().unwrap();
-    assert!(json.contains(REASON_LOGIN_UNAVAILABLE));
-    assert!(json.starts_with("{\"text\":\""));
+    let (success_id, success_body) = read_one_frame(&mut client).await;
+    assert_eq!(
+        success_id, 0x02,
+        "login start must yield Login Success 0x02"
+    );
+
+    let mut uuid_bytes = [0u8; 16];
+    uuid_bytes.copy_from_slice(&success_body[..16]);
+    assert_eq!(u128::from_be_bytes(uuid_bytes), offline_uuid("Verdi"));
+
+    let mut cursor = &success_body[16..];
+    let (name, consumed) = read_string(cursor, MAX_USERNAME_LEN).unwrap().unwrap();
+    assert_eq!(name, "Verdi");
+    cursor = &cursor[consumed..];
+
+    let (properties, consumed) = read_var_int(cursor).unwrap().unwrap();
+    assert_eq!(properties, 0, "offline login carries zero properties");
+    cursor = &cursor[consumed..];
+
+    assert_eq!(cursor.len(), 16, "session id is a 16-byte uuid");
+    assert_eq!(cursor[6] & 0xF0, 0x40, "session id must be uuid v4");
+    assert_eq!(
+        cursor[8] & 0xC0,
+        0x80,
+        "session id must use the ietf variant"
+    );
+
+    client.write_all(&login_acknowledged_frame()).await.unwrap();
+
+    let (disconnect_id, disconnect_body) = read_one_frame(&mut client).await;
+    assert_eq!(disconnect_id, 0x02, "configuration disconnect is id 0x02");
+    assert_eq!(
+        disconnect_body[0], 0x08,
+        "config disconnect is an nbt string"
+    );
+    assert!(
+        contains_subslice(&disconnect_body, REASON_CONFIG_UNAVAILABLE.as_bytes()),
+        "configuration disconnect must carry the unavailable reason"
+    );
 
     let mut scratch = [0u8; 64];
     loop {
@@ -153,6 +172,68 @@ async fn login_refused_with_clean_shutdown() {
             Err(err) => panic!("expected clean EOF, got {err}"),
         }
     }
+}
+
+#[tokio::test]
+async fn offline_login_rejects_invalid_name() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    client.write_all(&handshake_frame(2)).await.unwrap();
+    client
+        .write_all(&login_start_frame("Bad Name"))
+        .await
+        .unwrap();
+
+    let (id, body) = read_one_frame(&mut client).await;
+    assert_eq!(id, 0x00, "invalid name refusal is a login Disconnect 0x00");
+    let (json, _) = read_string(&body, MAX_STRING_LEN).unwrap().unwrap();
+    assert!(json.starts_with("{\"text\":\""));
+    assert!(json.contains(REASON_LOGIN_INVALID_NAME));
+}
+
+#[tokio::test]
+async fn offline_login_rejects_name_over_sixteen() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    client.write_all(&handshake_frame(2)).await.unwrap();
+    client
+        .write_all(&login_start_frame(&"a".repeat(17)))
+        .await
+        .unwrap();
+
+    let (id, body) = read_one_frame(&mut client).await;
+    assert_eq!(
+        id, 0x00,
+        "oversized name refusal is a login Disconnect 0x00"
+    );
+    let (json, _) = read_string(&body, MAX_STRING_LEN).unwrap().unwrap();
+    assert!(json.starts_with("{\"text\":\""));
+    assert!(json.contains(REASON_LOGIN_INVALID_NAME));
+}
+
+#[tokio::test]
+async fn offline_login_rejects_unexpected_packet_after_success() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    client.write_all(&handshake_frame(2)).await.unwrap();
+    client.write_all(&login_start_frame("Verdi")).await.unwrap();
+
+    let (success_id, _) = read_one_frame(&mut client).await;
+    assert_eq!(success_id, 0x02);
+
+    client.write_all(&login_start_frame("Verdi")).await.unwrap();
+
+    let (id, body) = read_one_frame(&mut client).await;
+    assert_eq!(id, 0x00, "unexpected packet refusal stays in login state");
+    let (json, _) = read_string(&body, MAX_STRING_LEN).unwrap().unwrap();
+    assert!(json.contains("login paquet inattendu"));
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 #[tokio::test]
