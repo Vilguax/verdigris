@@ -282,7 +282,7 @@ async fn configuration_full_sequence_reaches_play_disconnect() {
         .await
         .unwrap();
 
-    for index in 0..29 {
+    for index in 0..verdigris_protocol::network::network_data().registries.len() {
         let (registry_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
         assert_eq!(
             registry_id, 0x07,

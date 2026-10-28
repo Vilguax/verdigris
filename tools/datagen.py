@@ -7,13 +7,15 @@ GAME_VERSION = "26.3"
 PROTOCOL = 777
 
 SYNCED = [
-    "banner_pattern", "chat_type", "damage_type", "dialog", "dimension_type", "enchantment",
-    "instrument", "jukebox_song", "painting_variant", "sulfur_cube_archetype", "test_environment",
-    "test_instance", "timeline", "trim_material", "trim_pattern", "world_clock", "worldgen/biome",
-    "cat_variant", "cat_sound_variant", "chicken_variant", "chicken_sound_variant", "cow_variant",
-    "cow_sound_variant", "frog_variant", "pig_variant", "pig_sound_variant", "wolf_variant",
-    "wolf_sound_variant", "zombie_nautilus_variant",
+    "worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant",
+    "wolf_sound_variant", "pig_variant", "pig_sound_variant", "frog_variant", "cat_variant",
+    "cat_sound_variant", "cow_sound_variant", "cow_variant", "chicken_sound_variant",
+    "chicken_variant", "zombie_nautilus_variant", "painting_variant", "sulfur_cube_archetype",
+    "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song", "instrument",
+    "test_environment", "test_instance", "dialog", "world_clock", "timeline",
+    "decorated_pot_pattern", "block_transformer", "block_state_provider",
 ]
+MAY_BE_EMPTY = {"block_state_provider"}
 
 
 def entries_of(folder):
@@ -51,7 +53,7 @@ def main(generated, server_jar, out):
     registries, ids_by_registry = [], {}
     for reg in SYNCED:
         entries = entries_of(data / reg)
-        if not entries:
+        if not entries and reg not in MAY_BE_EMPTY:
             raise SystemExit(f"registre synchronise vide: {reg}")
         registries.append({"id": f"minecraft:{reg}", "entries": entries})
         ids_by_registry[f"minecraft:{reg}"] = {e: i for i, e in enumerate(entries)}

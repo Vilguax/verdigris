@@ -78,36 +78,39 @@ mod tests {
     use super::*;
     use crate::{GAME_VERSION, PROTOCOL_VERSION};
 
-    const REGISTRY_ORDER: [&str; 29] = [
-        "minecraft:banner_pattern",
-        "minecraft:chat_type",
-        "minecraft:damage_type",
-        "minecraft:dialog",
-        "minecraft:dimension_type",
-        "minecraft:enchantment",
-        "minecraft:instrument",
-        "minecraft:jukebox_song",
-        "minecraft:painting_variant",
-        "minecraft:sulfur_cube_archetype",
-        "minecraft:test_environment",
-        "minecraft:test_instance",
-        "minecraft:timeline",
-        "minecraft:trim_material",
-        "minecraft:trim_pattern",
-        "minecraft:world_clock",
+    const REGISTRY_ORDER: [&str; 32] = [
         "minecraft:worldgen/biome",
-        "minecraft:cat_variant",
-        "minecraft:cat_sound_variant",
-        "minecraft:chicken_variant",
-        "minecraft:chicken_sound_variant",
-        "minecraft:cow_variant",
-        "minecraft:cow_sound_variant",
-        "minecraft:frog_variant",
-        "minecraft:pig_variant",
-        "minecraft:pig_sound_variant",
+        "minecraft:chat_type",
+        "minecraft:trim_pattern",
+        "minecraft:trim_material",
         "minecraft:wolf_variant",
         "minecraft:wolf_sound_variant",
+        "minecraft:pig_variant",
+        "minecraft:pig_sound_variant",
+        "minecraft:frog_variant",
+        "minecraft:cat_variant",
+        "minecraft:cat_sound_variant",
+        "minecraft:cow_sound_variant",
+        "minecraft:cow_variant",
+        "minecraft:chicken_sound_variant",
+        "minecraft:chicken_variant",
         "minecraft:zombie_nautilus_variant",
+        "minecraft:painting_variant",
+        "minecraft:sulfur_cube_archetype",
+        "minecraft:dimension_type",
+        "minecraft:damage_type",
+        "minecraft:banner_pattern",
+        "minecraft:enchantment",
+        "minecraft:jukebox_song",
+        "minecraft:instrument",
+        "minecraft:test_environment",
+        "minecraft:test_instance",
+        "minecraft:dialog",
+        "minecraft:world_clock",
+        "minecraft:timeline",
+        "minecraft:decorated_pot_pattern",
+        "minecraft:block_transformer",
+        "minecraft:block_state_provider",
     ];
 
     #[test]
@@ -128,11 +131,27 @@ mod tests {
     }
 
     #[test]
-    fn twenty_nine_registries_in_file_order() {
+    fn synchronized_registries_in_vanilla_order() {
         let data = network_data();
-        assert_eq!(data.registries.len(), 29);
+        assert_eq!(data.registries.len(), REGISTRY_ORDER.len());
         let ids: Vec<&str> = data.registries.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, REGISTRY_ORDER.to_vec());
+    }
+
+    #[test]
+    fn block_transformer_entries_required_by_client() {
+        let data = network_data();
+        let registry = data
+            .registries
+            .iter()
+            .find(|r| r.id == "minecraft:block_transformer")
+            .expect("block_transformer synchronise");
+        for entry in ["minecraft:axe", "minecraft:hoe", "minecraft:shovel"] {
+            assert!(
+                registry.entries.iter().any(|e| e == entry),
+                "{entry} absent"
+            );
+        }
     }
 
     #[test]
