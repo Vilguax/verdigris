@@ -1,7 +1,7 @@
 use crate::error::ProtocolError;
 use crate::primitives::{read_i64, read_string, read_u16};
 use crate::varint::read_var_int;
-use crate::{MAX_ADDRESS_LEN, State};
+use crate::{MAX_ADDRESS_LEN, MAX_USERNAME_LEN, State};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intent {
@@ -35,6 +35,7 @@ pub enum Serverbound {
     Handshake(Handshake),
     StatusRequest,
     PingRequest { payload: i64 },
+    LoginStart { name: String, uuid: u128 },
 }
 
 fn take_var_int(cursor: &mut &[u8]) -> Result<i32, ProtocolError> {
@@ -77,6 +78,16 @@ fn take_i64(cursor: &mut &[u8]) -> Result<i64, ProtocolError> {
     }
 }
 
+fn take_u128(cursor: &mut &[u8]) -> Result<u128, ProtocolError> {
+    if cursor.len() < 16 {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&cursor[..16]);
+    *cursor = &cursor[16..];
+    Ok(u128::from_be_bytes(bytes))
+}
+
 pub fn decode_serverbound(state: State, body: &[u8]) -> Result<Serverbound, ProtocolError> {
     let mut cursor = body;
     let id = take_var_int(&mut cursor)?;
@@ -97,6 +108,11 @@ pub fn decode_serverbound(state: State, body: &[u8]) -> Result<Serverbound, Prot
         (State::Status, 0x01) => {
             let payload = take_i64(&mut cursor)?;
             Ok(Serverbound::PingRequest { payload })
+        }
+        (State::Login, 0x00) => {
+            let name = take_string(&mut cursor, MAX_USERNAME_LEN)?;
+            let uuid = take_u128(&mut cursor)?;
+            Ok(Serverbound::LoginStart { name, uuid })
         }
         (state, id) => Err(ProtocolError::UnknownPacketId { state, id }),
     }
@@ -198,6 +214,45 @@ mod tests {
             Err(ProtocolError::UnknownPacketId {
                 state: State::Status,
                 id: 0x09
+            })
+        );
+    }
+
+    #[test]
+    fn decode_login_start() {
+        let mut body = Vec::new();
+        write_var_int(0x00, &mut body);
+        write_string("Verdi", &mut body);
+        body.extend_from_slice(&[0u8; 16]);
+        match decode_serverbound(State::Login, &body).unwrap() {
+            Serverbound::LoginStart { name, uuid } => {
+                assert_eq!(name, "Verdi");
+                assert_eq!(uuid, 0);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_start_missing_uuid_is_eof() {
+        let mut body = Vec::new();
+        write_var_int(0x00, &mut body);
+        write_string("Verdi", &mut body);
+        assert_eq!(
+            decode_serverbound(State::Login, &body),
+            Err(ProtocolError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn unknown_id_in_login_rejected() {
+        let mut body = Vec::new();
+        write_var_int(0x42, &mut body);
+        assert_eq!(
+            decode_serverbound(State::Login, &body),
+            Err(ProtocolError::UnknownPacketId {
+                state: State::Login,
+                id: 0x42
             })
         );
     }

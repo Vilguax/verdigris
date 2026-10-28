@@ -1,3 +1,4 @@
+pub mod clientbound;
 pub mod error;
 pub mod framing;
 pub mod packets;
@@ -12,18 +13,28 @@ pub const MAX_PACKET_LEN: usize = 2 * 1024 * 1024 - 1;
 pub const MAX_STRING_LEN: usize = 32767;
 pub const MAX_ADDRESS_LEN: usize = 255;
 pub const MAX_STATUS_JSON_LEN: usize = 32767;
+pub const MAX_USERNAME_LEN: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Handshaking,
     Status,
+    Login,
+    Configuration,
 }
 
+pub use clientbound::{
+    EncodeError, MAX_NBT_STRING_BYTES, MAX_OUTBOUND_PACKET_LEN, NBT_TAG_STRING, build_packet,
+    config_disconnect_payload, login_disconnect_payload,
+};
 pub use error::ProtocolError;
 pub use framing::{decode_frame, encode_frame};
 pub use packets::{Handshake, Intent, Serverbound, decode_serverbound};
 pub use primitives::{read_i64, read_string, read_u16, write_i64, write_string, write_u16};
-pub use status::{StatusInfo, encode_pong, encode_status_response, status_json};
+pub use status::{
+    StatusInfo, encode_pong, encode_status_response, pong_payload, status_json,
+    status_response_payload,
+};
 pub use varint::{read_var_int, read_var_long, write_var_int, write_var_long};
 
 #[cfg(test)]

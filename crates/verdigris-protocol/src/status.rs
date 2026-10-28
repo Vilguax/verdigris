@@ -56,20 +56,33 @@ pub fn status_json(info: &StatusInfo) -> String {
     )
 }
 
-pub fn encode_status_response(json: &str) -> Result<Vec<u8>, ProtocolError> {
+pub fn status_response_payload(json: &str) -> Result<Vec<u8>, ProtocolError> {
     if json.chars().count() > MAX_STATUS_JSON_LEN {
         return Err(ProtocolError::StringTooLong);
     }
+    let mut payload = Vec::new();
+    write_string(json, &mut payload);
+    Ok(payload)
+}
+
+pub fn pong_payload(payload: i64) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_i64(payload, &mut out);
+    out
+}
+
+pub fn encode_status_response(json: &str) -> Result<Vec<u8>, ProtocolError> {
+    let payload = status_response_payload(json)?;
     let mut body = Vec::new();
     write_var_int(0x00, &mut body);
-    write_string(json, &mut body);
+    body.extend_from_slice(&payload);
     Ok(encode_frame(&body))
 }
 
 pub fn encode_pong(payload: i64) -> Vec<u8> {
     let mut body = Vec::new();
     write_var_int(0x01, &mut body);
-    write_i64(payload, &mut body);
+    body.extend_from_slice(&pong_payload(payload));
     encode_frame(&body)
 }
 

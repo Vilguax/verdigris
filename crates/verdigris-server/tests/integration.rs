@@ -8,7 +8,7 @@ use verdigris_protocol::{
     MAX_STRING_LEN, decode_frame, encode_frame, read_i64, read_string, read_var_int, write_i64,
     write_string, write_u16, write_var_int,
 };
-use verdigris_server::run;
+use verdigris_server::{REASON_LOGIN_UNAVAILABLE, run};
 
 async fn spawn_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -39,6 +39,14 @@ fn ping_frame(payload: i64) -> Vec<u8> {
     let mut body = Vec::new();
     write_var_int(0x01, &mut body);
     write_i64(payload, &mut body);
+    encode_frame(&body)
+}
+
+fn login_start_frame(name: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x00, &mut body);
+    write_string(name, &mut body);
+    body.extend_from_slice(&[0u8; 16]);
     encode_frame(&body)
 }
 
@@ -103,15 +111,15 @@ async fn partial_handshake_is_buffered() {
 }
 
 #[tokio::test]
-async fn malformed_connection_is_isolated() {
+async fn refused_login_does_not_affect_status() {
     let addr = spawn_server().await;
 
     let mut bad = TcpStream::connect(addr).await.unwrap();
     bad.write_all(&handshake_frame(2)).await.unwrap();
-    bad.write_all(&status_request_frame()).await.unwrap();
-    let mut scratch = [0u8; 16];
-    let closed = bad.read(&mut scratch).await.unwrap();
-    assert_eq!(closed, 0, "login intent must close the connection");
+    bad.write_all(&login_start_frame("Verdi")).await.unwrap();
+    bad.shutdown().await.unwrap();
+    let (id, _body) = read_one_frame(&mut bad).await;
+    assert_eq!(id, 0x00, "login intent must receive a disconnect packet");
 
     let mut good = TcpStream::connect(addr).await.unwrap();
     good.write_all(&handshake_frame(1)).await.unwrap();
@@ -120,6 +128,31 @@ async fn malformed_connection_is_isolated() {
     assert_eq!(status_id, 0x00);
     let (json, _) = read_string(&status_body, MAX_STRING_LEN).unwrap().unwrap();
     assert!(json.contains("\"name\":\"26.3\""));
+}
+
+#[tokio::test]
+async fn login_refused_with_clean_shutdown() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    client.write_all(&handshake_frame(2)).await.unwrap();
+    client.write_all(&login_start_frame("Verdi")).await.unwrap();
+    client.shutdown().await.unwrap();
+
+    let (id, body) = read_one_frame(&mut client).await;
+    assert_eq!(id, 0x00, "login refusal must be a Disconnect 0x00");
+    let (json, _) = read_string(&body, MAX_STRING_LEN).unwrap().unwrap();
+    assert!(json.contains(REASON_LOGIN_UNAVAILABLE));
+    assert!(json.starts_with("{\"text\":\""));
+
+    let mut scratch = [0u8; 64];
+    loop {
+        match client.read(&mut scratch).await {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(err) => panic!("expected clean EOF, got {err}"),
+        }
+    }
 }
 
 #[tokio::test]
