@@ -24,6 +24,7 @@ pub enum State {
     Status,
     Login,
     Configuration,
+    Play,
 }
 
 pub use clientbound::{

@@ -8,10 +8,12 @@ use tracing_subscriber::EnvFilter;
 
 use verdigris_protocol::{
     COMPRESSION_THRESHOLD, EncodeError, Intent, PROTOCOL_VERSION, SET_COMPRESSION_ID, Serverbound,
-    State, StatusInfo, build_compressed_packet, build_packet, config_disconnect_payload,
-    decode_compressed_frame, decode_frame, decode_serverbound, login_disconnect_payload,
-    login_success_payload, offline_uuid, pong_payload, random_session_id, read_var_int,
-    set_compression_payload, status_json, status_response_payload, validate_name,
+    State, StatusInfo, build_compressed_packet, build_packet, client_has_core,
+    config_disconnect_payload, decode_compressed_frame, decode_frame, decode_known_packs,
+    decode_serverbound, known_packs_payload, login_disconnect_payload, login_success_payload,
+    network_data, offline_uuid, packet_ids, pong_payload, random_session_id, read_var_int,
+    registry_data_payload, server_known_pack, set_compression_payload, status_json,
+    status_response_payload, update_tags_payload, validate_name,
 };
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
@@ -24,21 +26,32 @@ pub const REASON_TRANSFER_UNSUPPORTED: &str = "Transfert non supporté";
 pub const REASON_LOGIN_INVALID_NAME: &str = "login nom invalide";
 pub const REASON_LOGIN_UNEXPECTED_PACKET: &str = "login paquet inattendu";
 pub const REASON_LOGIN_TIMEOUT: &str = "login délai dépassé";
-pub const REASON_CONFIG_UNAVAILABLE: &str =
-    "la configuration du serveur n'est pas encore disponible";
+pub const REASON_CONFIG_UNEXPECTED: &str = "paquet de configuration inattendu";
+pub const REASON_CONFIG_NOT_VANILLA: &str = "un client vanilla 26.3 est requis";
+pub const REASON_CONFIG_TIMEOUT: &str = "délai de configuration dépassé";
+pub const REASON_PLAY_WORLD_UNAVAILABLE: &str = "le monde n'est pas encore disponible";
 const LOGIN_SUCCESS_ID: i32 = 0x02;
 pub const REASON_PROTOCOL_ERROR_PREFIX: &str = "Paquet invalide: ";
 pub const REASON_CONNECTION_LOST: &str = "Connexion interrompue";
 pub const REASON_READ_TIMEOUT: &str = "Délai de lecture dépassé";
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_CHUNK: usize = 4096;
 const CLOSE_BUDGET: Duration = Duration::from_secs(1);
 const DRAIN_LIMIT: usize = 64 * 1024;
 
 enum Next {
     Continue,
+    EnterConfiguration,
     Terminate(String),
+}
+
+enum ReadOutcome {
+    Packet(Vec<u8>),
+    Eof,
+    Protocol(String),
+    Timeout,
 }
 
 enum Framing {
@@ -156,6 +169,11 @@ async fn serve_connection(mut stream: TcpStream) {
             .await
             {
                 Next::Continue => {}
+                Next::EnterConfiguration => {
+                    run_configuration(&mut stream, &framing, &mut state, &mut buf, &mut chunk)
+                        .await;
+                    return;
+                }
                 Next::Terminate(reason) => {
                     disconnect(&mut stream, &framing, state, &reason).await;
                     return;
@@ -210,7 +228,7 @@ async fn dispatch(
     body: &[u8],
 ) -> Next {
     if *awaiting_ack {
-        return finish_login(state, body);
+        return finish_login(state, awaiting_ack, body);
     }
 
     let packet = match decode_serverbound(*state, body) {
@@ -305,14 +323,214 @@ async fn begin_login(
     }
 }
 
-fn finish_login(state: &mut State, body: &[u8]) -> Next {
+fn finish_login(state: &mut State, awaiting_ack: &mut bool, body: &[u8]) -> Next {
     match decode_serverbound(State::Login, body) {
         Ok(Serverbound::LoginAcknowledged) => {
+            *awaiting_ack = false;
             set_state(state, State::Configuration);
-            Next::Terminate(REASON_CONFIG_UNAVAILABLE.to_owned())
+            info!("entrée en configuration");
+            Next::EnterConfiguration
         }
         _ => Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned()),
     }
+}
+
+fn is_ignorable_config(id: i32) -> bool {
+    id == packet_ids::serverbound::CLIENT_INFORMATION
+        || id == packet_ids::serverbound::CUSTOM_PAYLOAD
+        || id == packet_ids::serverbound::KEEP_ALIVE
+}
+
+fn split_packet(body: &[u8]) -> Option<(i32, &[u8])> {
+    match read_var_int(body) {
+        Ok(Some((id, header))) => Some((id, &body[header..])),
+        _ => None,
+    }
+}
+
+async fn read_config_packet(
+    stream: &mut TcpStream,
+    threshold: usize,
+    buf: &mut Vec<u8>,
+    chunk: &mut [u8],
+    deadline: Instant,
+) -> ReadOutcome {
+    loop {
+        match decode_compressed_frame(buf, threshold) {
+            Ok(Some((body, consumed))) => {
+                buf.drain(..consumed);
+                return ReadOutcome::Packet(body);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return ReadOutcome::Protocol(format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}"));
+            }
+        }
+        match timeout_at(deadline, stream.read(chunk)).await {
+            Ok(Ok(0)) => return ReadOutcome::Eof,
+            Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+            Ok(Err(err)) => {
+                return ReadOutcome::Protocol(format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}"));
+            }
+            Err(_) => return ReadOutcome::Timeout,
+        }
+    }
+}
+
+async fn run_configuration(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: &mut State,
+    buf: &mut Vec<u8>,
+    chunk: &mut [u8],
+) {
+    let threshold = match framing {
+        Framing::Compressed(threshold) => *threshold,
+        Framing::Uncompressed => {
+            disconnect(stream, framing, *state, REASON_CONFIG_UNEXPECTED).await;
+            return;
+        }
+    };
+
+    let packs = [server_known_pack()];
+    let payload = known_packs_payload(&packs);
+    if write_packet(
+        stream,
+        framing,
+        *state,
+        packet_ids::clientbound::SELECT_KNOWN_PACKS,
+        &payload,
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
+    let client_packs = loop {
+        let deadline = Instant::now() + READ_TIMEOUT;
+        match read_config_packet(stream, threshold, buf, chunk, deadline).await {
+            ReadOutcome::Packet(body) => {
+                let Some((id, rest)) = split_packet(&body) else {
+                    disconnect(stream, framing, *state, REASON_CONFIG_UNEXPECTED).await;
+                    return;
+                };
+                if is_ignorable_config(id) {
+                    continue;
+                }
+                if id == packet_ids::serverbound::SELECT_KNOWN_PACKS {
+                    match decode_known_packs(rest) {
+                        Ok(packs) => break packs,
+                        Err(err) => {
+                            let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
+                            disconnect(stream, framing, *state, &reason).await;
+                            return;
+                        }
+                    }
+                }
+                disconnect(stream, framing, *state, REASON_CONFIG_UNEXPECTED).await;
+                return;
+            }
+            ReadOutcome::Eof => {
+                disconnect(stream, framing, *state, REASON_CONNECTION_LOST).await;
+                return;
+            }
+            ReadOutcome::Protocol(reason) => {
+                disconnect(stream, framing, *state, &reason).await;
+                return;
+            }
+            ReadOutcome::Timeout => {
+                disconnect(stream, framing, *state, REASON_READ_TIMEOUT).await;
+                return;
+            }
+        }
+    };
+
+    info!(packs = ?client_packs, "known packs reçus");
+    if !client_has_core(&client_packs) {
+        disconnect(stream, framing, *state, REASON_CONFIG_NOT_VANILLA).await;
+        return;
+    }
+
+    let data = network_data();
+    for registry in &data.registries {
+        let payload = registry_data_payload(registry);
+        if write_packet(
+            stream,
+            framing,
+            *state,
+            packet_ids::clientbound::REGISTRY_DATA,
+            &payload,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+    }
+    info!(registres = data.registries.len(), "registry data envoyés");
+
+    let tags_payload = update_tags_payload(&data.tags);
+    if write_packet(
+        stream,
+        framing,
+        *state,
+        packet_ids::clientbound::UPDATE_TAGS,
+        &tags_payload,
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+    let tag_count: usize = data.tags.iter().map(|registry| registry.tags.len()).sum();
+    info!(tags = tag_count, "update tags envoyé");
+
+    if write_packet(
+        stream,
+        framing,
+        *state,
+        packet_ids::clientbound::FINISH_CONFIGURATION,
+        &[],
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
+    let ack_deadline = Instant::now() + CONFIG_ACK_TIMEOUT;
+    loop {
+        match read_config_packet(stream, threshold, buf, chunk, ack_deadline).await {
+            ReadOutcome::Packet(body) => {
+                let id = peek_id(&body);
+                if is_ignorable_config(id) {
+                    continue;
+                }
+                if id == packet_ids::serverbound::FINISH_CONFIGURATION {
+                    break;
+                }
+                disconnect(stream, framing, *state, REASON_CONFIG_UNEXPECTED).await;
+                return;
+            }
+            ReadOutcome::Eof => {
+                disconnect(stream, framing, *state, REASON_CONNECTION_LOST).await;
+                return;
+            }
+            ReadOutcome::Protocol(reason) => {
+                disconnect(stream, framing, *state, &reason).await;
+                return;
+            }
+            ReadOutcome::Timeout => {
+                disconnect(stream, framing, *state, REASON_CONFIG_TIMEOUT).await;
+                return;
+            }
+        }
+    }
+
+    set_state(state, State::Play);
+    info!("entrée en play");
+    disconnect(stream, framing, *state, REASON_PLAY_WORLD_UNAVAILABLE).await;
 }
 
 async fn write_packet(
@@ -337,7 +555,14 @@ async fn disconnect(stream: &mut TcpStream, framing: &Framing, state: State, rea
     info!(reason, "déconnexion");
     let packet = match state {
         State::Login => Some((0x00, login_disconnect_payload(reason))),
-        State::Configuration => Some((0x02, config_disconnect_payload(reason))),
+        State::Configuration => Some((
+            packet_ids::clientbound::DISCONNECT,
+            config_disconnect_payload(reason),
+        )),
+        State::Play => Some((
+            packet_ids::play::DISCONNECT,
+            config_disconnect_payload(reason),
+        )),
         State::Handshaking | State::Status => None,
     };
 

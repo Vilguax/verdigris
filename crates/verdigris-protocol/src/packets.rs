@@ -121,6 +121,9 @@ pub fn decode_serverbound(state: State, body: &[u8]) -> Result<Serverbound, Prot
             }
             Ok(Serverbound::LoginAcknowledged)
         }
+        (State::Configuration | State::Play, id) => {
+            Err(ProtocolError::UnknownPacketId { state, id })
+        }
         (state, id) => Err(ProtocolError::UnknownPacketId { state, id }),
     }
 }
