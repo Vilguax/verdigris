@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 verdigris-protocol = { path = "crates/verdigris-protocol" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
