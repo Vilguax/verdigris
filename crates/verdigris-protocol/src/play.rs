@@ -1,12 +1,16 @@
+use crate::error::ProtocolError;
 use crate::network::network_data;
-use crate::primitives::{write_i32, write_i64, write_string, write_u16};
-use crate::varint::write_var_int;
+use crate::primitives::{
+    read_f32, read_f64, write_f32, write_f64, write_i32, write_i64, write_string, write_u16,
+};
+use crate::varint::{read_var_int, write_var_int};
 
 pub const SECTION_COUNT: usize = 24;
 pub const EMPTY_CHUNK_DATA_LEN: usize = SECTION_COUNT * 8;
 pub const MAX_CHUNK_DATA_LEN: usize = 2 * 1024 * 1024;
 pub const DEFAULT_SEA_LEVEL: i32 = 63;
 pub const PREVIOUS_GAME_TYPE_NONE: i32 = -1;
+pub const GAME_EVENT_WAIT_FOR_CHUNKS: u8 = 13;
 
 pub const BIOME_REGISTRY: &str = "minecraft:worldgen/biome";
 pub const DIMENSION_TYPE_REGISTRY: &str = "minecraft:dimension_type";
@@ -176,6 +180,136 @@ pub fn login_play_payload(
     write_bool(false, &mut payload);
 
     Ok(payload)
+}
+
+pub fn player_position_payload(
+    teleport_id: i32,
+    pos: [f64; 3],
+    delta: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+    relatives: i32,
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_var_int(teleport_id, &mut payload);
+    for value in pos {
+        write_f64(value, &mut payload);
+    }
+    for value in delta {
+        write_f64(value, &mut payload);
+    }
+    write_f32(yaw, &mut payload);
+    write_f32(pitch, &mut payload);
+    write_i32(relatives, &mut payload);
+    payload
+}
+
+pub fn game_event_payload(event: u8, param: f32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.push(event);
+    write_f32(param, &mut payload);
+    payload
+}
+
+pub fn set_chunk_cache_center_payload(x: i32, z: i32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_var_int(x, &mut payload);
+    write_var_int(z, &mut payload);
+    payload
+}
+
+pub fn chunk_batch_start_payload() -> Vec<u8> {
+    Vec::new()
+}
+
+pub fn chunk_batch_finished_payload(batch_size: i32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_var_int(batch_size, &mut payload);
+    payload
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcceptTeleportation {
+    pub teleport_id: i32,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkBatchReceived {
+    pub desired_chunks_per_tick: f32,
+}
+
+fn take_var_int(cursor: &mut &[u8]) -> Result<i32, ProtocolError> {
+    match read_var_int(cursor)? {
+        Some((value, consumed)) => {
+            *cursor = &cursor[consumed..];
+            Ok(value)
+        }
+        None => Err(ProtocolError::UnexpectedEof),
+    }
+}
+
+fn take_f32(cursor: &mut &[u8]) -> Result<f32, ProtocolError> {
+    match read_f32(cursor)? {
+        Some((value, consumed)) => {
+            *cursor = &cursor[consumed..];
+            Ok(value)
+        }
+        None => Err(ProtocolError::UnexpectedEof),
+    }
+}
+
+fn take_f64(cursor: &mut &[u8]) -> Result<f64, ProtocolError> {
+    match read_f64(cursor)? {
+        Some((value, consumed)) => {
+            *cursor = &cursor[consumed..];
+            Ok(value)
+        }
+        None => Err(ProtocolError::UnexpectedEof),
+    }
+}
+
+pub fn decode_accept_teleportation(body: &[u8]) -> Result<AcceptTeleportation, ProtocolError> {
+    let mut cursor = body;
+    let teleport_id = take_var_int(&mut cursor)?;
+    let x = take_f64(&mut cursor)?;
+    let y = take_f64(&mut cursor)?;
+    let z = take_f64(&mut cursor)?;
+    let yaw = take_f32(&mut cursor)?;
+    let pitch = take_f32(&mut cursor)?;
+    if !cursor.is_empty() {
+        return Err(ProtocolError::TrailingBytes);
+    }
+    Ok(AcceptTeleportation {
+        teleport_id,
+        x,
+        y,
+        z,
+        yaw,
+        pitch,
+    })
+}
+
+pub fn decode_player_loaded(body: &[u8]) -> Result<(), ProtocolError> {
+    if !body.is_empty() {
+        return Err(ProtocolError::TrailingBytes);
+    }
+    Ok(())
+}
+
+pub fn decode_chunk_batch_received(body: &[u8]) -> Result<ChunkBatchReceived, ProtocolError> {
+    let mut cursor = body;
+    let desired_chunks_per_tick = take_f32(&mut cursor)?;
+    if !cursor.is_empty() {
+        return Err(ProtocolError::TrailingBytes);
+    }
+    Ok(ChunkBatchReceived {
+        desired_chunks_per_tick,
+    })
 }
 
 #[cfg(test)]
@@ -409,5 +543,146 @@ mod tests {
 
         let (game_type, _) = read_var_int(cursor).unwrap().unwrap();
         assert_eq!(game_type, -1);
+    }
+
+    #[test]
+    fn player_position_layout() {
+        let payload = player_position_payload(7, [0.5, 100.0, 0.5], [0.0, 0.0, 0.0], 0.0, 0.0, 0);
+        let mut cursor = &payload[..];
+
+        let (teleport_id, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(teleport_id, 7);
+        cursor = &cursor[c..];
+
+        for expected in [0.5f64, 100.0, 0.5, 0.0, 0.0, 0.0] {
+            assert_eq!(&cursor[..8], &expected.to_be_bytes());
+            cursor = &cursor[8..];
+        }
+        assert_eq!(&cursor[..4], &0.0f32.to_be_bytes());
+        cursor = &cursor[4..];
+        assert_eq!(&cursor[..4], &0.0f32.to_be_bytes());
+        cursor = &cursor[4..];
+        assert_eq!(cursor, &[0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn game_event_layout() {
+        let payload = game_event_payload(GAME_EVENT_WAIT_FOR_CHUNKS, 0.0);
+        assert_eq!(payload, vec![13, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn set_chunk_cache_center_layout() {
+        let payload = set_chunk_cache_center_payload(0, 0);
+        assert_eq!(payload, vec![0x00, 0x00]);
+        let payload = set_chunk_cache_center_payload(-1, 1);
+        let mut cursor = &payload[..];
+        let (x, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(x, -1);
+        cursor = &cursor[c..];
+        let (z, _) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(z, 1);
+    }
+
+    #[test]
+    fn chunk_batch_start_is_empty() {
+        assert!(chunk_batch_start_payload().is_empty());
+    }
+
+    #[test]
+    fn chunk_batch_finished_layout() {
+        let payload = chunk_batch_finished_payload(81);
+        let (count, consumed) = read_var_int(&payload).unwrap().unwrap();
+        assert_eq!(count, 81);
+        assert_eq!(consumed, payload.len());
+    }
+
+    #[test]
+    fn accept_teleportation_round_trip() {
+        let mut body = Vec::new();
+        write_var_int(42, &mut body);
+        for value in [1.0f64, 2.0, 3.0] {
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+        body.extend_from_slice(&90.0f32.to_be_bytes());
+        body.extend_from_slice(&(-45.0f32).to_be_bytes());
+        assert_eq!(
+            decode_accept_teleportation(&body).unwrap(),
+            AcceptTeleportation {
+                teleport_id: 42,
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                yaw: 90.0,
+                pitch: -45.0,
+            }
+        );
+    }
+
+    #[test]
+    fn accept_teleportation_truncated_is_eof() {
+        let mut body = Vec::new();
+        write_var_int(42, &mut body);
+        body.extend_from_slice(&1.0f64.to_be_bytes());
+        assert_eq!(
+            decode_accept_teleportation(&body),
+            Err(ProtocolError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn accept_teleportation_trailing_is_error() {
+        let mut body = Vec::new();
+        write_var_int(42, &mut body);
+        for value in [1.0f64, 2.0, 3.0] {
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+        body.extend_from_slice(&0.0f32.to_be_bytes());
+        body.extend_from_slice(&0.0f32.to_be_bytes());
+        body.push(0xFF);
+        assert_eq!(
+            decode_accept_teleportation(&body),
+            Err(ProtocolError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn player_loaded_requires_empty_body() {
+        assert_eq!(decode_player_loaded(&[]), Ok(()));
+        assert_eq!(
+            decode_player_loaded(&[0x00]),
+            Err(ProtocolError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn chunk_batch_received_round_trip() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&8.0f32.to_be_bytes());
+        assert_eq!(
+            decode_chunk_batch_received(&body).unwrap(),
+            ChunkBatchReceived {
+                desired_chunks_per_tick: 8.0
+            }
+        );
+    }
+
+    #[test]
+    fn chunk_batch_received_truncated_is_eof() {
+        assert_eq!(
+            decode_chunk_batch_received(&[0x00, 0x00]),
+            Err(ProtocolError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn chunk_batch_received_trailing_is_error() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&8.0f32.to_be_bytes());
+        body.push(0x00);
+        assert_eq!(
+            decode_chunk_batch_received(&body),
+            Err(ProtocolError::TrailingBytes)
+        );
     }
 }
