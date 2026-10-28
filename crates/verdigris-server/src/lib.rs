@@ -5,10 +5,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use verdigris_protocol::{
-    EncodeError, Intent, PROTOCOL_VERSION, Serverbound, State, StatusInfo, build_packet,
-    config_disconnect_payload, decode_frame, decode_serverbound, login_disconnect_payload,
-    login_success_payload, offline_uuid, pong_payload, random_session_id, status_json,
-    status_response_payload, validate_name,
+    COMPRESSION_THRESHOLD, EncodeError, Intent, PROTOCOL_VERSION, SET_COMPRESSION_ID, Serverbound,
+    State, StatusInfo, build_compressed_packet, build_packet, config_disconnect_payload,
+    decode_compressed_frame, decode_frame, decode_serverbound, login_disconnect_payload,
+    login_success_payload, offline_uuid, pong_payload, random_session_id, set_compression_payload,
+    status_json, status_response_payload, validate_name,
 };
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
@@ -36,6 +37,11 @@ const DRAIN_LIMIT: usize = 64 * 1024;
 enum Next {
     Continue,
     Terminate(String),
+}
+
+enum Framing {
+    Uncompressed,
+    Compressed(usize),
 }
 
 enum WriteError {
@@ -75,25 +81,34 @@ pub async fn run(listener: TcpListener) -> std::io::Result<()> {
 async fn handle_connection(mut stream: TcpStream, _peer: SocketAddr) {
     let mut buf: Vec<u8> = Vec::new();
     let mut state = State::Handshaking;
+    let mut framing = Framing::Uncompressed;
     let mut awaiting_ack = false;
     let mut chunk = [0u8; READ_CHUNK];
 
     loop {
         loop {
-            let (body, consumed) = match decode_frame(&buf) {
-                Ok(Some((body, consumed))) => (body.to_vec(), consumed),
+            let (body, consumed) = match decode_any(&framing, &buf) {
+                Ok(Some((body, consumed))) => (body, consumed),
                 Ok(None) => break,
                 Err(err) => {
                     let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
-                    disconnect(&mut stream, state, &reason).await;
+                    disconnect(&mut stream, &framing, state, &reason).await;
                     return;
                 }
             };
             buf.drain(..consumed);
-            match dispatch(&mut stream, &mut state, &mut awaiting_ack, &body).await {
+            match dispatch(
+                &mut stream,
+                &mut state,
+                &mut framing,
+                &mut awaiting_ack,
+                &body,
+            )
+            .await
+            {
                 Next::Continue => {}
                 Next::Terminate(reason) => {
-                    disconnect(&mut stream, state, &reason).await;
+                    disconnect(&mut stream, &framing, state, &reason).await;
                     return;
                 }
             }
@@ -102,13 +117,13 @@ async fn handle_connection(mut stream: TcpStream, _peer: SocketAddr) {
         let read = timeout(READ_TIMEOUT, stream.read(&mut chunk)).await;
         let n = match read {
             Ok(Ok(0)) => {
-                disconnect(&mut stream, state, REASON_CONNECTION_LOST).await;
+                disconnect(&mut stream, &framing, state, REASON_CONNECTION_LOST).await;
                 return;
             }
             Ok(Ok(n)) => n,
             Ok(Err(err)) => {
                 let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
-                disconnect(&mut stream, state, &reason).await;
+                disconnect(&mut stream, &framing, state, &reason).await;
                 return;
             }
             Err(_) => {
@@ -117,7 +132,7 @@ async fn handle_connection(mut stream: TcpStream, _peer: SocketAddr) {
                 } else {
                     REASON_READ_TIMEOUT
                 };
-                disconnect(&mut stream, state, reason).await;
+                disconnect(&mut stream, &framing, state, reason).await;
                 return;
             }
         };
@@ -125,9 +140,23 @@ async fn handle_connection(mut stream: TcpStream, _peer: SocketAddr) {
     }
 }
 
+fn decode_any(
+    framing: &Framing,
+    buf: &[u8],
+) -> Result<Option<(Vec<u8>, usize)>, verdigris_protocol::ProtocolError> {
+    match framing {
+        Framing::Uncompressed => match decode_frame(buf)? {
+            Some((body, consumed)) => Ok(Some((body.to_vec(), consumed))),
+            None => Ok(None),
+        },
+        Framing::Compressed(threshold) => decode_compressed_frame(buf, *threshold),
+    }
+}
+
 async fn dispatch(
     stream: &mut TcpStream,
     state: &mut State,
+    framing: &mut Framing,
     awaiting_ack: &mut bool,
     body: &[u8],
 ) -> Next {
@@ -168,7 +197,7 @@ async fn dispatch(
             };
             let json = status_json(&info);
             match status_response_payload(&json) {
-                Ok(payload) => match write_packet(stream, 0x00, &payload).await {
+                Ok(payload) => match write_packet(stream, framing, 0x00, &payload).await {
                     Ok(()) => Next::Continue,
                     Err(_) => Next::Terminate(String::new()),
                 },
@@ -176,24 +205,39 @@ async fn dispatch(
             }
         }
         Serverbound::PingRequest { payload } => {
-            let _ = write_packet(stream, 0x01, &pong_payload(payload)).await;
+            let _ = write_packet(stream, framing, 0x01, &pong_payload(payload)).await;
             Next::Terminate(String::new())
         }
-        Serverbound::LoginStart { name, .. } => begin_login(stream, awaiting_ack, &name).await,
+        Serverbound::LoginStart { name, .. } => {
+            begin_login(stream, framing, awaiting_ack, &name).await
+        }
         Serverbound::LoginAcknowledged => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
         }
     }
 }
 
-async fn begin_login(stream: &mut TcpStream, awaiting_ack: &mut bool, name: &str) -> Next {
+async fn begin_login(
+    stream: &mut TcpStream,
+    framing: &mut Framing,
+    awaiting_ack: &mut bool,
+    name: &str,
+) -> Next {
     if validate_name(name).is_err() {
         return Next::Terminate(REASON_LOGIN_INVALID_NAME.to_owned());
     }
+    let set_compression = set_compression_payload(COMPRESSION_THRESHOLD);
+    if write_packet(stream, framing, SET_COMPRESSION_ID, &set_compression)
+        .await
+        .is_err()
+    {
+        return Next::Terminate(String::new());
+    }
+    *framing = Framing::Compressed(COMPRESSION_THRESHOLD as usize);
     let uuid = offline_uuid(name);
     let session_id = random_session_id();
     let payload = login_success_payload(uuid, name, session_id);
-    match write_packet(stream, LOGIN_SUCCESS_ID, &payload).await {
+    match write_packet(stream, framing, LOGIN_SUCCESS_ID, &payload).await {
         Ok(()) => {
             *awaiting_ack = true;
             Next::Continue
@@ -212,13 +256,23 @@ fn finish_login(state: &mut State, body: &[u8]) -> Next {
     }
 }
 
-async fn write_packet(stream: &mut TcpStream, id: i32, payload: &[u8]) -> Result<(), WriteError> {
-    let framed = build_packet(id, payload).map_err(WriteError::Encode)?;
+async fn write_packet(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    id: i32,
+    payload: &[u8],
+) -> Result<(), WriteError> {
+    let framed = match framing {
+        Framing::Uncompressed => build_packet(id, payload).map_err(WriteError::Encode)?,
+        Framing::Compressed(threshold) => {
+            build_compressed_packet(id, payload, *threshold).map_err(WriteError::Encode)?
+        }
+    };
     stream.write_all(&framed).await.map_err(WriteError::Io)?;
     Ok(())
 }
 
-async fn disconnect(stream: &mut TcpStream, state: State, reason: &str) {
+async fn disconnect(stream: &mut TcpStream, framing: &Framing, state: State, reason: &str) {
     let packet = match state {
         State::Login => Some((0x00, login_disconnect_payload(reason))),
         State::Configuration => Some((0x02, config_disconnect_payload(reason))),
@@ -229,7 +283,7 @@ async fn disconnect(stream: &mut TcpStream, state: State, reason: &str) {
     let graceful = match packet {
         Some((id, payload)) => {
             let sent = timeout_at(deadline, async {
-                write_packet(stream, id, &payload).await?;
+                write_packet(stream, framing, id, &payload).await?;
                 stream.flush().await.map_err(WriteError::Io)?;
                 Ok::<(), WriteError>(())
             })

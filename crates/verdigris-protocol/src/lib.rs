@@ -25,11 +25,15 @@ pub enum State {
 }
 
 pub use clientbound::{
-    EncodeError, MAX_NBT_STRING_BYTES, MAX_OUTBOUND_PACKET_LEN, NBT_TAG_STRING, build_packet,
-    config_disconnect_payload, login_disconnect_payload,
+    COMPRESSION_THRESHOLD, EncodeError, MAX_NBT_STRING_BYTES, MAX_OUTBOUND_PACKET_LEN,
+    NBT_TAG_STRING, SET_COMPRESSION_ID, build_compressed_packet, build_packet,
+    config_disconnect_payload, login_disconnect_payload, set_compression_payload,
 };
 pub use error::ProtocolError;
-pub use framing::{decode_frame, encode_frame};
+pub use framing::{
+    MAX_UNCOMPRESSED_LEN, decode_compressed_frame, decode_frame, encode_compressed_frame,
+    encode_frame,
+};
 pub use login::{
     InvalidName, login_success_payload, offline_uuid, random_session_id, validate_name,
 };

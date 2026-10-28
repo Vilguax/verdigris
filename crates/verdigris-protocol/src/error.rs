@@ -11,6 +11,12 @@ pub enum ProtocolError {
     InvalidUtf8,
     UnexpectedEof,
     TrailingBytes,
+    CompressedPacketLengthTooSmall,
+    CompressedDataLengthBelowThreshold,
+    CompressedDataLengthTooLarge,
+    CompressedSizeMismatch,
+    CompressedStreamInvalid,
+    CompressedTrailingBytes,
     UnknownPacketId { state: State, id: i32 },
 }
 
@@ -26,6 +32,18 @@ impl core::fmt::Display for ProtocolError {
             ProtocolError::InvalidUtf8 => write!(f, "invalid utf8"),
             ProtocolError::UnexpectedEof => write!(f, "unexpected eof"),
             ProtocolError::TrailingBytes => write!(f, "trailing bytes"),
+            ProtocolError::CompressedPacketLengthTooSmall => {
+                write!(f, "compressed packet length too small")
+            }
+            ProtocolError::CompressedDataLengthBelowThreshold => {
+                write!(f, "compressed data length below threshold")
+            }
+            ProtocolError::CompressedDataLengthTooLarge => {
+                write!(f, "compressed data length too large")
+            }
+            ProtocolError::CompressedSizeMismatch => write!(f, "compressed size mismatch"),
+            ProtocolError::CompressedStreamInvalid => write!(f, "compressed stream invalid"),
+            ProtocolError::CompressedTrailingBytes => write!(f, "compressed trailing bytes"),
             ProtocolError::UnknownPacketId { state, id } => {
                 write!(f, "unknown packet id {id} in state {state:?}")
             }

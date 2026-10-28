@@ -1,4 +1,4 @@
-use crate::framing::encode_frame;
+use crate::framing::{encode_compressed_frame, encode_frame};
 use crate::primitives::{write_string, write_u16};
 use crate::varint::write_var_int;
 use crate::{MAX_PACKET_LEN, MAX_STRING_LEN};
@@ -6,6 +6,8 @@ use crate::{MAX_PACKET_LEN, MAX_STRING_LEN};
 pub const MAX_OUTBOUND_PACKET_LEN: usize = MAX_PACKET_LEN;
 pub const NBT_TAG_STRING: u8 = 0x08;
 pub const MAX_NBT_STRING_BYTES: usize = u16::MAX as usize;
+pub const SET_COMPRESSION_ID: i32 = 0x03;
+pub const COMPRESSION_THRESHOLD: i32 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodeError {
@@ -30,6 +32,26 @@ pub fn build_packet(id: i32, payload: &[u8]) -> Result<Vec<u8>, EncodeError> {
         return Err(EncodeError::PacketTooLarge);
     }
     Ok(encode_frame(&body))
+}
+
+pub fn build_compressed_packet(
+    id: i32,
+    payload: &[u8],
+    threshold: usize,
+) -> Result<Vec<u8>, EncodeError> {
+    let mut body = Vec::with_capacity(payload.len() + 5);
+    write_var_int(id, &mut body);
+    body.extend_from_slice(payload);
+    if body.len() > MAX_OUTBOUND_PACKET_LEN {
+        return Err(EncodeError::PacketTooLarge);
+    }
+    Ok(encode_compressed_frame(&body, threshold))
+}
+
+pub fn set_compression_payload(threshold: i32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_var_int(threshold, &mut payload);
+    payload
 }
 
 pub fn login_disconnect_payload(reason: &str) -> Vec<u8> {
