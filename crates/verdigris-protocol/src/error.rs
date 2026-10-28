@@ -17,6 +17,8 @@ pub enum ProtocolError {
     CompressedSizeMismatch,
     CompressedStreamInvalid,
     CompressedTrailingBytes,
+    PrefixedArrayLengthNegative,
+    PrefixedArrayTooLong,
     UnknownPacketId { state: State, id: i32 },
 }
 
@@ -44,6 +46,10 @@ impl core::fmt::Display for ProtocolError {
             ProtocolError::CompressedSizeMismatch => write!(f, "compressed size mismatch"),
             ProtocolError::CompressedStreamInvalid => write!(f, "compressed stream invalid"),
             ProtocolError::CompressedTrailingBytes => write!(f, "compressed trailing bytes"),
+            ProtocolError::PrefixedArrayLengthNegative => {
+                write!(f, "prefixed array length negative")
+            }
+            ProtocolError::PrefixedArrayTooLong => write!(f, "prefixed array too long"),
             ProtocolError::UnknownPacketId { state, id } => {
                 write!(f, "unknown packet id {id} in state {state:?}")
             }

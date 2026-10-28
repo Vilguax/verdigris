@@ -1,7 +1,9 @@
 pub mod clientbound;
+pub mod config;
 pub mod error;
 pub mod framing;
 pub mod login;
+pub mod network;
 pub mod packets;
 pub mod primitives;
 pub mod status;
@@ -29,6 +31,10 @@ pub use clientbound::{
     NBT_TAG_STRING, SET_COMPRESSION_ID, build_compressed_packet, build_packet,
     config_disconnect_payload, login_disconnect_payload, set_compression_payload,
 };
+pub use config::{
+    MAX_KNOWN_PACKS, client_has_core, decode_known_packs, known_packs_payload, packet_ids,
+    registry_data_payload, server_known_pack, update_tags_payload,
+};
 pub use error::ProtocolError;
 pub use framing::{
     MAX_UNCOMPRESSED_LEN, decode_compressed_frame, decode_frame, encode_compressed_frame,
@@ -37,6 +43,7 @@ pub use framing::{
 pub use login::{
     InvalidName, login_success_payload, offline_uuid, random_session_id, validate_name,
 };
+pub use network::{KnownPack, NetworkData, Registry, Source, TagEntry, TagRegistry, network_data};
 pub use packets::{Handshake, Intent, Serverbound, decode_serverbound};
 pub use primitives::{read_i64, read_string, read_u16, write_i64, write_string, write_u16};
 pub use status::{
