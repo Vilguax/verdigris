@@ -7,9 +7,8 @@ pub mod varint;
 
 pub const GAME_VERSION: &str = "26.3";
 pub const PROTOCOL_VERSION: i32 = 777;
-pub const DATA_VERSION: i32 = 5023;
 
-pub const MAX_PACKET_LEN: usize = 2 * 1024 * 1024;
+pub const MAX_PACKET_LEN: usize = 2 * 1024 * 1024 - 1;
 pub const MAX_STRING_LEN: usize = 32767;
 pub const MAX_ADDRESS_LEN: usize = 255;
 pub const MAX_STATUS_JSON_LEN: usize = 32767;
@@ -33,9 +32,6 @@ mod tests {
 
     #[test]
     fn cible_26_3() {
-        assert_eq!(
-            (GAME_VERSION, PROTOCOL_VERSION, DATA_VERSION),
-            ("26.3", 777, 5023)
-        );
+        assert_eq!((GAME_VERSION, PROTOCOL_VERSION), ("26.3", 777));
     }
 }

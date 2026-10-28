@@ -31,7 +31,7 @@ pub fn read_string(buf: &[u8], max_len: usize) -> Result<Option<(String, usize)>
         None => return Ok(None),
     };
     if len < 0 {
-        return Err(ProtocolError::FrameLengthNegative);
+        return Err(ProtocolError::StringLengthNegative);
     }
     let len = len as usize;
     if len > max_len.saturating_mul(3) {
@@ -133,7 +133,7 @@ mod tests {
         write_var_int(-1, &mut buf);
         assert_eq!(
             read_string(&buf, MAX_STRING_LEN),
-            Err(ProtocolError::FrameLengthNegative)
+            Err(ProtocolError::StringLengthNegative)
         );
     }
 }

@@ -69,6 +69,28 @@ mod tests {
     }
 
     #[test]
+    fn frame_boundary_2097151_accepted() {
+        let payload = vec![0u8; 2_097_151];
+        let framed = encode_frame(&payload);
+        let (body, consumed) = decode_frame(&framed).unwrap().unwrap();
+        assert_eq!(body.len(), 2_097_151);
+        assert_eq!(consumed, framed.len());
+    }
+
+    #[test]
+    fn frame_boundary_2097152_rejected() {
+        let mut buf = Vec::new();
+        write_var_int(2_097_152, &mut buf);
+        assert_eq!(decode_frame(&buf), Err(ProtocolError::FrameLengthTooLarge));
+    }
+
+    #[test]
+    fn frame_length_four_byte_varint_rejected() {
+        let buf = [0x80, 0x80, 0x80, 0x01];
+        assert_eq!(decode_frame(&buf), Err(ProtocolError::FrameLengthTooLarge));
+    }
+
+    #[test]
     fn frame_trailing_bytes_not_consumed() {
         let payload = [0x00, 0x01];
         let mut framed = encode_frame(&payload);

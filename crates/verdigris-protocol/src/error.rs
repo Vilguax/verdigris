@@ -6,11 +6,11 @@ pub enum ProtocolError {
     VarIntOverflow,
     FrameLengthNegative,
     FrameLengthTooLarge,
+    StringLengthNegative,
     StringTooLong,
     InvalidUtf8,
     UnexpectedEof,
     UnknownPacketId { state: State, id: i32 },
-    UnsupportedIntent(i32),
 }
 
 impl core::fmt::Display for ProtocolError {
@@ -20,13 +20,13 @@ impl core::fmt::Display for ProtocolError {
             ProtocolError::VarIntOverflow => write!(f, "varint overflow"),
             ProtocolError::FrameLengthNegative => write!(f, "frame length negative"),
             ProtocolError::FrameLengthTooLarge => write!(f, "frame length too large"),
+            ProtocolError::StringLengthNegative => write!(f, "string length negative"),
             ProtocolError::StringTooLong => write!(f, "string too long"),
             ProtocolError::InvalidUtf8 => write!(f, "invalid utf8"),
             ProtocolError::UnexpectedEof => write!(f, "unexpected eof"),
             ProtocolError::UnknownPacketId { state, id } => {
                 write!(f, "unknown packet id {id} in state {state:?}")
             }
-            ProtocolError::UnsupportedIntent(n) => write!(f, "unsupported intent {n}"),
         }
     }
 }
