@@ -12,6 +12,19 @@ pub fn write_u16(value: u16, out: &mut Vec<u8>) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
+pub fn read_i32(buf: &[u8]) -> Result<Option<(i32, usize)>, ProtocolError> {
+    if buf.len() < 4 {
+        return Ok(None);
+    }
+    let mut bytes = [0u8; 4];
+    bytes.copy_from_slice(&buf[..4]);
+    Ok(Some((i32::from_be_bytes(bytes), 4)))
+}
+
+pub fn write_i32(value: i32, out: &mut Vec<u8>) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
 pub fn read_i64(buf: &[u8]) -> Result<Option<(i64, usize)>, ProtocolError> {
     if buf.len() < 8 {
         return Ok(None);
@@ -69,6 +82,19 @@ mod tests {
     #[test]
     fn u16_incomplete() {
         assert_eq!(read_u16(&[0x01]).unwrap(), None);
+    }
+
+    #[test]
+    fn i32_round_trip() {
+        let mut buf = Vec::new();
+        write_i32(-559038737, &mut buf);
+        assert_eq!(buf, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(read_i32(&buf).unwrap().unwrap(), (-559038737, 4));
+    }
+
+    #[test]
+    fn i32_incomplete() {
+        assert_eq!(read_i32(&[0, 0, 0]).unwrap(), None);
     }
 
     #[test]

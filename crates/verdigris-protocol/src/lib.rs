@@ -5,6 +5,7 @@ pub mod framing;
 pub mod login;
 pub mod network;
 pub mod packets;
+pub mod play;
 pub mod primitives;
 pub mod status;
 pub mod varint;
@@ -46,7 +47,13 @@ pub use login::{
 };
 pub use network::{KnownPack, NetworkData, Registry, Source, TagEntry, TagRegistry, network_data};
 pub use packets::{Handshake, Intent, Serverbound, decode_serverbound};
-pub use primitives::{read_i64, read_string, read_u16, write_i64, write_string, write_u16};
+pub use play::{
+    PlayError, ensure_play_registries, level_chunk_with_light_payload, login_play_payload,
+    overworld_dimension_type_id, plains_biome_id,
+};
+pub use primitives::{
+    read_i32, read_i64, read_string, read_u16, write_i32, write_i64, write_string, write_u16,
+};
 pub use status::{
     StatusInfo, encode_pong, encode_status_response, pong_payload, status_json,
     status_response_payload,
