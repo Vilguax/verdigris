@@ -1,0 +1,16 @@
+[package]
+name = "verdigris-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "verdigris"
+path = "src/main.rs"
+
+[dependencies]
+verdigris-protocol.workspace = true
+
+[lints]
+workspace = true
