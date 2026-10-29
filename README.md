@@ -50,7 +50,10 @@ Hors périmètre : le format région vanilla `.mca`, les joueurs, les inventaire
 | `crates/verdigris-protocol` | Codec et paquets, sans aucune entrée/sortie : VarInt, chaînes, trames compressées, login, configuration |
 | `crates/verdigris-server` | Binaire `verdigris` : réseau tokio, une tâche par connexion, machine à états du protocole |
 | `crates/verdigris-protocol/data/26.3/network.json` | Registres synchronisés et tags de la 26.3 |
-| `tools/datagen.py` | Génère `network.json` à partir du générateur de données officiel |
+| `crates/verdigris-protocol/data/26.3/worldgen.json` | Réglages de bruit de l'overworld, fonctions de densité et bruits de la 26.3 |
+| `tools/datagen.py` | Génère `network.json`, `blocks.json` et `worldgen.json` à partir du générateur de données officiel |
+| `tools/oracle.py` | Construit le datapack de l'oracle et exporte ses chunks en fixtures de test |
+| `tests-data/oracle-1a` | Relief vanilla de référence : 40 chunks, solide ou non solide bloc par bloc |
 
 ## Données du jeu
 
@@ -62,6 +65,24 @@ python tools/datagen.py generated server.jar crates/verdigris-protocol/data/26.3
 ```
 
 Le `server.jar` n'est pas inclus dans ce dépôt. Le générateur de la 26.3 demande Java 25.
+
+## Oracle du relief
+
+Le relief généré par Verdigris est comparé à celui d'un serveur vanilla 26.3 sur la même graine (`20261029`). Pour isoler la forme du terrain, le monde de référence est créé avec un datapack qui retire les aquifères, les carvers et les features, et sans structures :
+
+```sh
+python tools/oracle.py datapack server.jar <monde>/datapacks/oracle-1a
+```
+
+Dans ce monde, un bloc est solide exactement quand la densité finale est positive. Les règles de matériaux remplacent la pierre par d'autres blocs solides sans changer cette frontière. Seule la glace posée au niveau de l'eau est ambiguë : elle est exclue de la comparaison.
+
+Les chunks générés sont ensuite exportés en fixtures, un octet par bloc (0 non solide, 1 solide, 2 exclu), compressé en zlib, indexé par `(y + 64) * 256 + z * 16 + x` :
+
+```sh
+python tools/oracle.py export <monde>/dimensions/minecraft/overworld/region tests-data/oracle-1a 0,0 1,0
+```
+
+`tests-data/oracle-1a/index.json` décrit le format et liste les chunks.
 
 ## Vérifications
 

@@ -99,6 +99,29 @@ def main(generated, server_jar, out):
     print(f"{blocks_out}: {blocks['state_count']} etats, {len(blocks['blocks'])} blocs, "
           f"{len(blocks['fluid_states'])} etats avec fluide, {len(blocks['items'])} objets qui posent un bloc")
 
+    worldgen_out = Path(out).parent / "worldgen.json"
+    worldgen = worldgen_doc(data / "worldgen", server_jar)
+    worldgen_out.write_text(json.dumps(worldgen, separators=(",", ":"), ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"{worldgen_out}: {len(worldgen['density_function'])} fonctions de densite, "
+          f"{len(worldgen['noise'])} bruits, reglages {sorted(worldgen['noise_settings'])}")
+
+
+WORLDGEN_SETTINGS = ["overworld"]
+
+
+def worldgen_doc(worldgen, server_jar):
+    def folder(sub):
+        root = worldgen / sub
+        return {"minecraft:" + p.relative_to(root).with_suffix("").as_posix(): json.loads(p.read_text(encoding="utf-8"))
+                for p in sorted(root.rglob("*.json"))}
+    settings = folder("noise_settings")
+    missing = [s for s in WORLDGEN_SETTINGS if f"minecraft:{s}" not in settings]
+    if missing:
+        raise SystemExit(f"reglages de bruit absents: {missing}")
+    return {"game_version": GAME_VERSION, "server_jar_sha1": hashlib.sha1(Path(server_jar).read_bytes()).hexdigest(),
+            "noise_settings": {f"minecraft:{s}": settings[f"minecraft:{s}"] for s in WORLDGEN_SETTINGS},
+            "density_function": folder("density_function"), "noise": folder("noise")}
+
 
 ALWAYS_FLUID = {"minecraft:water", "minecraft:lava", "minecraft:bubble_column", "minecraft:kelp",
                 "minecraft:kelp_plant", "minecraft:seagrass", "minecraft:tall_seagrass"}
