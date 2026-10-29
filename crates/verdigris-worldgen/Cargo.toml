@@ -1,0 +1,17 @@
+[package]
+name = "verdigris-worldgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "verdigris_worldgen"
+
+[dependencies]
+md-5 = "0.10"
+
+[lints]
+workspace = true
