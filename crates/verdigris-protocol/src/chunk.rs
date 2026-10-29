@@ -57,6 +57,31 @@ pub fn pack_longs(entries: &[u32], bits: u8) -> Vec<i64> {
     longs
 }
 
+pub fn unpack_longs(data: &[i64], bits: u8, count: usize) -> Vec<u32> {
+    if bits == 0 {
+        return vec![0; count];
+    }
+    let values_per_long = 64 / bits as usize;
+    let mask: u64 = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let mut out = Vec::with_capacity(count);
+    for &long in data {
+        let block = long as u64;
+        for slot in 0..values_per_long {
+            if out.len() == count {
+                return out;
+            }
+            let offset = slot * bits as usize;
+            out.push(((block >> offset) & mask) as u32);
+        }
+    }
+    out.resize(count, 0);
+    out
+}
+
 pub struct PaletteThresholds {
     pub min_indirect_bits: u8,
     pub max_indirect_bits: u8,
@@ -136,7 +161,7 @@ pub fn biome_index(x: usize, y: usize, z: usize) -> usize {
     y * 16 + z * 4 + x
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Section {
     pub states: [u16; BLOCKS_PER_SECTION],
     pub biomes: [u16; BIOMES_PER_SECTION],
@@ -148,6 +173,24 @@ impl Section {
             states: [0; BLOCKS_PER_SECTION],
             biomes: [biome; BIOMES_PER_SECTION],
         }
+    }
+
+    pub fn from_cells(
+        states: &[u16; BLOCKS_PER_SECTION],
+        biomes: &[u16; BIOMES_PER_SECTION],
+    ) -> Self {
+        Section {
+            states: *states,
+            biomes: *biomes,
+        }
+    }
+
+    pub fn state_at(&self, x: usize, y: usize, z: usize) -> u16 {
+        self.states[block_index(x, y, z)]
+    }
+
+    pub fn biome_at(&self, x: usize, y: usize, z: usize) -> u16 {
+        self.biomes[biome_index(x, y, z)]
     }
 
     pub fn non_empty_block_count(&self) -> u16 {
@@ -165,7 +208,7 @@ impl Section {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkColumn {
     pub sections: Vec<Section>,
 }
@@ -175,6 +218,10 @@ impl ChunkColumn {
         ChunkColumn {
             sections: (0..SECTION_COUNT).map(|_| Section::air(biome)).collect(),
         }
+    }
+
+    pub fn from_sections(sections: Vec<Section>) -> Self {
+        ChunkColumn { sections }
     }
 
     pub fn state_at(&self, x: usize, y: usize, z: usize) -> u16 {
