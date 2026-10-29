@@ -16,16 +16,16 @@ use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
     COMPRESSION_THRESHOLD, EncodeError, GAME_EVENT_WAIT_FOR_CHUNKS, Intent, MovePlayerPos,
     MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PROTOCOL_VERSION, SET_COMPRESSION_ID,
-    Serverbound, State, StatusInfo, World, build_compressed_packet, build_packet,
-    chunk_batch_finished_payload, chunk_batch_start_payload, chunk_coord, chunks_to_forget,
-    chunks_to_load, client_has_core, config_disconnect_payload, decode_compressed_frame,
-    decode_frame, decode_known_packs, decode_serverbound, forget_level_chunk_payload,
-    game_event_payload, keep_alive_payload, known_packs_payload, login_disconnect_payload,
-    login_play_payload, login_success_payload, network_data, offline_uuid, packet_ids,
-    player_abilities_payload, player_position_payload, pong_payload, random_session_id,
-    read_var_int, registry_data_payload, server_known_pack, set_chunk_cache_center_payload,
-    set_compression_payload, status_json, status_response_payload, update_tags_payload,
-    validate_name, write_chunk_payload,
+    Serverbound, State, StatusInfo, World, block_changed_ack_payload, block_update_payload,
+    build_compressed_packet, build_packet, chunk_batch_finished_payload, chunk_batch_start_payload,
+    chunk_coord, chunks_to_forget, chunks_to_load, client_has_core, config_disconnect_payload,
+    decode_compressed_frame, decode_frame, decode_known_packs, decode_serverbound,
+    forget_level_chunk_payload, game_event_payload, keep_alive_payload, known_packs_payload,
+    login_disconnect_payload, login_play_payload, login_success_payload, network_data,
+    offline_uuid, packet_ids, player_abilities_payload, player_position_payload, pong_payload,
+    random_session_id, read_var_int, registry_data_payload, server_known_pack,
+    set_chunk_cache_center_payload, set_compression_payload, status_json, status_response_payload,
+    update_tags_payload, validate_name, write_chunk_payload,
 };
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
@@ -51,6 +51,7 @@ const PLAY_TELEPORT_ID: i32 = 1;
 const PLAY_SPAWN: [f64; 3] = [0.5, -60.0, 0.5];
 pub const REASON_PROTOCOL_ERROR_PREFIX: &str = "Paquet invalide: ";
 pub const REASON_CONNECTION_LOST: &str = "Connexion interrompue";
+pub const REASON_INVALID_SEQUENCE: &str = "séquence d'interaction négative";
 pub const REASON_READ_TIMEOUT: &str = "Délai de lecture dépassé";
 pub const REASON_KEEP_ALIVE_TIMEOUT: &str = "keep alive délai dépassé";
 
@@ -433,6 +434,10 @@ async fn dispatch(
         | Serverbound::PlayMovePlayerRot(_)
         | Serverbound::PlayMovePlayerStatus(_)
         | Serverbound::PlayPlayerAbilities { .. }
+        | Serverbound::PlayPlayerAction(_)
+        | Serverbound::PlayUseItemOn(_)
+        | Serverbound::PlaySetCarriedItem(_)
+        | Serverbound::PlaySetCreativeModeSlot(_)
         | Serverbound::PlayIgnored { .. } => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
         }
@@ -765,8 +770,9 @@ async fn enter_play(
     let PlayHandoff {
         keep_alive,
         world,
-        player,
+        mut player,
     } = handoff;
+    player.pos = (PLAY_SPAWN[0], PLAY_SPAWN[1], PLAY_SPAWN[2]);
     info!(player = %player.name, mode = %player.mode, "entrée en jeu du joueur");
 
     let login = match login_play_payload(
@@ -897,7 +903,10 @@ async fn update_chunks(
     for &(x, z) in &load {
         let column = world.chunk(x, z);
         let mut payload = Vec::new();
-        write_chunk_payload(x, z, &column, &mut payload);
+        {
+            let column = column.lock().unwrap();
+            write_chunk_payload(x, z, &column, &mut payload);
+        }
         if write_packet(
             stream,
             framing,
@@ -1088,11 +1097,13 @@ async fn handle_play_packet(
         }
         Serverbound::PlayMovePlayerPos(m) => {
             session.view.apply_pos(&m);
+            session.player.pos = (m.x, m.y, m.z);
             session.view.log_position("déplacement");
             follow_player(stream, framing, state, session).await
         }
         Serverbound::PlayMovePlayerPosRot(m) => {
             session.view.apply_pos_rot(&m);
+            session.player.pos = (m.x, m.y, m.z);
             session.view.log_position("déplacement et rotation");
             follow_player(stream, framing, state, session).await
         }
@@ -1119,6 +1130,30 @@ async fn handle_play_packet(
             }
             false
         }
+        Serverbound::PlayPlayerAction(action) => {
+            let result = session.player.handle_player_action(session.world, action);
+            emit_interaction(stream, framing, state, result).await
+        }
+        Serverbound::PlayUseItemOn(use_item_on) => {
+            let result = session
+                .player
+                .handle_use_item_on(session.world, use_item_on);
+            emit_interaction(stream, framing, state, result).await
+        }
+        Serverbound::PlaySetCarriedItem(set) => {
+            session.player.hotbar.set_carried(set.slot);
+            debug!(slot = set.slot, "case active mise à jour");
+            false
+        }
+        Serverbound::PlaySetCreativeModeSlot(set) => {
+            let mode = session.player.mode;
+            session
+                .player
+                .hotbar
+                .set_creative_slot(mode, set.slot, set.stack);
+            debug!(slot = set.slot, "case créative mise à jour");
+            false
+        }
         Serverbound::PlayIgnored { id } => {
             trace_packet("paquet play ignoré", State::Play, id, 0);
             false
@@ -1126,6 +1161,46 @@ async fn handle_play_packet(
         other => {
             debug!(packet = ?other, "paquet play inattendu ignoré");
             false
+        }
+    }
+}
+
+async fn emit_interaction(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    result: player::ActionResult,
+) -> bool {
+    match result {
+        player::ActionResult::ProtocolError => {
+            disconnect(stream, framing, state, REASON_INVALID_SEQUENCE).await;
+            true
+        }
+        player::ActionResult::Ignored => false,
+        player::ActionResult::Respond { updates, ack } => {
+            for (pos, block_state) in updates {
+                if write_packet(
+                    stream,
+                    framing,
+                    state,
+                    play_cb::BLOCK_UPDATE,
+                    &block_update_payload(pos, block_state),
+                )
+                .await
+                .is_err()
+                {
+                    return true;
+                }
+            }
+            write_packet(
+                stream,
+                framing,
+                state,
+                play_cb::BLOCK_CHANGED_ACK,
+                &block_changed_ack_payload(ack),
+            )
+            .await
+            .is_err()
         }
     }
 }

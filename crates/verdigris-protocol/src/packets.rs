@@ -1,9 +1,11 @@
 use crate::error::ProtocolError;
 use crate::play::{
     AcceptTeleportation, ChunkBatchReceived, KeepAlive, MovePlayerPos, MovePlayerPosRot,
-    MovePlayerRot, MovePlayerStatus, decode_accept_teleportation, decode_chunk_batch_received,
-    decode_keep_alive, decode_move_player_pos, decode_move_player_pos_rot, decode_move_player_rot,
-    decode_move_player_status, decode_player_abilities, decode_player_loaded,
+    MovePlayerRot, MovePlayerStatus, PlayerAction, SetCarriedItem, SetCreativeModeSlot, UseItemOn,
+    decode_accept_teleportation, decode_chunk_batch_received, decode_keep_alive,
+    decode_move_player_pos, decode_move_player_pos_rot, decode_move_player_rot,
+    decode_move_player_status, decode_player_abilities, decode_player_action, decode_player_loaded,
+    decode_set_carried_item, decode_set_creative_mode_slot, decode_use_item_on,
     packet_ids as play_ids,
 };
 use crate::primitives::{read_i64, read_string, read_u16};
@@ -53,6 +55,10 @@ pub enum Serverbound {
     PlayMovePlayerRot(MovePlayerRot),
     PlayMovePlayerStatus(MovePlayerStatus),
     PlayPlayerAbilities { flying: bool },
+    PlayPlayerAction(PlayerAction),
+    PlayUseItemOn(UseItemOn),
+    PlaySetCarriedItem(SetCarriedItem),
+    PlaySetCreativeModeSlot(SetCreativeModeSlot),
     PlayIgnored { id: i32 },
 }
 
@@ -178,6 +184,18 @@ fn decode_play(id: i32, body: &[u8]) -> Result<Serverbound, ProtocolError> {
         Ok(Serverbound::PlayPlayerAbilities {
             flying: decode_player_abilities(body)?,
         })
+    } else if id == play_ids::serverbound::PLAYER_ACTION {
+        Ok(Serverbound::PlayPlayerAction(decode_player_action(body)?))
+    } else if id == play_ids::serverbound::USE_ITEM_ON {
+        Ok(Serverbound::PlayUseItemOn(decode_use_item_on(body)?))
+    } else if id == play_ids::serverbound::SET_CARRIED_ITEM {
+        Ok(Serverbound::PlaySetCarriedItem(decode_set_carried_item(
+            body,
+        )?))
+    } else if id == play_ids::serverbound::SET_CREATIVE_MODE_SLOT {
+        Ok(Serverbound::PlaySetCreativeModeSlot(
+            decode_set_creative_mode_slot(body)?,
+        ))
     } else {
         Ok(Serverbound::PlayIgnored { id })
     }

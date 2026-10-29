@@ -2,7 +2,8 @@ use crate::chunk::{ChunkColumn, write_chunk_payload};
 use crate::error::ProtocolError;
 use crate::network::network_data;
 use crate::primitives::{
-    read_f32, read_f64, read_i64, write_f32, write_f64, write_i32, write_i64, write_string,
+    read_f32, read_f64, read_i64, read_u16, write_f32, write_f64, write_i32, write_i64,
+    write_string,
 };
 use crate::varint::{read_var_int, write_var_int};
 
@@ -29,6 +30,8 @@ pub mod packet_ids {
         pub const CHUNK_BATCH_FINISHED: i32 = 0x0B;
         pub const FORGET_LEVEL_CHUNK: i32 = 0x26;
         pub const PLAYER_ABILITIES: i32 = 0x41;
+        pub const BLOCK_UPDATE: i32 = 0x08;
+        pub const BLOCK_CHANGED_ACK: i32 = 0x04;
     }
 
     pub mod serverbound {
@@ -41,8 +44,19 @@ pub mod packet_ids {
         pub const MOVE_PLAYER_ROT: i32 = 0x20;
         pub const MOVE_PLAYER_STATUS_ONLY: i32 = 0x21;
         pub const PLAYER_ABILITIES: i32 = 0x28;
+        pub const PLAYER_ACTION: i32 = 0x29;
+        pub const USE_ITEM_ON: i32 = 0x42;
+        pub const SET_CARRIED_ITEM: i32 = 0x36;
+        pub const SET_CREATIVE_MODE_SLOT: i32 = 0x39;
     }
 }
+
+pub const AIR_STATE: u16 = 0;
+
+pub const START_DESTROY_BLOCK: i32 = 0;
+pub const CHANGE_DESTROY_DIRECTION: i32 = 1;
+pub const ABORT_DESTROY_BLOCK: i32 = 2;
+pub const STOP_DESTROY_BLOCK: i32 = 3;
 
 const OVERWORLD: &str = "minecraft:overworld";
 
@@ -445,9 +459,190 @@ pub fn decode_move_player_status(body: &[u8]) -> Result<MovePlayerStatus, Protoc
     Ok(MovePlayerStatus { flags })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockPos {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl BlockPos {
+    pub fn from_long(value: i64) -> BlockPos {
+        BlockPos {
+            x: (value >> 38) as i32,
+            y: ((value << 52) >> 52) as i32,
+            z: ((value << 26) >> 38) as i32,
+        }
+    }
+
+    pub fn to_long(self) -> i64 {
+        ((self.x as i64 & 0x3FF_FFFF) << 38)
+            | ((self.z as i64 & 0x3FF_FFFF) << 12)
+            | (self.y as i64 & 0xFFF)
+    }
+
+    pub fn offset(self, dx: i32, dy: i32, dz: i32) -> BlockPos {
+        BlockPos {
+            x: self.x + dx,
+            y: self.y + dy,
+            z: self.z + dz,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemStack {
+    Empty,
+    Item { count: i32, item: i32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerAction {
+    pub action: i32,
+    pub pos: BlockPos,
+    pub face: u8,
+    pub sequence: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UseItemOn {
+    pub hand: i32,
+    pub pos: BlockPos,
+    pub face: i32,
+    pub cursor: [f32; 3],
+    pub inside: bool,
+    pub world_border_hit: bool,
+    pub sequence: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetCarriedItem {
+    pub slot: i16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetCreativeModeSlot {
+    pub slot: i16,
+    pub stack: ItemStack,
+}
+
+fn take_i16(cursor: &mut &[u8]) -> Result<i16, ProtocolError> {
+    match read_u16(cursor)? {
+        Some((value, consumed)) => {
+            *cursor = &cursor[consumed..];
+            Ok(value as i16)
+        }
+        None => Err(ProtocolError::UnexpectedEof),
+    }
+}
+
+fn take_bool(cursor: &mut &[u8]) -> Result<bool, ProtocolError> {
+    Ok(take_u8(cursor)? != 0)
+}
+
+fn skip_bytes(cursor: &mut &[u8], count: usize) -> Result<(), ProtocolError> {
+    if cursor.len() < count {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+    *cursor = &cursor[count..];
+    Ok(())
+}
+
+fn decode_item_stack(cursor: &mut &[u8]) -> Result<ItemStack, ProtocolError> {
+    let count = take_var_int(cursor)?;
+    if count <= 0 {
+        return Ok(ItemStack::Empty);
+    }
+    let item = take_var_int(cursor)?;
+    let added_count = take_var_int(cursor)?;
+    let removed_count = take_var_int(cursor)?;
+    if added_count < 0 || removed_count < 0 {
+        return Err(ProtocolError::PrefixedArrayLengthNegative);
+    }
+    for _ in 0..added_count {
+        let _type = take_var_int(cursor)?;
+        let len = take_var_int(cursor)?;
+        if len < 0 {
+            return Err(ProtocolError::PrefixedArrayLengthNegative);
+        }
+        skip_bytes(cursor, len as usize)?;
+    }
+    for _ in 0..removed_count {
+        let _type = take_var_int(cursor)?;
+    }
+    Ok(ItemStack::Item { count, item })
+}
+
+pub fn decode_player_action(body: &[u8]) -> Result<PlayerAction, ProtocolError> {
+    let mut cursor = body;
+    let action = take_var_int(&mut cursor)?;
+    let pos = BlockPos::from_long(take_i64(&mut cursor)?);
+    let face = take_u8(&mut cursor)?;
+    let sequence = take_var_int(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(PlayerAction {
+        action,
+        pos,
+        face,
+        sequence,
+    })
+}
+
+pub fn decode_use_item_on(body: &[u8]) -> Result<UseItemOn, ProtocolError> {
+    let mut cursor = body;
+    let hand = take_var_int(&mut cursor)?;
+    let pos = BlockPos::from_long(take_i64(&mut cursor)?);
+    let face = take_var_int(&mut cursor)?;
+    let cursor_x = take_f32(&mut cursor)?;
+    let cursor_y = take_f32(&mut cursor)?;
+    let cursor_z = take_f32(&mut cursor)?;
+    let inside = take_bool(&mut cursor)?;
+    let world_border_hit = take_bool(&mut cursor)?;
+    let sequence = take_var_int(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(UseItemOn {
+        hand,
+        pos,
+        face,
+        cursor: [cursor_x, cursor_y, cursor_z],
+        inside,
+        world_border_hit,
+        sequence,
+    })
+}
+
+pub fn decode_set_carried_item(body: &[u8]) -> Result<SetCarriedItem, ProtocolError> {
+    let mut cursor = body;
+    let slot = take_i16(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(SetCarriedItem { slot })
+}
+
+pub fn decode_set_creative_mode_slot(body: &[u8]) -> Result<SetCreativeModeSlot, ProtocolError> {
+    let mut cursor = body;
+    let slot = take_i16(&mut cursor)?;
+    let stack = decode_item_stack(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(SetCreativeModeSlot { slot, stack })
+}
+
+pub fn block_update_payload(pos: BlockPos, state: i32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_i64(pos.to_long(), &mut payload);
+    write_var_int(state, &mut payload);
+    payload
+}
+
+pub fn block_changed_ack_payload(sequence: i32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_var_int(sequence, &mut payload);
+    payload
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primitives::write_u16;
     use crate::varint::read_var_int;
 
     #[test]
@@ -464,6 +659,201 @@ mod tests {
         assert_eq!(packet_ids::serverbound::KEEP_ALIVE, 0x1C);
         assert_eq!(packet_ids::serverbound::PLAYER_LOADED, 0x2C);
         assert_eq!(packet_ids::serverbound::CHUNK_BATCH_RECEIVED, 0x0B);
+        assert_eq!(packet_ids::serverbound::PLAYER_ACTION, 0x29);
+        assert_eq!(packet_ids::serverbound::USE_ITEM_ON, 0x42);
+        assert_eq!(packet_ids::serverbound::SET_CARRIED_ITEM, 0x36);
+        assert_eq!(packet_ids::serverbound::SET_CREATIVE_MODE_SLOT, 0x39);
+        assert_eq!(packet_ids::clientbound::BLOCK_UPDATE, 0x08);
+        assert_eq!(packet_ids::clientbound::BLOCK_CHANGED_ACK, 0x04);
+    }
+
+    #[test]
+    fn block_pos_round_trip_including_negatives() {
+        for pos in [
+            BlockPos { x: 0, y: 0, z: 0 },
+            BlockPos { x: 1, y: -60, z: 2 },
+            BlockPos {
+                x: -1,
+                y: -64,
+                z: -1,
+            },
+            BlockPos {
+                x: -1000,
+                y: 319,
+                z: 1000,
+            },
+            BlockPos {
+                x: 33_554_431,
+                y: -2048,
+                z: -33_554_432,
+            },
+        ] {
+            assert_eq!(BlockPos::from_long(pos.to_long()), pos);
+        }
+    }
+
+    #[test]
+    fn block_pos_known_vector() {
+        let pos = BlockPos { x: 1, y: 2, z: 3 };
+        let packed = pos.to_long();
+        assert_eq!(BlockPos::from_long(packed), pos);
+        let negative = BlockPos {
+            x: -1,
+            y: -1,
+            z: -1,
+        };
+        assert_eq!(BlockPos::from_long(negative.to_long()), negative);
+    }
+
+    #[test]
+    fn decode_player_action_fields() {
+        let mut body = Vec::new();
+        write_var_int(0, &mut body);
+        write_i64(
+            BlockPos {
+                x: -1,
+                y: -60,
+                z: 2,
+            }
+            .to_long(),
+            &mut body,
+        );
+        body.push(1);
+        write_var_int(7, &mut body);
+        assert_eq!(
+            decode_player_action(&body).unwrap(),
+            PlayerAction {
+                action: 0,
+                pos: BlockPos {
+                    x: -1,
+                    y: -60,
+                    z: 2
+                },
+                face: 1,
+                sequence: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_use_item_on_fields() {
+        let mut body = Vec::new();
+        write_var_int(0, &mut body);
+        write_i64(
+            BlockPos {
+                x: 3,
+                y: -61,
+                z: -4,
+            }
+            .to_long(),
+            &mut body,
+        );
+        write_var_int(1, &mut body);
+        write_f32(0.5, &mut body);
+        write_f32(1.0, &mut body);
+        write_f32(0.25, &mut body);
+        body.push(0);
+        body.push(1);
+        write_var_int(12, &mut body);
+        assert_eq!(
+            decode_use_item_on(&body).unwrap(),
+            UseItemOn {
+                hand: 0,
+                pos: BlockPos {
+                    x: 3,
+                    y: -61,
+                    z: -4
+                },
+                face: 1,
+                cursor: [0.5, 1.0, 0.25],
+                inside: false,
+                world_border_hit: true,
+                sequence: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_set_carried_item_fields() {
+        let mut body = Vec::new();
+        write_u16(5u16, &mut body);
+        assert_eq!(
+            decode_set_carried_item(&body).unwrap(),
+            SetCarriedItem { slot: 5 }
+        );
+    }
+
+    #[test]
+    fn decode_set_creative_mode_slot_empty_stack() {
+        let mut body = Vec::new();
+        write_u16(36u16, &mut body);
+        write_var_int(0, &mut body);
+        assert_eq!(
+            decode_set_creative_mode_slot(&body).unwrap(),
+            SetCreativeModeSlot {
+                slot: 36,
+                stack: ItemStack::Empty,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_set_creative_mode_slot_skips_components() {
+        let mut body = Vec::new();
+        write_u16(36u16, &mut body);
+        write_var_int(1, &mut body);
+        write_var_int(55, &mut body);
+        write_var_int(2, &mut body);
+        write_var_int(1, &mut body);
+        write_var_int(7, &mut body);
+        write_var_int(3, &mut body);
+        body.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        write_var_int(8, &mut body);
+        write_var_int(1, &mut body);
+        body.extend_from_slice(&[0xDD]);
+        write_var_int(9, &mut body);
+        assert_eq!(
+            decode_set_creative_mode_slot(&body).unwrap(),
+            SetCreativeModeSlot {
+                slot: 36,
+                stack: ItemStack::Item { count: 1, item: 55 },
+            }
+        );
+    }
+
+    #[test]
+    fn decode_item_stack_truncated_component_is_eof() {
+        let mut raw = Vec::new();
+        write_var_int(1, &mut raw);
+        write_var_int(55, &mut raw);
+        write_var_int(1, &mut raw);
+        write_var_int(0, &mut raw);
+        write_var_int(0, &mut raw);
+        write_var_int(4, &mut raw);
+        raw.push(0x01);
+        let mut body = &raw[..];
+        assert_eq!(
+            decode_item_stack(&mut body),
+            Err(ProtocolError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn block_update_payload_layout() {
+        let pos = BlockPos { x: 1, y: -60, z: 2 };
+        let payload = block_update_payload(pos, 10);
+        assert_eq!(&payload[..8], &pos.to_long().to_be_bytes());
+        let (state, consumed) = read_var_int(&payload[8..]).unwrap().unwrap();
+        assert_eq!(state, 10);
+        assert_eq!(8 + consumed, payload.len());
+    }
+
+    #[test]
+    fn block_changed_ack_payload_is_var_int() {
+        let payload = block_changed_ack_payload(42);
+        let (sequence, consumed) = read_var_int(&payload).unwrap().unwrap();
+        assert_eq!(sequence, 42);
+        assert_eq!(consumed, payload.len());
     }
 
     #[test]
