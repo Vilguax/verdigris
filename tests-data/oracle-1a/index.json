@@ -1,0 +1,295 @@
+{
+ "format": 1,
+ "game_version": "26.3",
+ "seed": 20261029,
+ "min_y": -64,
+ "height": 384,
+ "index": "(y - min_y) * 256 + z * 16 + x",
+ "cells": {
+  "0": "non solide",
+  "1": "solide",
+  "2": "exclu"
+ },
+ "chunks": [
+  {
+   "x": -190,
+   "z": 324,
+   "file": "-190.324.bin",
+   "solid": 21937,
+   "excluded": 0
+  },
+  {
+   "x": -178,
+   "z": 308,
+   "file": "-178.308.bin",
+   "solid": 31025,
+   "excluded": 0
+  },
+  {
+   "x": -178,
+   "z": 309,
+   "file": "-178.309.bin",
+   "solid": 32638,
+   "excluded": 0
+  },
+  {
+   "x": -178,
+   "z": 310,
+   "file": "-178.310.bin",
+   "solid": 35396,
+   "excluded": 0
+  },
+  {
+   "x": -177,
+   "z": 308,
+   "file": "-177.308.bin",
+   "solid": 32719,
+   "excluded": 0
+  },
+  {
+   "x": -177,
+   "z": 309,
+   "file": "-177.309.bin",
+   "solid": 34095,
+   "excluded": 0
+  },
+  {
+   "x": -177,
+   "z": 310,
+   "file": "-177.310.bin",
+   "solid": 34999,
+   "excluded": 0
+  },
+  {
+   "x": -176,
+   "z": 308,
+   "file": "-176.308.bin",
+   "solid": 33788,
+   "excluded": 0
+  },
+  {
+   "x": -176,
+   "z": 309,
+   "file": "-176.309.bin",
+   "solid": 35337,
+   "excluded": 0
+  },
+  {
+   "x": -176,
+   "z": 310,
+   "file": "-176.310.bin",
+   "solid": 34981,
+   "excluded": 0
+  },
+  {
+   "x": -7,
+   "z": 0,
+   "file": "-7.0.bin",
+   "solid": 30057,
+   "excluded": 0
+  },
+  {
+   "x": 5,
+   "z": 3,
+   "file": "5.3.bin",
+   "solid": 34029,
+   "excluded": 0
+  },
+  {
+   "x": 5,
+   "z": 4,
+   "file": "5.4.bin",
+   "solid": 32981,
+   "excluded": 0
+  },
+  {
+   "x": 5,
+   "z": 5,
+   "file": "5.5.bin",
+   "solid": 33244,
+   "excluded": 0
+  },
+  {
+   "x": 5,
+   "z": 6,
+   "file": "5.6.bin",
+   "solid": 32202,
+   "excluded": 0
+  },
+  {
+   "x": 6,
+   "z": 3,
+   "file": "6.3.bin",
+   "solid": 34485,
+   "excluded": 0
+  },
+  {
+   "x": 6,
+   "z": 4,
+   "file": "6.4.bin",
+   "solid": 32210,
+   "excluded": 0
+  },
+  {
+   "x": 6,
+   "z": 5,
+   "file": "6.5.bin",
+   "solid": 31281,
+   "excluded": 0
+  },
+  {
+   "x": 6,
+   "z": 6,
+   "file": "6.6.bin",
+   "solid": 35263,
+   "excluded": 0
+  },
+  {
+   "x": 7,
+   "z": 3,
+   "file": "7.3.bin",
+   "solid": 37285,
+   "excluded": 0
+  },
+  {
+   "x": 7,
+   "z": 4,
+   "file": "7.4.bin",
+   "solid": 34248,
+   "excluded": 0
+  },
+  {
+   "x": 7,
+   "z": 5,
+   "file": "7.5.bin",
+   "solid": 35815,
+   "excluded": 0
+  },
+  {
+   "x": 7,
+   "z": 6,
+   "file": "7.6.bin",
+   "solid": 43173,
+   "excluded": 0
+  },
+  {
+   "x": 252,
+   "z": -123,
+   "file": "252.-123.bin",
+   "solid": 49994,
+   "excluded": 0
+  },
+  {
+   "x": 252,
+   "z": -122,
+   "file": "252.-122.bin",
+   "solid": 47091,
+   "excluded": 0
+  },
+  {
+   "x": 252,
+   "z": -121,
+   "file": "252.-121.bin",
+   "solid": 45643,
+   "excluded": 0
+  },
+  {
+   "x": 252,
+   "z": -120,
+   "file": "252.-120.bin",
+   "solid": 42898,
+   "excluded": 0
+  },
+  {
+   "x": 253,
+   "z": -123,
+   "file": "253.-123.bin",
+   "solid": 47397,
+   "excluded": 0
+  },
+  {
+   "x": 253,
+   "z": -122,
+   "file": "253.-122.bin",
+   "solid": 48637,
+   "excluded": 0
+  },
+  {
+   "x": 253,
+   "z": -121,
+   "file": "253.-121.bin",
+   "solid": 46819,
+   "excluded": 0
+  },
+  {
+   "x": 253,
+   "z": -120,
+   "file": "253.-120.bin",
+   "solid": 45769,
+   "excluded": 0
+  },
+  {
+   "x": 254,
+   "z": -123,
+   "file": "254.-123.bin",
+   "solid": 47925,
+   "excluded": 0
+  },
+  {
+   "x": 254,
+   "z": -122,
+   "file": "254.-122.bin",
+   "solid": 49631,
+   "excluded": 0
+  },
+  {
+   "x": 254,
+   "z": -121,
+   "file": "254.-121.bin",
+   "solid": 46724,
+   "excluded": 0
+  },
+  {
+   "x": 254,
+   "z": -120,
+   "file": "254.-120.bin",
+   "solid": 47877,
+   "excluded": 0
+  },
+  {
+   "x": 255,
+   "z": -123,
+   "file": "255.-123.bin",
+   "solid": 43841,
+   "excluded": 0
+  },
+  {
+   "x": 255,
+   "z": -122,
+   "file": "255.-122.bin",
+   "solid": 42765,
+   "excluded": 0
+  },
+  {
+   "x": 255,
+   "z": -121,
+   "file": "255.-121.bin",
+   "solid": 44988,
+   "excluded": 0
+  },
+  {
+   "x": 255,
+   "z": -120,
+   "file": "255.-120.bin",
+   "solid": 43780,
+   "excluded": 0
+  },
+  {
+   "x": 258,
+   "z": -131,
+   "file": "258.-131.bin",
+   "solid": 25774,
+   "excluded": 0
+  }
+ ]
+}
