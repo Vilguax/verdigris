@@ -577,16 +577,14 @@ mod tests {
     }
 
     fn take_bitset(cursor: &mut &[u8]) -> u64 {
-        let (longs, c) = read_var_int(cursor).unwrap().unwrap();
+        let (len, c) = read_var_int(cursor).unwrap().unwrap();
         *cursor = &cursor[c..];
-        if longs == 0 {
-            return 0;
-        }
-        assert_eq!(longs, 1);
+        let len = len as usize;
+        assert!(len <= 8);
         let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&cursor[..8]);
-        *cursor = &cursor[8..];
-        u64::from_be_bytes(bytes)
+        bytes[..len].copy_from_slice(&cursor[..len]);
+        *cursor = &cursor[len..];
+        u64::from_le_bytes(bytes)
     }
 
     #[test]
