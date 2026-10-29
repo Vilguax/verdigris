@@ -1,4 +1,5 @@
 mod player;
+mod registry;
 mod storage;
 
 use std::collections::HashSet;
@@ -7,6 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use player::{GAMEMODE_ENV, PlayerState, read_gamemode, resolve_gamemode};
+use registry::OutboundSender;
+pub use registry::PlayerRegistry;
 pub use storage::{
     CHUNKS_SUBDIR, ChunkStore, DEFAULT_WORLD_DIR, DiskLoader, LoadOutcome, REJECTED_SUFFIX,
     WORLD_ENV, world_dir,
@@ -14,6 +17,7 @@ pub use storage::{
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::time::{Duration, Instant, MissedTickBehavior, interval, timeout, timeout_at};
 use tracing::{Instrument, debug, error, info, info_span, warn};
 use tracing_subscriber::EnvFilter;
@@ -21,18 +25,20 @@ use tracing_subscriber::EnvFilter;
 use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
     COMPRESSION_THRESHOLD, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, Intent,
-    MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PROTOCOL_VERSION,
-    SET_COMPRESSION_ID, Serverbound, State, StatusInfo, World, block_changed_ack_payload,
-    block_update_payload, build_compressed_packet, build_packet, chunk_batch_finished_payload,
-    chunk_batch_start_payload, chunk_coord, chunks_to_forget, chunks_to_load, client_has_core,
-    config_disconnect_payload, container_set_slot_payload, decode_compressed_frame, decode_frame,
-    decode_known_packs, decode_serverbound, forget_level_chunk_payload, game_event_payload,
-    keep_alive_payload, known_packs_payload, login_disconnect_payload, login_play_payload,
-    login_success_payload, network_data, offline_uuid, packet_ids, player_abilities_payload,
-    player_position_payload, pong_payload, random_session_id, read_var_int, registry_data_payload,
-    server_known_pack, set_chunk_cache_center_payload, set_compression_payload,
-    set_held_slot_payload, status_json, status_response_payload, update_tags_payload,
-    validate_name, write_chunk_payload,
+    ListedPlayer, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus,
+    PROTOCOL_VERSION, SET_COMPRESSION_ID, Serverbound, State, StatusInfo, World,
+    block_changed_ack_payload, block_update_payload, build_compressed_packet, build_packet,
+    chunk_batch_finished_payload, chunk_batch_start_payload, chunk_coord, chunks_to_forget,
+    chunks_to_load, client_has_core, config_disconnect_payload, container_set_slot_payload,
+    decode_compressed_frame, decode_frame, decode_known_packs, decode_serverbound,
+    forget_level_chunk_payload, game_event_payload, keep_alive_payload, known_packs_payload,
+    login_disconnect_payload, login_play_payload, login_success_payload, network_data,
+    offline_uuid, packet_ids, player_abilities_payload, player_info_remove_payload,
+    player_info_update_gamemode_payload, player_info_update_init_payload,
+    player_info_update_latency_payload, player_position_payload, pong_payload, random_session_id,
+    read_var_int, registry_data_payload, server_known_pack, set_chunk_cache_center_payload,
+    set_compression_payload, set_held_slot_payload, status_json, status_response_payload,
+    tab_list_payload, update_tags_payload, validate_name, write_chunk_payload,
 };
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
@@ -65,6 +71,8 @@ pub const REASON_KEEP_ALIVE_TIMEOUT: &str = "keep alive délai dépassé";
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const FLUSH_INTERVAL: Duration = Duration::from_secs(30);
+const LATENCY_BROADCAST_INTERVAL: Duration = Duration::from_secs(30);
+const PLAY_THRESHOLD: usize = COMPRESSION_THRESHOLD as usize;
 const READ_CHUNK: usize = 4096;
 const CLOSE_BUDGET: Duration = Duration::from_secs(1);
 const DRAIN_LIMIT: usize = 64 * 1024;
@@ -79,12 +87,18 @@ pub struct KeepAliveConfig {
 impl Default for KeepAliveConfig {
     fn default() -> Self {
         KeepAliveConfig {
-            interval: Duration::from_secs(10),
-            timeout: Duration::from_secs(15),
+            interval: Duration::from_secs(3600),
+            timeout: Duration::from_secs(7200),
             check_period: Duration::from_secs(1),
         }
     }
 }
+
+pub const PRODUCTION_KEEP_ALIVE: KeepAliveConfig = KeepAliveConfig {
+    interval: Duration::from_secs(10),
+    timeout: Duration::from_secs(15),
+    check_period: Duration::from_secs(1),
+};
 
 struct Pending {
     id: i64,
@@ -139,7 +153,7 @@ fn evaluate_keep_alive(
     KeepAliveAction::None
 }
 
-fn ack_keep_alive(state: &mut KeepAliveState, id: i64, now: Instant) {
+fn ack_keep_alive(state: &mut KeepAliveState, id: i64, now: Instant) -> Option<Duration> {
     match &state.pending {
         Some(pending) if pending.id == id => {
             let elapsed = now.duration_since(pending.sent_at);
@@ -149,9 +163,88 @@ fn ack_keep_alive(state: &mut KeepAliveState, id: i64, now: Instant) {
                 "keep alive confirmé"
             );
             state.pending = None;
+            Some(elapsed)
         }
         _ => {
             warn!(id, "keep alive inattendu ignoré");
+            None
+        }
+    }
+}
+
+fn latency_ms_from(elapsed: Duration) -> i32 {
+    elapsed.as_millis().min(i32::MAX as u128) as i32
+}
+
+fn frame_arc(id: i32, payload: &[u8]) -> Option<Arc<[u8]>> {
+    match build_compressed_packet(id, payload, PLAY_THRESHOLD) {
+        Ok(frame) => Some(Arc::from(frame.into_boxed_slice())),
+        Err(err) => {
+            warn!("diffusion impossible: {err}");
+            None
+        }
+    }
+}
+
+fn push_frame(senders: &[OutboundSender], frame: &Arc<[u8]>) {
+    for sender in senders {
+        let _ = sender.send(Arc::clone(frame));
+    }
+}
+
+pub fn broadcast_gamemode_change(registry: &Arc<PlayerRegistry>, uuid: u128, mode: i32) {
+    let senders = registry.set_gamemode(uuid, mode);
+    if senders.is_empty() {
+        return;
+    }
+    if let Some(frame) = frame_arc(
+        play_cb::PLAYER_INFO_UPDATE,
+        &player_info_update_gamemode_payload(uuid, mode),
+    ) {
+        push_frame(&senders, &frame);
+    }
+}
+
+fn broadcast_latency(registry: &Arc<PlayerRegistry>) {
+    let (all_entries, senders) = registry.latency_broadcast();
+    let entries: Vec<(u128, i32)> = all_entries
+        .into_iter()
+        .filter(|&(_, latency_ms)| latency_ms > 0)
+        .collect();
+    if entries.is_empty() || senders.is_empty() {
+        return;
+    }
+    if let Some(frame) = frame_arc(
+        play_cb::PLAYER_INFO_UPDATE,
+        &player_info_update_latency_payload(&entries),
+    ) {
+        push_frame(&senders, &frame);
+    }
+    debug!(joueurs = senders.len(), "latence diffusée");
+}
+
+struct PlayGuard {
+    registry: Arc<PlayerRegistry>,
+    uuid: u128,
+}
+
+impl Drop for PlayGuard {
+    fn drop(&mut self) {
+        let remaining = self.registry.remove(self.uuid);
+        if remaining.is_empty() {
+            return;
+        }
+        let remove_frame = frame_arc(
+            play_cb::PLAYER_INFO_REMOVE,
+            &player_info_remove_payload(&[self.uuid]),
+        );
+        let (header, footer) = self.registry.tab_strings();
+        let tab_frame = frame_arc(play_cb::TAB_LIST, &tab_list_payload(&header, &footer));
+        if let Some(frame) = &remove_frame {
+            push_frame(&remaining, frame);
+        }
+        if let Some(frame) = &tab_frame {
+            push_frame(&remaining, frame);
         }
     }
 }
@@ -220,7 +313,7 @@ fn set_state(state: &mut State, next: State) {
 
 pub async fn serve(bind: &str) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
-    run(listener).await
+    run_with_config(listener, PRODUCTION_KEEP_ALIVE).await
 }
 
 pub async fn run(listener: TcpListener) -> std::io::Result<()> {
@@ -297,9 +390,13 @@ where
     F: Future<Output = ()>,
 {
     let counter = AtomicU64::new(0);
+    let players = Arc::new(PlayerRegistry::new(DEFAULT_MOTD, DEFAULT_MAX_PLAYERS));
     let mut ticker = interval(FLUSH_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     ticker.tick().await;
+    let mut latency_ticker = interval(LATENCY_BROADCAST_INTERVAL);
+    latency_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    latency_ticker.tick().await;
     tokio::pin!(shutdown);
 
     loop {
@@ -309,9 +406,10 @@ where
                     let conn_id = counter.fetch_add(1, Ordering::Relaxed);
                     let span = info_span!("conn", conn_id, peer = %peer);
                     let world = Arc::clone(&world);
+                    let players = Arc::clone(&players);
                     tokio::spawn(
                         async move {
-                            handle_connection(stream, keep_alive, world).await;
+                            handle_connection(stream, keep_alive, world, players).await;
                         }
                         .instrument(span),
                     );
@@ -323,6 +421,9 @@ where
             _ = ticker.tick() => {
                 flush_dirty(&world, &store);
             }
+            _ = latency_ticker.tick() => {
+                broadcast_latency(&players);
+            }
             _ = &mut shutdown => break,
         }
     }
@@ -332,17 +433,27 @@ where
     Ok(())
 }
 
-async fn handle_connection(stream: TcpStream, keep_alive: KeepAliveConfig, world: Arc<World>) {
+async fn handle_connection(
+    stream: TcpStream,
+    keep_alive: KeepAliveConfig,
+    world: Arc<World>,
+    players: Arc<PlayerRegistry>,
+) {
     let started = Instant::now();
     info!("connexion acceptée");
-    serve_connection(stream, keep_alive, world).await;
+    serve_connection(stream, keep_alive, world, players).await;
     info!(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "fin de connexion"
     );
 }
 
-async fn serve_connection(mut stream: TcpStream, keep_alive: KeepAliveConfig, world: Arc<World>) {
+async fn serve_connection(
+    mut stream: TcpStream,
+    keep_alive: KeepAliveConfig,
+    world: Arc<World>,
+    players: Arc<PlayerRegistry>,
+) {
     let mut buf: Vec<u8> = Vec::new();
     let mut state = State::Handshaking;
     let mut framing = Framing::Uncompressed;
@@ -384,6 +495,7 @@ async fn serve_connection(mut stream: TcpStream, keep_alive: KeepAliveConfig, wo
                         keep_alive,
                         world: &world,
                         player,
+                        registry: &players,
                     };
                     run_configuration(
                         &mut stream,
@@ -623,6 +735,7 @@ struct PlayHandoff<'a> {
     keep_alive: KeepAliveConfig,
     world: &'a Arc<World>,
     player: PlayerState,
+    registry: &'a Arc<PlayerRegistry>,
 }
 
 async fn run_configuration(
@@ -844,6 +957,8 @@ struct Session<'a> {
     view: PlayerView,
     world: &'a Arc<World>,
     player: PlayerState,
+    uuid: u128,
+    registry: Arc<PlayerRegistry>,
 }
 
 async fn enter_play(
@@ -858,6 +973,7 @@ async fn enter_play(
         keep_alive,
         world,
         mut player,
+        registry,
     } = handoff;
     player.pos = (PLAY_SPAWN[0], PLAY_SPAWN[1], PLAY_SPAWN[2]);
     info!(player = %player.name, mode = %player.mode, "entrée en jeu du joueur");
@@ -925,12 +1041,79 @@ async fn enter_play(
         return;
     }
 
+    let uuid = offline_uuid(&player.name);
+    let (tx, rx) = unbounded_channel::<Arc<[u8]>>();
+    let snapshot = registry.register(uuid, player.name.clone(), player.mode.game_type(), 0, tx);
+    let _guard = PlayGuard {
+        registry: Arc::clone(registry),
+        uuid,
+    };
+
+    let own = ListedPlayer {
+        uuid,
+        name: player.name.clone(),
+        game_mode: player.mode.game_type(),
+        latency_ms: 0,
+        listed: true,
+    };
+
+    let mut everyone = snapshot.existing;
+    everyone.push(own.clone());
+    let init_all = match player_info_update_init_payload(&everyone) {
+        Ok(payload) => payload,
+        Err(err) => {
+            let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
+            disconnect(stream, framing, *state, &reason).await;
+            return;
+        }
+    };
+    if write_packet(
+        stream,
+        framing,
+        *state,
+        play_cb::PLAYER_INFO_UPDATE,
+        &init_all,
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
+    let (header, footer) = registry.tab_strings();
+    let tab = tab_list_payload(&header, &footer);
+    if write_packet(stream, framing, *state, play_cb::TAB_LIST, &tab)
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    if !snapshot.other_senders.is_empty() {
+        let init_self = match player_info_update_init_payload(std::slice::from_ref(&own)) {
+            Ok(payload) => payload,
+            Err(err) => {
+                let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
+                disconnect(stream, framing, *state, &reason).await;
+                return;
+            }
+        };
+        if let Some(frame) = frame_arc(play_cb::PLAYER_INFO_UPDATE, &init_self) {
+            push_frame(&snapshot.other_senders, &frame);
+        }
+        if let Some(frame) = frame_arc(play_cb::TAB_LIST, &tab) {
+            push_frame(&snapshot.other_senders, &frame);
+        }
+    }
+
     let session = Session {
         view,
         world,
         player,
+        uuid,
+        registry: Arc::clone(registry),
     };
-    run_play(stream, framing, state, buf, chunk, keep_alive, session).await;
+    run_play(stream, framing, state, buf, chunk, keep_alive, rx, session).await;
 }
 
 async fn update_chunks(
@@ -1034,9 +1217,11 @@ async fn update_chunks(
 
 enum PlayStep {
     Timer,
+    Outbound(Option<Arc<[u8]>>),
     Read(std::io::Result<usize>),
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_play(
     stream: &mut TcpStream,
     framing: &Framing,
@@ -1044,6 +1229,7 @@ async fn run_play(
     buf: &mut Vec<u8>,
     chunk: &mut [u8],
     keep_alive: KeepAliveConfig,
+    mut rx: UnboundedReceiver<Arc<[u8]>>,
     mut session: Session<'_>,
 ) {
     let threshold = match framing {
@@ -1100,6 +1286,7 @@ async fn run_play(
 
         let step = tokio::select! {
             _ = ticker.tick() => PlayStep::Timer,
+            outbound = rx.recv() => PlayStep::Outbound(outbound),
             read = stream.read(chunk) => PlayStep::Read(read),
         };
 
@@ -1109,6 +1296,13 @@ async fn run_play(
                     return;
                 }
             }
+            PlayStep::Outbound(Some(bytes)) => {
+                if stream.write_all(&bytes).await.is_err() {
+                    disconnect(stream, framing, *state, REASON_CONNECTION_LOST).await;
+                    return;
+                }
+            }
+            PlayStep::Outbound(None) => return,
             PlayStep::Read(Ok(0)) => {
                 disconnect(stream, framing, *state, REASON_CONNECTION_LOST).await;
                 return;
@@ -1179,7 +1373,11 @@ async fn handle_play_packet(
             false
         }
         Serverbound::PlayKeepAlive(keep_alive) => {
-            ack_keep_alive(ka, keep_alive.id, now);
+            if let Some(elapsed) = ack_keep_alive(ka, keep_alive.id, now) {
+                session
+                    .registry
+                    .set_latency(session.uuid, latency_ms_from(elapsed));
+            }
             false
         }
         Serverbound::PlayMovePlayerPos(m) => {
@@ -1423,11 +1621,55 @@ async fn drain(stream: &mut TcpStream, deadline: Instant) {
 
 #[cfg(test)]
 mod tests {
-    use super::{PLAY_SPAWN, build_env_filter};
+    use super::{
+        Arc, PLAY_SPAWN, PLAY_THRESHOLD, PlayerRegistry, broadcast_gamemode_change,
+        broadcast_latency, build_env_filter,
+    };
+    use tokio::sync::mpsc::unbounded_channel;
+    use verdigris_protocol::{
+        decode_compressed_frame, play::packet_ids::clientbound as play_cb, read_var_int,
+    };
+
+    fn action_byte(frame: &Arc<[u8]>) -> (i32, u8) {
+        let (body, _) = decode_compressed_frame(&frame[..], PLAY_THRESHOLD)
+            .unwrap()
+            .unwrap();
+        let (id, header) = read_var_int(&body).unwrap().unwrap();
+        (id, body[header])
+    }
 
     #[test]
     fn spawn_sits_on_the_flat_ground() {
         assert_eq!(PLAY_SPAWN, [0.5, -60.0, 0.5]);
+    }
+
+    #[test]
+    fn gamemode_change_broadcasts_only_its_action_to_all() {
+        let registry = Arc::new(PlayerRegistry::new("Verdigris", 20));
+        let (tx_a, mut rx_a) = unbounded_channel::<Arc<[u8]>>();
+        let (tx_b, mut rx_b) = unbounded_channel::<Arc<[u8]>>();
+        registry.register(1, "Alice".to_owned(), 1, 0, tx_a);
+        registry.register(2, "Bob".to_owned(), 0, 0, tx_b);
+
+        broadcast_gamemode_change(&registry, 2, 3);
+
+        let frame_a = rx_a.try_recv().expect("Alice reçoit la diffusion");
+        let frame_b = rx_b.try_recv().expect("Bob reçoit la diffusion");
+        assert_eq!(action_byte(&frame_a), (play_cb::PLAYER_INFO_UPDATE, 0x04));
+        assert_eq!(action_byte(&frame_b), (play_cb::PLAYER_INFO_UPDATE, 0x04));
+    }
+
+    #[test]
+    fn latency_broadcast_uses_the_latency_action() {
+        let registry = Arc::new(PlayerRegistry::new("Verdigris", 20));
+        let (tx_a, mut rx_a) = unbounded_channel::<Arc<[u8]>>();
+        registry.register(1, "Alice".to_owned(), 1, 0, tx_a);
+        registry.set_latency(1, 42);
+
+        broadcast_latency(&registry);
+
+        let frame = rx_a.try_recv().expect("latence diffusée au joueur");
+        assert_eq!(action_byte(&frame), (play_cb::PLAYER_INFO_UPDATE, 0x10));
     }
 
     #[test]

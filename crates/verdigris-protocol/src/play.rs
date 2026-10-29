@@ -34,6 +34,9 @@ pub mod packet_ids {
         pub const BLOCK_CHANGED_ACK: i32 = 0x04;
         pub const CONTAINER_SET_SLOT: i32 = 0x14;
         pub const SET_HELD_SLOT: i32 = 0x6B;
+        pub const PLAYER_INFO_UPDATE: i32 = 0x47;
+        pub const PLAYER_INFO_REMOVE: i32 = 0x46;
+        pub const TAB_LIST: i32 = 0x7D;
     }
 
     pub mod serverbound {
@@ -713,6 +716,9 @@ mod tests {
         assert_eq!(packet_ids::clientbound::CONTAINER_SET_SLOT, 0x14);
         assert_eq!(packet_ids::clientbound::SET_HELD_SLOT, 0x6B);
         assert_eq!(packet_ids::serverbound::PICK_ITEM_FROM_BLOCK, 0x24);
+        assert_eq!(packet_ids::clientbound::PLAYER_INFO_UPDATE, 0x47);
+        assert_eq!(packet_ids::clientbound::PLAYER_INFO_REMOVE, 0x46);
+        assert_eq!(packet_ids::clientbound::TAB_LIST, 0x7D);
     }
 
     #[test]
