@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,16 +10,17 @@ use tracing_subscriber::EnvFilter;
 
 use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
-    COMPRESSION_THRESHOLD, EncodeError, GAME_EVENT_WAIT_FOR_CHUNKS, Intent, PROTOCOL_VERSION,
-    SET_COMPRESSION_ID, Serverbound, State, StatusInfo, build_compressed_packet, build_packet,
-    chunk_batch_finished_payload, chunk_batch_start_payload, client_has_core,
-    config_disconnect_payload, decode_compressed_frame, decode_frame, decode_known_packs,
-    decode_serverbound, game_event_payload, keep_alive_payload, known_packs_payload,
-    level_chunk_with_light_payload, login_disconnect_payload, login_play_payload,
-    login_success_payload, network_data, offline_uuid, packet_ids, player_position_payload,
-    pong_payload, random_session_id, read_var_int, registry_data_payload, server_known_pack,
-    set_chunk_cache_center_payload, set_compression_payload, status_json, status_response_payload,
-    update_tags_payload, validate_name,
+    COMPRESSION_THRESHOLD, EncodeError, GAME_EVENT_WAIT_FOR_CHUNKS, Intent, MovePlayerPos,
+    MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PROTOCOL_VERSION, SET_COMPRESSION_ID,
+    Serverbound, State, StatusInfo, World, build_compressed_packet, build_packet,
+    chunk_batch_finished_payload, chunk_batch_start_payload, chunk_coord, chunks_to_forget,
+    chunks_to_load, client_has_core, config_disconnect_payload, decode_compressed_frame,
+    decode_frame, decode_known_packs, decode_serverbound, forget_level_chunk_payload,
+    game_event_payload, keep_alive_payload, known_packs_payload, login_disconnect_payload,
+    login_play_payload, login_success_payload, network_data, offline_uuid, packet_ids,
+    player_position_payload, pong_payload, random_session_id, read_var_int, registry_data_payload,
+    server_known_pack, set_chunk_cache_center_payload, set_compression_payload, status_json,
+    status_response_payload, update_tags_payload, validate_name, write_chunk_payload,
 };
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
@@ -37,11 +40,11 @@ const LOGIN_SUCCESS_ID: i32 = 0x02;
 
 const PLAY_PLAYER_ID: i32 = 1;
 const PLAY_GAME_TYPE_SPECTATOR: i32 = 3;
-const PLAY_VIEW_DISTANCE: i32 = 4;
+const PLAY_CHUNK_RADIUS: i32 = 8;
+const PLAY_SIMULATION_DISTANCE: i32 = 8;
 const PLAY_MAX_PLAYERS: i32 = 20;
 const PLAY_TELEPORT_ID: i32 = 1;
-const PLAY_SPAWN: [f64; 3] = [0.5, 100.0, 0.5];
-const PLAY_CHUNK_REACH: i32 = 4;
+const PLAY_SPAWN: [f64; 3] = [0.5, -60.0, 0.5];
 pub const REASON_PROTOCOL_ERROR_PREFIX: &str = "Paquet invalide: ";
 pub const REASON_CONNECTION_LOST: &str = "Connexion interrompue";
 pub const REASON_READ_TIMEOUT: &str = "Délai de lecture dépassé";
@@ -215,15 +218,18 @@ pub async fn run_with_config(
     listener: TcpListener,
     keep_alive: KeepAliveConfig,
 ) -> std::io::Result<()> {
+    let world = Arc::new(World::flat().map_err(std::io::Error::other)?);
+    info!("monde plat partagé prêt");
     let counter = AtomicU64::new(0);
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 let conn_id = counter.fetch_add(1, Ordering::Relaxed);
                 let span = info_span!("conn", conn_id, peer = %peer);
+                let world = Arc::clone(&world);
                 tokio::spawn(
                     async move {
-                        handle_connection(stream, keep_alive).await;
+                        handle_connection(stream, keep_alive, world).await;
                     }
                     .instrument(span),
                 );
@@ -235,17 +241,17 @@ pub async fn run_with_config(
     }
 }
 
-async fn handle_connection(stream: TcpStream, keep_alive: KeepAliveConfig) {
+async fn handle_connection(stream: TcpStream, keep_alive: KeepAliveConfig, world: Arc<World>) {
     let started = Instant::now();
     info!("connexion acceptée");
-    serve_connection(stream, keep_alive).await;
+    serve_connection(stream, keep_alive, world).await;
     info!(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "fin de connexion"
     );
 }
 
-async fn serve_connection(mut stream: TcpStream, keep_alive: KeepAliveConfig) {
+async fn serve_connection(mut stream: TcpStream, keep_alive: KeepAliveConfig, world: Arc<World>) {
     let mut buf: Vec<u8> = Vec::new();
     let mut state = State::Handshaking;
     let mut framing = Framing::Uncompressed;
@@ -283,6 +289,7 @@ async fn serve_connection(mut stream: TcpStream, keep_alive: KeepAliveConfig) {
                         &mut buf,
                         &mut chunk,
                         keep_alive,
+                        &world,
                     )
                     .await;
                     return;
@@ -405,6 +412,10 @@ async fn dispatch(
         | Serverbound::PlayerLoaded
         | Serverbound::PlayChunkBatchReceived(_)
         | Serverbound::PlayKeepAlive(_)
+        | Serverbound::PlayMovePlayerPos(_)
+        | Serverbound::PlayMovePlayerPosRot(_)
+        | Serverbound::PlayMovePlayerRot(_)
+        | Serverbound::PlayMovePlayerStatus(_)
         | Serverbound::PlayIgnored { .. } => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
         }
@@ -504,6 +515,7 @@ async fn run_configuration(
     buf: &mut Vec<u8>,
     chunk: &mut [u8],
     keep_alive: KeepAliveConfig,
+    world: &Arc<World>,
 ) {
     let threshold = match framing {
         Framing::Compressed(threshold) => *threshold,
@@ -651,7 +663,70 @@ async fn run_configuration(
 
     set_state(state, State::Play);
     info!("entrée en jeu");
-    enter_play(stream, framing, state, buf, chunk, keep_alive).await;
+    enter_play(stream, framing, state, buf, chunk, keep_alive, world).await;
+}
+
+struct PlayerView {
+    x: f64,
+    y: f64,
+    z: f64,
+    flags: u8,
+    center: (i32, i32),
+    sent: HashSet<(i32, i32)>,
+}
+
+impl PlayerView {
+    fn new(spawn: [f64; 3]) -> Self {
+        PlayerView {
+            x: spawn[0],
+            y: spawn[1],
+            z: spawn[2],
+            flags: 0,
+            center: (chunk_coord(spawn[0]), chunk_coord(spawn[2])),
+            sent: HashSet::new(),
+        }
+    }
+
+    fn chunk_changed(&self) -> bool {
+        (chunk_coord(self.x), chunk_coord(self.z)) != self.center
+    }
+
+    fn log_position(&self, kind: &'static str) {
+        debug!(
+            x = self.x,
+            y = self.y,
+            z = self.z,
+            flags = self.flags,
+            "{kind}"
+        );
+    }
+
+    fn apply_pos(&mut self, m: &MovePlayerPos) {
+        self.x = m.x;
+        self.y = m.y;
+        self.z = m.z;
+        self.flags = m.flags;
+    }
+
+    fn apply_pos_rot(&mut self, m: &MovePlayerPosRot) {
+        self.x = m.x;
+        self.y = m.y;
+        self.z = m.z;
+        self.flags = m.flags;
+    }
+
+    fn apply_rot(&mut self, m: &MovePlayerRot) {
+        self.flags = m.flags;
+    }
+
+    fn apply_status(&mut self, m: &MovePlayerStatus) {
+        self.flags = m.flags;
+    }
+}
+
+struct Session<'a> {
+    view: PlayerView,
+    world: &'a Arc<World>,
 }
 
 async fn enter_play(
@@ -661,11 +736,12 @@ async fn enter_play(
     buf: &mut Vec<u8>,
     chunk: &mut [u8],
     keep_alive: KeepAliveConfig,
+    world: &Arc<World>,
 ) {
     let login = match login_play_payload(
         PLAY_PLAYER_ID,
-        PLAY_VIEW_DISTANCE,
-        PLAY_VIEW_DISTANCE,
+        PLAY_CHUNK_RADIUS,
+        PLAY_SIMULATION_DISTANCE,
         PLAY_GAME_TYPE_SPECTATOR,
         PLAY_MAX_PLAYERS,
     ) {
@@ -706,75 +782,109 @@ async fn enter_play(
         return;
     }
 
-    let center = set_chunk_cache_center_payload(0, 0);
-    if write_packet(
-        stream,
-        framing,
-        *state,
-        play_cb::SET_CHUNK_CACHE_CENTER,
-        &center,
-    )
-    .await
-    .is_err()
-    {
+    let mut view = PlayerView::new(PLAY_SPAWN);
+    if update_chunks(stream, framing, *state, &mut view, world).await {
         return;
     }
+
+    let session = Session { view, world };
+    run_play(stream, framing, state, buf, chunk, keep_alive, session).await;
+}
+
+async fn update_chunks(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    view: &mut PlayerView,
+    world: &Arc<World>,
+) -> bool {
+    let center = (chunk_coord(view.x), chunk_coord(view.z));
+    view.center = center;
 
     if write_packet(
         stream,
         framing,
-        *state,
+        state,
+        play_cb::SET_CHUNK_CACHE_CENTER,
+        &set_chunk_cache_center_payload(center.0, center.1),
+    )
+    .await
+    .is_err()
+    {
+        return true;
+    }
+
+    let forget = chunks_to_forget(center, &view.sent);
+    for &(x, z) in &forget {
+        if write_packet(
+            stream,
+            framing,
+            state,
+            play_cb::FORGET_LEVEL_CHUNK,
+            &forget_level_chunk_payload(x, z),
+        )
+        .await
+        .is_err()
+        {
+            return true;
+        }
+        view.sent.remove(&(x, z));
+    }
+
+    let load = chunks_to_load(center, &view.sent);
+    if write_packet(
+        stream,
+        framing,
+        state,
         play_cb::CHUNK_BATCH_START,
         &chunk_batch_start_payload(),
     )
     .await
     .is_err()
     {
-        return;
+        return true;
     }
 
-    let mut sent: i32 = 0;
-    for x in -PLAY_CHUNK_REACH..=PLAY_CHUNK_REACH {
-        for z in -PLAY_CHUNK_REACH..=PLAY_CHUNK_REACH {
-            let payload = match level_chunk_with_light_payload(x, z) {
-                Ok(payload) => payload,
-                Err(err) => {
-                    let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
-                    disconnect(stream, framing, *state, &reason).await;
-                    return;
-                }
-            };
-            if write_packet(
-                stream,
-                framing,
-                *state,
-                play_cb::LEVEL_CHUNK_WITH_LIGHT,
-                &payload,
-            )
-            .await
-            .is_err()
-            {
-                return;
-            }
-            sent += 1;
+    for &(x, z) in &load {
+        let column = world.chunk(x, z);
+        let mut payload = Vec::new();
+        write_chunk_payload(x, z, &column, &mut payload);
+        if write_packet(
+            stream,
+            framing,
+            state,
+            play_cb::LEVEL_CHUNK_WITH_LIGHT,
+            &payload,
+        )
+        .await
+        .is_err()
+        {
+            return true;
         }
+        view.sent.insert((x, z));
     }
 
     if write_packet(
         stream,
         framing,
-        *state,
+        state,
         play_cb::CHUNK_BATCH_FINISHED,
-        &chunk_batch_finished_payload(sent),
+        &chunk_batch_finished_payload(load.len() as i32),
     )
     .await
     .is_err()
     {
-        return;
+        return true;
     }
-    info!(chunks = sent, "monde vide envoyé");
 
-    run_play(stream, framing, state, buf, chunk, keep_alive).await;
+    info!(
+        center_x = center.0,
+        center_z = center.1,
+        forgotten = forget.len(),
+        loaded = load.len(),
+        "chunks mis à jour"
+    );
+    false
 }
 
 enum PlayStep {
@@ -789,6 +899,7 @@ async fn run_play(
     buf: &mut Vec<u8>,
     chunk: &mut [u8],
     keep_alive: KeepAliveConfig,
+    mut session: Session<'_>,
 ) {
     let threshold = match framing {
         Framing::Compressed(threshold) => *threshold,
@@ -808,7 +919,21 @@ async fn run_play(
                 Ok(Some((body, consumed))) => {
                     buf.drain(..consumed);
                     match decode_serverbound(State::Play, &body) {
-                        Ok(packet) => handle_play_packet(packet, &mut ka, Instant::now()),
+                        Ok(packet) => {
+                            if handle_play_packet(
+                                stream,
+                                framing,
+                                *state,
+                                packet,
+                                &mut ka,
+                                &mut session,
+                                Instant::now(),
+                            )
+                            .await
+                            {
+                                return;
+                            }
+                        }
                         Err(err) => {
                             let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
                             disconnect(stream, framing, *state, &reason).await;
@@ -875,7 +1000,15 @@ async fn run_keep_alive_action(
     }
 }
 
-fn handle_play_packet(packet: Serverbound, ka: &mut KeepAliveState, now: Instant) {
+async fn handle_play_packet(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    packet: Serverbound,
+    ka: &mut KeepAliveState,
+    session: &mut Session<'_>,
+    now: Instant,
+) -> bool {
     match packet {
         Serverbound::PlayAcceptTeleportation(accept) => {
             if accept.teleport_id == PLAY_TELEPORT_ID {
@@ -887,24 +1020,64 @@ fn handle_play_packet(packet: Serverbound, ka: &mut KeepAliveState, now: Instant
                     "téléportation inattendue"
                 );
             }
+            false
         }
-        Serverbound::PlayerLoaded => info!("joueur chargé"),
+        Serverbound::PlayerLoaded => {
+            info!("joueur chargé");
+            false
+        }
         Serverbound::PlayChunkBatchReceived(received) => {
             info!(
                 chunks_par_tick = received.desired_chunks_per_tick as f64,
                 "lot de chunks reçu"
             );
+            false
         }
         Serverbound::PlayKeepAlive(keep_alive) => {
             ack_keep_alive(ka, keep_alive.id, now);
+            false
+        }
+        Serverbound::PlayMovePlayerPos(m) => {
+            session.view.apply_pos(&m);
+            session.view.log_position("déplacement");
+            follow_player(stream, framing, state, session).await
+        }
+        Serverbound::PlayMovePlayerPosRot(m) => {
+            session.view.apply_pos_rot(&m);
+            session.view.log_position("déplacement et rotation");
+            follow_player(stream, framing, state, session).await
+        }
+        Serverbound::PlayMovePlayerRot(m) => {
+            session.view.apply_rot(&m);
+            session.view.log_position("rotation");
+            false
+        }
+        Serverbound::PlayMovePlayerStatus(m) => {
+            session.view.apply_status(&m);
+            session.view.log_position("statut au sol");
+            false
         }
         Serverbound::PlayIgnored { id } => {
             trace_packet("paquet play ignoré", State::Play, id, 0);
+            false
         }
         other => {
             debug!(packet = ?other, "paquet play inattendu ignoré");
+            false
         }
     }
+}
+
+async fn follow_player(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    session: &mut Session<'_>,
+) -> bool {
+    if !session.view.chunk_changed() {
+        return false;
+    }
+    update_chunks(stream, framing, state, &mut session.view, session.world).await
 }
 
 async fn write_packet(

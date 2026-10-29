@@ -27,6 +27,7 @@ pub mod packet_ids {
         pub const KEEP_ALIVE: i32 = 0x2D;
         pub const CHUNK_BATCH_START: i32 = 0x0C;
         pub const CHUNK_BATCH_FINISHED: i32 = 0x0B;
+        pub const FORGET_LEVEL_CHUNK: i32 = 0x26;
     }
 
     pub mod serverbound {
@@ -34,6 +35,10 @@ pub mod packet_ids {
         pub const KEEP_ALIVE: i32 = 0x1C;
         pub const PLAYER_LOADED: i32 = 0x2C;
         pub const CHUNK_BATCH_RECEIVED: i32 = 0x0B;
+        pub const MOVE_PLAYER_POS: i32 = 0x1E;
+        pub const MOVE_PLAYER_POS_ROT: i32 = 0x1F;
+        pub const MOVE_PLAYER_ROT: i32 = 0x20;
+        pub const MOVE_PLAYER_STATUS_ONLY: i32 = 0x21;
     }
 }
 
@@ -196,6 +201,13 @@ pub fn set_chunk_cache_center_payload(x: i32, z: i32) -> Vec<u8> {
     payload
 }
 
+pub fn forget_level_chunk_payload(x: i32, z: i32) -> Vec<u8> {
+    let value = ((z as i64 & 0xFFFF_FFFF) << 32) | (x as i64 & 0xFFFF_FFFF);
+    let mut payload = Vec::new();
+    write_i64(value, &mut payload);
+    payload
+}
+
 pub fn chunk_batch_start_payload() -> Vec<u8> {
     Vec::new()
 }
@@ -318,6 +330,99 @@ pub fn decode_keep_alive(body: &[u8]) -> Result<KeepAlive, ProtocolError> {
         return Err(ProtocolError::TrailingBytes);
     }
     Ok(KeepAlive { id })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MovePlayerPos {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub flags: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MovePlayerPosRot {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub flags: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MovePlayerRot {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub flags: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovePlayerStatus {
+    pub flags: u8,
+}
+
+fn take_u8(cursor: &mut &[u8]) -> Result<u8, ProtocolError> {
+    match cursor.split_first() {
+        Some((&byte, rest)) => {
+            *cursor = rest;
+            Ok(byte)
+        }
+        None => Err(ProtocolError::UnexpectedEof),
+    }
+}
+
+fn ensure_consumed(cursor: &[u8]) -> Result<(), ProtocolError> {
+    if cursor.is_empty() {
+        Ok(())
+    } else {
+        Err(ProtocolError::TrailingBytes)
+    }
+}
+
+pub fn decode_move_player_pos(body: &[u8]) -> Result<MovePlayerPos, ProtocolError> {
+    let mut cursor = body;
+    let x = take_f64(&mut cursor)?;
+    let y = take_f64(&mut cursor)?;
+    let z = take_f64(&mut cursor)?;
+    let flags = take_u8(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(MovePlayerPos { x, y, z, flags })
+}
+
+pub fn decode_move_player_pos_rot(body: &[u8]) -> Result<MovePlayerPosRot, ProtocolError> {
+    let mut cursor = body;
+    let x = take_f64(&mut cursor)?;
+    let y = take_f64(&mut cursor)?;
+    let z = take_f64(&mut cursor)?;
+    let yaw = take_f32(&mut cursor)?;
+    let pitch = take_f32(&mut cursor)?;
+    let flags = take_u8(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(MovePlayerPosRot {
+        x,
+        y,
+        z,
+        yaw,
+        pitch,
+        flags,
+    })
+}
+
+pub fn decode_move_player_rot(body: &[u8]) -> Result<MovePlayerRot, ProtocolError> {
+    let mut cursor = body;
+    let yaw = take_f32(&mut cursor)?;
+    let pitch = take_f32(&mut cursor)?;
+    let flags = take_u8(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(MovePlayerRot { yaw, pitch, flags })
+}
+
+pub fn decode_move_player_status(body: &[u8]) -> Result<MovePlayerStatus, ProtocolError> {
+    let mut cursor = body;
+    let flags = take_u8(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(MovePlayerStatus { flags })
 }
 
 #[cfg(test)]
@@ -752,5 +857,122 @@ mod tests {
         let mut body = keep_alive_payload(7);
         body.push(0xFF);
         assert_eq!(decode_keep_alive(&body), Err(ProtocolError::TrailingBytes));
+    }
+
+    #[test]
+    fn forget_level_chunk_packs_z_high_x_low() {
+        let payload = forget_level_chunk_payload(3, -2);
+        assert_eq!(payload.len(), 8);
+        let value = i64::from_be_bytes(payload.try_into().unwrap());
+        assert_eq!((value & 0xFFFF_FFFF) as i32, 3);
+        assert_eq!((value >> 32) as i32, -2);
+    }
+
+    #[test]
+    fn forget_level_chunk_round_trips_signed_coords() {
+        for (x, z) in [(0, 0), (-8, 8), (11, -9), (i32::MIN, i32::MAX)] {
+            let payload = forget_level_chunk_payload(x, z);
+            let value = i64::from_be_bytes(payload.try_into().unwrap());
+            assert_eq!((value & 0xFFFF_FFFF) as i32, x);
+            assert_eq!((value >> 32) as i32, z);
+        }
+    }
+
+    #[test]
+    fn move_player_pos_round_trip() {
+        let mut body = Vec::new();
+        for value in [48.5f64, -60.0, 0.5] {
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+        body.push(0x03);
+        assert_eq!(
+            decode_move_player_pos(&body).unwrap(),
+            MovePlayerPos {
+                x: 48.5,
+                y: -60.0,
+                z: 0.5,
+                flags: 0x03,
+            }
+        );
+    }
+
+    #[test]
+    fn move_player_pos_missing_flags_is_eof() {
+        let mut body = Vec::new();
+        for value in [1.0f64, 2.0, 3.0] {
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+        assert_eq!(
+            decode_move_player_pos(&body),
+            Err(ProtocolError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn move_player_pos_trailing_is_error() {
+        let mut body = Vec::new();
+        for value in [1.0f64, 2.0, 3.0] {
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+        body.push(0x01);
+        body.push(0xFF);
+        assert_eq!(
+            decode_move_player_pos(&body),
+            Err(ProtocolError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn move_player_pos_rot_round_trip() {
+        let mut body = Vec::new();
+        for value in [1.0f64, 2.0, 3.0] {
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+        body.extend_from_slice(&90.0f32.to_be_bytes());
+        body.extend_from_slice(&(-45.0f32).to_be_bytes());
+        body.push(0x01);
+        assert_eq!(
+            decode_move_player_pos_rot(&body).unwrap(),
+            MovePlayerPosRot {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                yaw: 90.0,
+                pitch: -45.0,
+                flags: 0x01,
+            }
+        );
+    }
+
+    #[test]
+    fn move_player_rot_round_trip() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&12.5f32.to_be_bytes());
+        body.extend_from_slice(&(-7.25f32).to_be_bytes());
+        body.push(0x02);
+        assert_eq!(
+            decode_move_player_rot(&body).unwrap(),
+            MovePlayerRot {
+                yaw: 12.5,
+                pitch: -7.25,
+                flags: 0x02,
+            }
+        );
+    }
+
+    #[test]
+    fn move_player_status_round_trip() {
+        assert_eq!(
+            decode_move_player_status(&[0x01]).unwrap(),
+            MovePlayerStatus { flags: 0x01 }
+        );
+        assert_eq!(
+            decode_move_player_status(&[]),
+            Err(ProtocolError::UnexpectedEof)
+        );
+        assert_eq!(
+            decode_move_player_status(&[0x00, 0x00]),
+            Err(ProtocolError::TrailingBytes)
+        );
     }
 }
