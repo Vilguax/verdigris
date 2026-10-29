@@ -5,7 +5,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, timeout};
 
 use verdigris_protocol::{
-    MAX_STRING_LEN, MAX_USERNAME_LEN, decode_compressed_frame, decode_frame,
+    BlockPos, MAX_STRING_LEN, MAX_USERNAME_LEN, decode_compressed_frame, decode_frame,
     encode_compressed_frame, encode_frame, offline_uuid, read_f64, read_i64, read_string,
     read_var_int, write_f32, write_f64, write_i64, write_string, write_u16, write_var_int,
 };
@@ -694,6 +694,115 @@ fn compressed_move_player_pos_frame(x: f64, y: f64, z: f64, flags: u8) -> Vec<u8
     write_f64(z, &mut body);
     body.push(flags);
     encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_set_creative_mode_slot_frame(slot: i16, item: i32, count: i32) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x39, &mut body);
+    write_u16(slot as u16, &mut body);
+    write_var_int(count, &mut body);
+    write_var_int(item, &mut body);
+    write_var_int(0, &mut body);
+    write_var_int(0, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_set_carried_item_frame(slot: i16) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x36, &mut body);
+    write_u16(slot as u16, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_use_item_on_frame(pos: BlockPos, face: i32, sequence: i32) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x42, &mut body);
+    write_var_int(0, &mut body);
+    write_i64(pos.to_long(), &mut body);
+    write_var_int(face, &mut body);
+    write_f32(0.5, &mut body);
+    write_f32(1.0, &mut body);
+    write_f32(0.5, &mut body);
+    body.push(0);
+    body.push(0);
+    write_var_int(sequence, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_player_action_frame(action: i32, pos: BlockPos, face: u8, sequence: i32) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x29, &mut body);
+    write_var_int(action, &mut body);
+    write_i64(pos.to_long(), &mut body);
+    body.push(face);
+    write_var_int(sequence, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn read_block_update(client_body: &[u8]) -> (BlockPos, i32) {
+    let (packed, _) = read_i64(client_body).unwrap().unwrap();
+    let (state, _) = read_var_int(&client_body[8..]).unwrap().unwrap();
+    (BlockPos::from_long(packed), state)
+}
+
+#[tokio::test]
+async fn place_then_break_dirt_over_tcp() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    client
+        .write_all(&compressed_set_creative_mode_slot_frame(36, 55, 1))
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_set_carried_item_frame(0))
+        .await
+        .unwrap();
+
+    let ground = BlockPos { x: 0, y: -61, z: 0 };
+    let placed = BlockPos { x: 0, y: -60, z: 0 };
+
+    client
+        .write_all(&compressed_use_item_on_frame(ground, 1, 1))
+        .await
+        .unwrap();
+
+    let (update_id, update_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(update_id, 0x08, "pose: Block Update de la position cliquée");
+    let (pos, state) = read_block_update(&update_body);
+    assert_eq!(pos, ground);
+    assert_eq!(state, 9, "la position cliquée reste de l'herbe");
+
+    let (update_id, update_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(update_id, 0x08, "pose: Block Update de la face");
+    let (pos, state) = read_block_update(&update_body);
+    assert_eq!(pos, placed);
+    assert_eq!(state, 10, "le dirt (état 10) est posé sur la face");
+
+    let (ack_id, ack_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(ack_id, 0x04, "pose: Block Changed Ack");
+    let (sequence, _) = read_var_int(&ack_body).unwrap().unwrap();
+    assert_eq!(sequence, 1);
+
+    client
+        .write_all(&compressed_player_action_frame(0, placed, 1, 2))
+        .await
+        .unwrap();
+
+    let (update_id, update_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(update_id, 0x08, "casse: Block Update de la position");
+    let (pos, state) = read_block_update(&update_body);
+    assert_eq!(pos, placed);
+    assert_eq!(state, 0, "le bloc posé est cassé (air)");
+
+    let (ack_id, ack_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(ack_id, 0x04, "casse: Block Changed Ack");
+    let (sequence, _) = read_var_int(&ack_body).unwrap().unwrap();
+    assert_eq!(sequence, 2);
 }
 
 async fn read_keep_alive_id(client: &mut TcpStream, buf: &mut Vec<u8>) -> i64 {
