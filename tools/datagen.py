@@ -93,6 +93,57 @@ def main(generated, server_jar, out):
     print(f"{out}: {len(registries)} registres, {sum(len(r['entries']) for r in registries)} entrees, "
           f"{len(tags)} registres de tags, {sum(len(t['tags']) for t in tags)} tags, ignores: {skipped}")
 
+    blocks_out = Path(out).parent / "blocks.json"
+    blocks = blocks_doc(generated, static, server_jar)
+    blocks_out.write_text(json.dumps(blocks, separators=(",", ":"), ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"{blocks_out}: {blocks['state_count']} etats, {len(blocks['blocks'])} blocs, "
+          f"{len(blocks['fluid_states'])} etats avec fluide, {len(blocks['items'])} objets qui posent un bloc")
+
+
+ALWAYS_FLUID = {"minecraft:water", "minecraft:lava", "minecraft:bubble_column", "minecraft:kelp",
+                "minecraft:kelp_plant", "minecraft:seagrass", "minecraft:tall_seagrass"}
+AIR = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
+ITEM_TO_BLOCK = {
+    "minecraft:redstone": "minecraft:redstone_wire", "minecraft:string": "minecraft:tripwire",
+    "minecraft:wheat_seeds": "minecraft:wheat", "minecraft:cocoa_beans": "minecraft:cocoa",
+    "minecraft:carrot": "minecraft:carrots", "minecraft:potato": "minecraft:potatoes",
+    "minecraft:torchflower_seeds": "minecraft:torchflower_crop", "minecraft:pitcher_pod": "minecraft:pitcher_crop",
+    "minecraft:beetroot_seeds": "minecraft:beetroots", "minecraft:sweet_berries": "minecraft:sweet_berry_bush",
+    "minecraft:glow_berries": "minecraft:cave_vines", "minecraft:pumpkin_seeds": "minecraft:pumpkin_stem",
+    "minecraft:melon_seeds": "minecraft:melon_stem",
+}
+NOT_BLOCK_ITEMS = {"minecraft:air", "minecraft:wheat"}
+
+
+def blocks_doc(generated, static, server_jar):
+    report = json.loads((Path(generated) / "reports" / "blocks.json").read_text(encoding="utf-8"))
+    block_ids = {k: v["protocol_id"] for k, v in static["minecraft:block"]["entries"].items()}
+    item_ids = {k: v["protocol_id"] for k, v in static["minecraft:item"]["entries"].items()}
+    blocks, fluid_states, defaults, total = [], [], {}, 0
+    for name, body in report.items():
+        ids = [s["id"] for s in body["states"]]
+        first, count = min(ids), len(ids)
+        if ids != list(range(first, first + count)):
+            raise SystemExit(f"etats non contigus pour {name}")
+        default = next(s["id"] for s in body["states"] if s.get("default"))
+        defaults[name] = default
+        for s in body["states"]:
+            if name in ALWAYS_FLUID or s.get("properties", {}).get("waterlogged") == "true":
+                fluid_states.append(s["id"])
+        blocks.append({"name": name, "id": block_ids[name], "first_state": first, "state_count": count,
+                       "default_state": default, "air": name in AIR})
+        total += count
+    blocks.sort(key=lambda b: b["first_state"])
+    items = []
+    for item, item_id in sorted(item_ids.items(), key=lambda kv: kv[1]):
+        if item in NOT_BLOCK_ITEMS:
+            continue
+        block = ITEM_TO_BLOCK.get(item, item)
+        if block in defaults:
+            items.append({"item": item_id, "state": defaults[block]})
+    return {"game_version": GAME_VERSION, "server_jar_sha1": hashlib.sha1(Path(server_jar).read_bytes()).hexdigest(),
+            "state_count": total, "blocks": blocks, "fluid_states": sorted(fluid_states), "items": items}
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:
