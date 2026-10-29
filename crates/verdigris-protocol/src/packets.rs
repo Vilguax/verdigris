@@ -3,7 +3,8 @@ use crate::play::{
     AcceptTeleportation, ChunkBatchReceived, KeepAlive, MovePlayerPos, MovePlayerPosRot,
     MovePlayerRot, MovePlayerStatus, decode_accept_teleportation, decode_chunk_batch_received,
     decode_keep_alive, decode_move_player_pos, decode_move_player_pos_rot, decode_move_player_rot,
-    decode_move_player_status, decode_player_loaded, packet_ids as play_ids,
+    decode_move_player_status, decode_player_abilities, decode_player_loaded,
+    packet_ids as play_ids,
 };
 use crate::primitives::{read_i64, read_string, read_u16};
 use crate::varint::read_var_int;
@@ -51,6 +52,7 @@ pub enum Serverbound {
     PlayMovePlayerPosRot(MovePlayerPosRot),
     PlayMovePlayerRot(MovePlayerRot),
     PlayMovePlayerStatus(MovePlayerStatus),
+    PlayPlayerAbilities { flying: bool },
     PlayIgnored { id: i32 },
 }
 
@@ -172,6 +174,10 @@ fn decode_play(id: i32, body: &[u8]) -> Result<Serverbound, ProtocolError> {
         Ok(Serverbound::PlayMovePlayerStatus(
             decode_move_player_status(body)?,
         ))
+    } else if id == play_ids::serverbound::PLAYER_ABILITIES {
+        Ok(Serverbound::PlayPlayerAbilities {
+            flying: decode_player_abilities(body)?,
+        })
     } else {
         Ok(Serverbound::PlayIgnored { id })
     }
@@ -450,6 +456,25 @@ mod tests {
         assert_eq!(
             decode_serverbound(State::Play, &body).unwrap(),
             Serverbound::PlayMovePlayerStatus(crate::play::MovePlayerStatus { flags: 0x00 })
+        );
+    }
+
+    #[test]
+    fn decode_play_player_abilities() {
+        let mut body = Vec::new();
+        write_var_int(0x28, &mut body);
+        body.push(0x02);
+        assert_eq!(
+            decode_serverbound(State::Play, &body).unwrap(),
+            Serverbound::PlayPlayerAbilities { flying: true }
+        );
+
+        let mut grounded = Vec::new();
+        write_var_int(0x28, &mut grounded);
+        grounded.push(0x00);
+        assert_eq!(
+            decode_serverbound(State::Play, &grounded).unwrap(),
+            Serverbound::PlayPlayerAbilities { flying: false }
         );
     }
 

@@ -28,6 +28,7 @@ pub mod packet_ids {
         pub const CHUNK_BATCH_START: i32 = 0x0C;
         pub const CHUNK_BATCH_FINISHED: i32 = 0x0B;
         pub const FORGET_LEVEL_CHUNK: i32 = 0x26;
+        pub const PLAYER_ABILITIES: i32 = 0x41;
     }
 
     pub mod serverbound {
@@ -39,6 +40,7 @@ pub mod packet_ids {
         pub const MOVE_PLAYER_POS_ROT: i32 = 0x1F;
         pub const MOVE_PLAYER_ROT: i32 = 0x20;
         pub const MOVE_PLAYER_STATUS_ONLY: i32 = 0x21;
+        pub const PLAYER_ABILITIES: i32 = 0x28;
     }
 }
 
@@ -222,6 +224,24 @@ pub fn keep_alive_payload(id: i64) -> Vec<u8> {
     let mut payload = Vec::new();
     write_i64(id, &mut payload);
     payload
+}
+
+pub const DEFAULT_FLYING_SPEED: f32 = 0.05;
+pub const DEFAULT_WALKING_SPEED: f32 = 0.1;
+
+pub fn player_abilities_payload(flags: u8) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(9);
+    payload.push(flags);
+    write_f32(DEFAULT_FLYING_SPEED, &mut payload);
+    write_f32(DEFAULT_WALKING_SPEED, &mut payload);
+    payload
+}
+
+pub fn decode_player_abilities(body: &[u8]) -> Result<bool, ProtocolError> {
+    let mut cursor = body;
+    let flags = take_u8(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok((flags & 0x02) != 0)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -683,6 +703,79 @@ mod tests {
 
         let (game_type, _) = read_var_int(cursor).unwrap().unwrap();
         assert_eq!(game_type, -1);
+    }
+
+    fn login_play_game_types(payload: &[u8]) -> (i32, i32) {
+        let mut cursor = &payload[4..];
+        cursor = &cursor[1..];
+        let (_, c) = read_var_int(cursor).unwrap().unwrap();
+        cursor = &cursor[c..];
+        let len = cursor[0] as usize;
+        cursor = &cursor[1 + len..];
+        for _ in 0..3 {
+            let (_, c) = read_var_int(cursor).unwrap().unwrap();
+            cursor = &cursor[c..];
+        }
+        cursor = &cursor[3..];
+        let (_, c) = read_var_int(cursor).unwrap().unwrap();
+        cursor = &cursor[c..];
+        let len = cursor[0] as usize;
+        cursor = &cursor[1 + len + 8..];
+        let (game_type, c) = read_var_int(cursor).unwrap().unwrap();
+        cursor = &cursor[c..];
+        let (previous, _) = read_var_int(cursor).unwrap().unwrap();
+        (game_type, previous)
+    }
+
+    #[test]
+    fn login_play_encodes_each_game_mode_with_no_previous() {
+        use crate::gamemode::GameMode;
+        for mode in [
+            GameMode::Survival,
+            GameMode::Creative,
+            GameMode::Adventure,
+            GameMode::Spectator,
+        ] {
+            let payload = login_play_payload(1, 8, 8, mode.game_type(), 20).unwrap();
+            let (game_type, previous) = login_play_game_types(&payload);
+            assert_eq!(game_type, mode.game_type());
+            assert_eq!(previous, PREVIOUS_GAME_TYPE_NONE);
+        }
+
+        assert_eq!(
+            login_play_game_types(&login_play_payload(1, 8, 8, 0, 20).unwrap()).0,
+            0
+        );
+        assert_eq!(
+            login_play_game_types(&login_play_payload(1, 8, 8, 1, 20).unwrap()).0,
+            1
+        );
+    }
+
+    #[test]
+    fn player_abilities_exact_bytes() {
+        use crate::gamemode::GameMode;
+        let creative = player_abilities_payload(GameMode::Creative.abilities_flags());
+        assert_eq!(
+            creative,
+            vec![0x0D, 0x3D, 0x4C, 0xCC, 0xCD, 0x3D, 0xCC, 0xCC, 0xCD]
+        );
+        let spectator = player_abilities_payload(GameMode::Spectator.abilities_flags());
+        assert_eq!(
+            spectator,
+            vec![0x07, 0x3D, 0x4C, 0xCC, 0xCD, 0x3D, 0xCC, 0xCC, 0xCD]
+        );
+    }
+
+    #[test]
+    fn decode_player_abilities_reads_flying_bit() {
+        assert_eq!(decode_player_abilities(&[0x02]), Ok(true));
+        assert_eq!(decode_player_abilities(&[0x00]), Ok(false));
+        assert_eq!(decode_player_abilities(&[0x06]), Ok(true));
+        assert_eq!(
+            decode_player_abilities(&[]),
+            Err(ProtocolError::UnexpectedEof)
+        );
     }
 
     #[test]

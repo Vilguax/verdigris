@@ -1,6 +1,10 @@
+mod player;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+pub use player::{GAMEMODE_ENV, PlayerState, read_gamemode, resolve_gamemode};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -18,9 +22,10 @@ use verdigris_protocol::{
     decode_frame, decode_known_packs, decode_serverbound, forget_level_chunk_payload,
     game_event_payload, keep_alive_payload, known_packs_payload, login_disconnect_payload,
     login_play_payload, login_success_payload, network_data, offline_uuid, packet_ids,
-    player_position_payload, pong_payload, random_session_id, read_var_int, registry_data_payload,
-    server_known_pack, set_chunk_cache_center_payload, set_compression_payload, status_json,
-    status_response_payload, update_tags_payload, validate_name, write_chunk_payload,
+    player_abilities_payload, player_position_payload, pong_payload, random_session_id,
+    read_var_int, registry_data_payload, server_known_pack, set_chunk_cache_center_payload,
+    set_compression_payload, status_json, status_response_payload, update_tags_payload,
+    validate_name, write_chunk_payload,
 };
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
@@ -39,7 +44,6 @@ pub const REASON_CONFIG_TIMEOUT: &str = "délai de configuration dépassé";
 const LOGIN_SUCCESS_ID: i32 = 0x02;
 
 const PLAY_PLAYER_ID: i32 = 1;
-const PLAY_GAME_TYPE_SPECTATOR: i32 = 3;
 const PLAY_CHUNK_RADIUS: i32 = 8;
 const PLAY_SIMULATION_DISTANCE: i32 = 8;
 const PLAY_MAX_PLAYERS: i32 = 20;
@@ -256,6 +260,7 @@ async fn serve_connection(mut stream: TcpStream, keep_alive: KeepAliveConfig, wo
     let mut state = State::Handshaking;
     let mut framing = Framing::Uncompressed;
     let mut awaiting_ack = false;
+    let mut player: Option<PlayerState> = None;
     let mut chunk = [0u8; READ_CHUNK];
 
     loop {
@@ -276,20 +281,30 @@ async fn serve_connection(mut stream: TcpStream, keep_alive: KeepAliveConfig, wo
                 &mut state,
                 &mut framing,
                 &mut awaiting_ack,
+                &mut player,
                 &body,
             )
             .await
             {
                 Next::Continue => {}
                 Next::EnterConfiguration => {
+                    let Some(player) = player.take() else {
+                        disconnect(&mut stream, &framing, state, REASON_LOGIN_UNEXPECTED_PACKET)
+                            .await;
+                        return;
+                    };
+                    let handoff = PlayHandoff {
+                        keep_alive,
+                        world: &world,
+                        player,
+                    };
                     run_configuration(
                         &mut stream,
                         &framing,
                         &mut state,
                         &mut buf,
                         &mut chunk,
-                        keep_alive,
-                        &world,
+                        handoff,
                     )
                     .await;
                     return;
@@ -345,6 +360,7 @@ async fn dispatch(
     state: &mut State,
     framing: &mut Framing,
     awaiting_ack: &mut bool,
+    player: &mut Option<PlayerState>,
     body: &[u8],
 ) -> Next {
     if *awaiting_ack {
@@ -403,7 +419,7 @@ async fn dispatch(
             Next::Terminate(String::new())
         }
         Serverbound::LoginStart { name, .. } => {
-            begin_login(stream, framing, *state, awaiting_ack, &name).await
+            begin_login(stream, framing, *state, awaiting_ack, player, &name).await
         }
         Serverbound::LoginAcknowledged => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
@@ -416,6 +432,7 @@ async fn dispatch(
         | Serverbound::PlayMovePlayerPosRot(_)
         | Serverbound::PlayMovePlayerRot(_)
         | Serverbound::PlayMovePlayerStatus(_)
+        | Serverbound::PlayPlayerAbilities { .. }
         | Serverbound::PlayIgnored { .. } => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
         }
@@ -427,6 +444,7 @@ async fn begin_login(
     framing: &mut Framing,
     state: State,
     awaiting_ack: &mut bool,
+    player: &mut Option<PlayerState>,
     name: &str,
 ) -> Next {
     info!(player = name, "login start");
@@ -447,6 +465,7 @@ async fn begin_login(
     let payload = login_success_payload(uuid, name, session_id);
     match write_packet(stream, framing, state, LOGIN_SUCCESS_ID, &payload).await {
         Ok(()) => {
+            *player = Some(PlayerState::connect(name));
             *awaiting_ack = true;
             Next::Continue
         }
@@ -508,14 +527,19 @@ async fn read_config_packet(
     }
 }
 
+struct PlayHandoff<'a> {
+    keep_alive: KeepAliveConfig,
+    world: &'a Arc<World>,
+    player: PlayerState,
+}
+
 async fn run_configuration(
     stream: &mut TcpStream,
     framing: &Framing,
     state: &mut State,
     buf: &mut Vec<u8>,
     chunk: &mut [u8],
-    keep_alive: KeepAliveConfig,
-    world: &Arc<World>,
+    handoff: PlayHandoff<'_>,
 ) {
     let threshold = match framing {
         Framing::Compressed(threshold) => *threshold,
@@ -663,7 +687,7 @@ async fn run_configuration(
 
     set_state(state, State::Play);
     info!("entrée en jeu");
-    enter_play(stream, framing, state, buf, chunk, keep_alive, world).await;
+    enter_play(stream, framing, state, buf, chunk, handoff).await;
 }
 
 struct PlayerView {
@@ -727,6 +751,7 @@ impl PlayerView {
 struct Session<'a> {
     view: PlayerView,
     world: &'a Arc<World>,
+    player: PlayerState,
 }
 
 async fn enter_play(
@@ -735,14 +760,20 @@ async fn enter_play(
     state: &mut State,
     buf: &mut Vec<u8>,
     chunk: &mut [u8],
-    keep_alive: KeepAliveConfig,
-    world: &Arc<World>,
+    handoff: PlayHandoff<'_>,
 ) {
+    let PlayHandoff {
+        keep_alive,
+        world,
+        player,
+    } = handoff;
+    info!(player = %player.name, mode = %player.mode, "entrée en jeu du joueur");
+
     let login = match login_play_payload(
         PLAY_PLAYER_ID,
         PLAY_CHUNK_RADIUS,
         PLAY_SIMULATION_DISTANCE,
-        PLAY_GAME_TYPE_SPECTATOR,
+        player.mode.game_type(),
         PLAY_MAX_PLAYERS,
     ) {
         Ok(payload) => payload,
@@ -755,6 +786,20 @@ async fn enter_play(
     if write_packet(stream, framing, *state, play_cb::LOGIN, &login)
         .await
         .is_err()
+    {
+        return;
+    }
+
+    let abilities = player_abilities_payload(player.mode.abilities_flags());
+    if write_packet(
+        stream,
+        framing,
+        *state,
+        play_cb::PLAYER_ABILITIES,
+        &abilities,
+    )
+    .await
+    .is_err()
     {
         return;
     }
@@ -787,7 +832,11 @@ async fn enter_play(
         return;
     }
 
-    let session = Session { view, world };
+    let session = Session {
+        view,
+        world,
+        player,
+    };
     run_play(stream, framing, state, buf, chunk, keep_alive, session).await;
 }
 
@@ -1057,6 +1106,19 @@ async fn handle_play_packet(
             session.view.log_position("statut au sol");
             false
         }
+        Serverbound::PlayPlayerAbilities { flying } => {
+            if session.player.mode.can_fly() {
+                session.player.flying = flying;
+                debug!(flying, mode = %session.player.mode, "vol mis à jour");
+            } else {
+                debug!(
+                    flying,
+                    mode = %session.player.mode,
+                    "vol ignoré pour un mode sans vol"
+                );
+            }
+            false
+        }
         Serverbound::PlayIgnored { id } => {
             trace_packet("paquet play ignoré", State::Play, id, 0);
             false
@@ -1155,7 +1217,12 @@ async fn drain(stream: &mut TcpStream, deadline: Instant) {
 
 #[cfg(test)]
 mod tests {
-    use super::build_env_filter;
+    use super::{PLAY_SPAWN, build_env_filter};
+
+    #[test]
+    fn spawn_sits_on_the_flat_ground() {
+        assert_eq!(PLAY_SPAWN, [0.5, -60.0, 0.5]);
+    }
 
     #[test]
     fn invalid_filter_falls_back_to_info() {

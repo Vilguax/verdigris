@@ -4,6 +4,7 @@ pub mod clientbound;
 pub mod config;
 pub mod error;
 pub mod framing;
+pub mod gamemode;
 pub mod light;
 pub mod login;
 pub mod network;
@@ -57,6 +58,7 @@ pub use framing::{
     MAX_UNCOMPRESSED_LEN, decode_compressed_frame, decode_frame, encode_compressed_frame,
     encode_frame,
 };
+pub use gamemode::GameMode;
 pub use light::{
     ChunkLight, EMPTY_BLOCK_MASK, compute_chunk_light, full_light_section, write_bitset,
     write_light, write_light_section,
@@ -71,10 +73,11 @@ pub use play::{
     MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PlayError, chunk_batch_finished_payload,
     chunk_batch_start_payload, decode_accept_teleportation, decode_chunk_batch_received,
     decode_keep_alive, decode_move_player_pos, decode_move_player_pos_rot, decode_move_player_rot,
-    decode_move_player_status, decode_player_loaded, ensure_play_registries,
-    forget_level_chunk_payload, game_event_payload, keep_alive_payload,
+    decode_move_player_status, decode_player_abilities, decode_player_loaded,
+    ensure_play_registries, forget_level_chunk_payload, game_event_payload, keep_alive_payload,
     level_chunk_with_light_payload, login_play_payload, overworld_dimension_type_id,
-    plains_biome_id, player_position_payload, set_chunk_cache_center_payload,
+    plains_biome_id, player_abilities_payload, player_position_payload,
+    set_chunk_cache_center_payload,
 };
 pub use primitives::{
     read_f32, read_f64, read_i32, read_i64, read_string, read_u16, write_f32, write_f64, write_i32,
