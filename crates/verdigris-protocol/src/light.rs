@@ -18,12 +18,10 @@ pub struct ChunkLight {
 }
 
 pub fn write_bitset(bits: u64, out: &mut Vec<u8>) {
-    if bits == 0 {
-        write_var_int(0, out);
-    } else {
-        write_var_int(1, out);
-        out.extend_from_slice(&bits.to_be_bytes());
-    }
+    let bytes = bits.to_le_bytes();
+    let len = 8 - (bits.leading_zeros() / 8) as usize;
+    write_var_int(len as i32, out);
+    out.extend_from_slice(&bytes[..len]);
 }
 
 pub fn full_light_section(value: u8) -> [u8; LIGHT_SECTION_VALUES] {
@@ -131,25 +129,25 @@ mod tests {
     fn bitset_single_low_bit() {
         let mut out = Vec::new();
         write_bitset(1, &mut out);
-        assert_eq!(out, vec![0x01, 0, 0, 0, 0, 0, 0, 0, 0x01]);
+        assert_eq!(out, vec![0x01, 0x01]);
     }
 
     #[test]
     fn bitset_above_world_bit() {
         let mut out = Vec::new();
         write_bitset(1u64 << 25, &mut out);
-        assert_eq!(out, vec![0x01, 0, 0, 0, 0, 0x02, 0, 0, 0]);
+        assert_eq!(out, vec![0x04, 0, 0, 0, 0x02]);
     }
 
     #[test]
     fn bitset_sky_mask_of_empty_chunk() {
         let mut out = Vec::new();
         write_bitset(0x3FF_FFFE, &mut out);
-        assert_eq!(out, vec![0x01, 0, 0, 0, 0, 0x03, 0xFF, 0xFF, 0xFE]);
+        assert_eq!(out, vec![0x04, 0xFE, 0xFF, 0xFF, 0x03]);
     }
 
     #[test]
-    fn bitset_zero_is_empty_list() {
+    fn bitset_zero_is_empty_array() {
         let mut out = Vec::new();
         write_bitset(0, &mut out);
         assert_eq!(out, vec![0x00]);
@@ -159,7 +157,7 @@ mod tests {
     fn bitset_all_twenty_six_bits() {
         let mut out = Vec::new();
         write_bitset(EMPTY_BLOCK_MASK, &mut out);
-        assert_eq!(out, vec![0x01, 0, 0, 0, 0, 0x03, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(out, vec![0x04, 0xFF, 0xFF, 0xFF, 0x03]);
     }
 
     #[test]
