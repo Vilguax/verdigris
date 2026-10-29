@@ -36,8 +36,8 @@ pub enum State {
 }
 
 pub use blocks::{
-    Block, BlocksData, ItemState, blocks_data, default_state_of_name, is_air, is_fluid,
-    item_to_placed_state, state_to_block,
+    Block, BlocksData, ItemState, block_item_of_state, blocks_data, default_state_of_name, is_air,
+    is_fluid, item_to_placed_state, state_to_block,
 };
 pub use chunk::{
     BIOMES_PER_SECTION, BLOCKS_PER_SECTION, COLUMNS_PER_CHUNK, ChunkColumn, HEIGHTMAP_BITS, MIN_Y,
@@ -74,17 +74,18 @@ pub use packets::{Handshake, Intent, Serverbound, decode_serverbound};
 pub use play::{
     ABORT_DESTROY_BLOCK, AIR_STATE, AcceptTeleportation, BlockPos, CHANGE_DESTROY_DIRECTION,
     ChunkBatchReceived, GAME_EVENT_WAIT_FOR_CHUNKS, ItemStack, KeepAlive, MovePlayerPos,
-    MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PlayError, PlayerAction,
+    MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PickItemFromBlock, PlayError, PlayerAction,
     START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, SetCarriedItem, SetCreativeModeSlot, UseItemOn,
     block_changed_ack_payload, block_update_payload, chunk_batch_finished_payload,
-    chunk_batch_start_payload, decode_accept_teleportation, decode_chunk_batch_received,
-    decode_keep_alive, decode_move_player_pos, decode_move_player_pos_rot, decode_move_player_rot,
-    decode_move_player_status, decode_player_abilities, decode_player_action, decode_player_loaded,
-    decode_set_carried_item, decode_set_creative_mode_slot, decode_use_item_on,
-    ensure_play_registries, forget_level_chunk_payload, game_event_payload, keep_alive_payload,
-    level_chunk_with_light_payload, login_play_payload, overworld_dimension_type_id,
-    plains_biome_id, player_abilities_payload, player_position_payload,
-    set_chunk_cache_center_payload,
+    chunk_batch_start_payload, container_set_slot_payload, decode_accept_teleportation,
+    decode_chunk_batch_received, decode_keep_alive, decode_move_player_pos,
+    decode_move_player_pos_rot, decode_move_player_rot, decode_move_player_status,
+    decode_pick_item_from_block, decode_player_abilities, decode_player_action,
+    decode_player_loaded, decode_set_carried_item, decode_set_creative_mode_slot,
+    decode_use_item_on, ensure_play_registries, forget_level_chunk_payload, game_event_payload,
+    keep_alive_payload, level_chunk_with_light_payload, login_play_payload,
+    overworld_dimension_type_id, plains_biome_id, player_abilities_payload,
+    player_position_payload, set_chunk_cache_center_payload, set_held_slot_payload,
 };
 pub use primitives::{
     read_f32, read_f64, read_i32, read_i64, read_string, read_u16, write_f32, write_f64, write_i32,

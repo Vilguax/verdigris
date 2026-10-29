@@ -1,15 +1,19 @@
 use tracing::warn;
 use verdigris_protocol::{
-    AIR_STATE, BlockPos, GameMode, ItemStack, PlayerAction, START_DESTROY_BLOCK,
-    STOP_DESTROY_BLOCK, UseItemOn, WORLD_MAX_Y, WORLD_MIN_Y, World, is_air, item_to_placed_state,
-    state_to_block,
+    AIR_STATE, BlockPos, GameMode, ItemStack, PickItemFromBlock, PlayerAction, START_DESTROY_BLOCK,
+    STOP_DESTROY_BLOCK, UseItemOn, WORLD_MAX_Y, WORLD_MIN_Y, World, block_item_of_state, is_air,
+    item_to_placed_state, state_to_block,
 };
 
 pub const GAMEMODE_ENV: &str = "VERDIGRIS_GAMEMODE";
 
 pub const EYE_HEIGHT: f64 = 1.62;
 pub const REACH_SQUARED: f64 = 64.0;
+pub const PICK_REACH_SQUARED: f64 = 81.0;
 pub const BEDROCK: &str = "minecraft:bedrock";
+
+pub const INVENTORY_SLOTS: usize = 36;
+pub const HOTBAR_SLOTS: usize = 9;
 
 pub fn resolve_gamemode(value: Option<&str>) -> GameMode {
     match value {
@@ -39,15 +43,53 @@ pub struct ItemSlot {
     pub count: i32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Hotbar {
-    pub slots: [Option<ItemSlot>; 9],
+pub fn menu_slot_to_index(menu: i16) -> Option<usize> {
+    if (9..=35).contains(&menu) {
+        Some(menu as usize)
+    } else if (36..=44).contains(&menu) {
+        Some((menu - 36) as usize)
+    } else {
+        None
+    }
+}
+
+pub fn index_to_menu_slot(index: usize) -> i16 {
+    if index < HOTBAR_SLOTS {
+        36 + index as i16
+    } else {
+        index as i16
+    }
+}
+
+fn slot_has_item(slot: Option<ItemSlot>, item: i32) -> bool {
+    matches!(slot, Some(s) if s.item == item)
+}
+
+fn slot_to_stack(slot: Option<ItemSlot>) -> ItemStack {
+    match slot {
+        Some(ItemSlot { item, count }) => ItemStack::Item { item, count },
+        None => ItemStack::Empty,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inventory {
+    pub slots: [Option<ItemSlot>; INVENTORY_SLOTS],
     pub selected: usize,
 }
 
-impl Hotbar {
+impl Default for Inventory {
+    fn default() -> Self {
+        Inventory {
+            slots: [None; INVENTORY_SLOTS],
+            selected: 0,
+        }
+    }
+}
+
+impl Inventory {
     pub fn new() -> Self {
-        Hotbar::default()
+        Inventory::default()
     }
 
     pub fn set_carried(&mut self, slot: i16) {
@@ -60,8 +102,8 @@ impl Hotbar {
         if mode != GameMode::Creative {
             return;
         }
-        if (36..=44).contains(&slot) {
-            self.slots[(slot - 36) as usize] = match stack {
+        if let Some(index) = menu_slot_to_index(slot) {
+            self.slots[index] = match stack {
                 ItemStack::Empty => None,
                 ItemStack::Item { item, count } => Some(ItemSlot { item, count }),
             };
@@ -80,6 +122,65 @@ impl Hotbar {
             }
         }
     }
+
+    pub fn adapted_hotbar_slot(&self) -> usize {
+        for k in 0..HOTBAR_SLOTS {
+            let index = (self.selected + k) % HOTBAR_SLOTS;
+            if self.slots[index].is_none() {
+                return index;
+            }
+        }
+        self.selected
+    }
+
+    pub fn pick_block_item(&mut self, mode: GameMode, item: i32) -> Vec<usize> {
+        if let Some(found) = (0..INVENTORY_SLOTS).find(|&i| slot_has_item(self.slots[i], item)) {
+            if found < HOTBAR_SLOTS {
+                self.selected = found;
+                return Vec::new();
+            }
+            let target = self.adapted_hotbar_slot();
+            self.slots.swap(target, found);
+            self.selected = target;
+            let mut changed = vec![target, found];
+            changed.sort_unstable();
+            return changed;
+        }
+
+        if mode != GameMode::Creative {
+            return Vec::new();
+        }
+
+        let target = self.adapted_hotbar_slot();
+        let mut changed = Vec::new();
+        if self.slots[target].is_some() {
+            let empty = (0..INVENTORY_SLOTS).find(|&i| i != target && self.slots[i].is_none());
+            if let Some(empty) = empty {
+                self.slots[empty] = self.slots[target].take();
+                changed.push(empty);
+            }
+        }
+        self.slots[target] = Some(ItemSlot { item, count: 1 });
+        self.selected = target;
+        changed.push(target);
+        changed.sort_unstable();
+        changed
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotUpdate {
+    pub menu_slot: i16,
+    pub stack: ItemStack,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickResult {
+    Ignored,
+    Respond {
+        slots: Vec<SlotUpdate>,
+        selected: i16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,7 +214,8 @@ pub struct PlayerState {
     pub mode: GameMode,
     pub flying: bool,
     pub pos: (f64, f64, f64),
-    pub hotbar: Hotbar,
+    pub inventory: Inventory,
+    pub container_state_id: i32,
 }
 
 impl PlayerState {
@@ -128,7 +230,8 @@ impl PlayerState {
             mode,
             flying,
             pos: SPAWN,
-            hotbar: Hotbar::new(),
+            inventory: Inventory::new(),
+            container_state_id: 0,
         }
     }
 
@@ -136,12 +239,25 @@ impl PlayerState {
         (self.pos.0, self.pos.1 + EYE_HEIGHT, self.pos.2)
     }
 
-    pub fn within_reach(&self, pos: BlockPos) -> bool {
+    pub fn next_container_state_id(&mut self) -> i32 {
+        self.container_state_id += 1;
+        self.container_state_id
+    }
+
+    fn within_reach_squared(&self, pos: BlockPos, max_squared: f64) -> bool {
         let (ex, ey, ez) = self.eye_pos();
         let dx = ex - (pos.x as f64 + 0.5);
         let dy = ey - (pos.y as f64 + 0.5);
         let dz = ez - (pos.z as f64 + 0.5);
-        dx * dx + dy * dy + dz * dz <= REACH_SQUARED
+        dx * dx + dy * dy + dz * dz <= max_squared
+    }
+
+    pub fn within_reach(&self, pos: BlockPos) -> bool {
+        self.within_reach_squared(pos, REACH_SQUARED)
+    }
+
+    pub fn within_pick_reach(&self, pos: BlockPos) -> bool {
+        self.within_reach_squared(pos, PICK_REACH_SQUARED)
     }
 
     pub fn handle_player_action(&mut self, world: &World, action: PlayerAction) -> ActionResult {
@@ -187,7 +303,7 @@ impl PlayerState {
         if packet.hand == 0 {
             let can_place = matches!(self.mode, GameMode::Creative | GameMode::Survival);
             if can_place
-                && let Some(slot) = self.hotbar.selected_item()
+                && let Some(slot) = self.inventory.selected_item()
                 && let Some(state) = item_to_placed_state(slot.item)
                 && self.within_reach(packet.pos)
                 && (WORLD_MIN_Y..=WORLD_MAX_Y).contains(&target.y)
@@ -195,7 +311,7 @@ impl PlayerState {
             {
                 world.set_state(target.x, target.y, target.z, state as u16);
                 if self.mode == GameMode::Survival {
-                    self.hotbar.consume_one(self.hotbar.selected);
+                    self.inventory.consume_one(self.inventory.selected);
                 }
             }
         }
@@ -211,14 +327,46 @@ impl PlayerState {
         }
     }
 
+    pub fn handle_pick_item_from_block(
+        &mut self,
+        world: &World,
+        packet: PickItemFromBlock,
+    ) -> PickResult {
+        if !self.within_pick_reach(packet.pos) {
+            return PickResult::Ignored;
+        }
+        let chunk_x = packet.pos.x.div_euclid(16);
+        let chunk_z = packet.pos.z.div_euclid(16);
+        if !world.is_chunk_loaded(chunk_x, chunk_z) {
+            return PickResult::Ignored;
+        }
+        let state = world.state_at(packet.pos.x, packet.pos.y, packet.pos.z) as i32;
+        let Some(item) = block_item_of_state(state) else {
+            return PickResult::Ignored;
+        };
+        let changed = self.inventory.pick_block_item(self.mode, item);
+        let slots = changed
+            .into_iter()
+            .map(|index| SlotUpdate {
+                menu_slot: index_to_menu_slot(index),
+                stack: slot_to_stack(self.inventory.slots[index]),
+            })
+            .collect();
+        PickResult::Respond {
+            slots,
+            selected: self.inventory.selected as i16,
+        }
+    }
+
     #[cfg(test)]
-    pub fn with_hotbar(mode: GameMode, pos: (f64, f64, f64), hotbar: Hotbar) -> Self {
+    pub fn with_inventory(mode: GameMode, pos: (f64, f64, f64), inventory: Inventory) -> Self {
         PlayerState {
             name: "test".to_owned(),
             mode,
             flying: false,
             pos,
-            hotbar,
+            inventory,
+            container_state_id: 0,
         }
     }
 }
@@ -259,17 +407,23 @@ mod tests {
     const BEDROCK_STATE: i32 = 88;
     const DIRT_ITEM: i32 = 55;
 
-    fn dirt_hotbar() -> Hotbar {
-        let mut hotbar = Hotbar::new();
-        hotbar.slots[0] = Some(ItemSlot {
+    const GRASS_ITEM: i32 = 54;
+
+    fn dirt_inventory() -> Inventory {
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = Some(ItemSlot {
             item: DIRT_ITEM,
             count: 1,
         });
-        hotbar
+        inventory
     }
 
     fn player(mode: GameMode) -> PlayerState {
-        PlayerState::with_hotbar(mode, SPAWN, dirt_hotbar())
+        PlayerState::with_inventory(mode, SPAWN, dirt_inventory())
+    }
+
+    fn slot(item: i32) -> Option<ItemSlot> {
+        Some(ItemSlot { item, count: 1 })
     }
 
     fn action(action: i32, pos: BlockPos, sequence: i32) -> PlayerAction {
@@ -440,7 +594,7 @@ mod tests {
         assert_eq!(ack, 7);
         assert_eq!(world.state_at(0, -60, 0), DIRT_STATE as u16);
         assert_eq!(
-            player.hotbar.selected_item(),
+            player.inventory.selected_item(),
             Some(ItemSlot {
                 item: DIRT_ITEM,
                 count: 1
@@ -463,13 +617,13 @@ mod tests {
             ]
         );
         assert_eq!(world.state_at(0, -60, 0), DIRT_STATE as u16);
-        assert_eq!(player.hotbar.selected_item(), None, "la survie consomme");
+        assert_eq!(player.inventory.selected_item(), None, "la survie consomme");
     }
 
     #[test]
     fn empty_slot_refuses_placement() {
         let world = World::flat().unwrap();
-        let mut player = PlayerState::with_hotbar(GameMode::Creative, SPAWN, Hotbar::new());
+        let mut player = PlayerState::with_inventory(GameMode::Creative, SPAWN, Inventory::new());
         let pos = BlockPos { x: 0, y: -61, z: 0 };
         let (updates, _) = respond(player.handle_use_item_on(&world, use_item(pos, 1, 1)));
         assert_eq!(
@@ -537,16 +691,16 @@ mod tests {
     }
 
     #[test]
-    fn hotbar_carried_and_creative_slots() {
-        let mut hotbar = Hotbar::new();
-        hotbar.set_carried(8);
-        assert_eq!(hotbar.selected, 8);
-        hotbar.set_carried(9);
-        assert_eq!(hotbar.selected, 8, "hors borne ignoré");
-        hotbar.set_carried(-1);
-        assert_eq!(hotbar.selected, 8);
+    fn inventory_carried_and_creative_slots() {
+        let mut inventory = Inventory::new();
+        inventory.set_carried(8);
+        assert_eq!(inventory.selected, 8);
+        inventory.set_carried(9);
+        assert_eq!(inventory.selected, 8, "hors borne ignoré");
+        inventory.set_carried(-1);
+        assert_eq!(inventory.selected, 8);
 
-        hotbar.set_creative_slot(
+        inventory.set_creative_slot(
             GameMode::Creative,
             36,
             ItemStack::Item {
@@ -555,17 +709,17 @@ mod tests {
             },
         );
         assert_eq!(
-            hotbar.slots[0],
+            inventory.slots[0],
             Some(ItemSlot {
                 item: DIRT_ITEM,
                 count: 1
             })
         );
 
-        hotbar.set_creative_slot(GameMode::Creative, 36, ItemStack::Empty);
-        assert_eq!(hotbar.slots[0], None);
+        inventory.set_creative_slot(GameMode::Creative, 36, ItemStack::Empty);
+        assert_eq!(inventory.slots[0], None);
 
-        hotbar.set_creative_slot(
+        inventory.set_creative_slot(
             GameMode::Survival,
             37,
             ItemStack::Item {
@@ -573,9 +727,9 @@ mod tests {
                 count: 1,
             },
         );
-        assert_eq!(hotbar.slots[1], None, "hors créatif ignoré");
+        assert_eq!(inventory.slots[1], None, "hors créatif ignoré");
 
-        hotbar.set_creative_slot(
+        inventory.set_creative_slot(
             GameMode::Creative,
             45,
             ItemStack::Item {
@@ -584,8 +738,308 @@ mod tests {
             },
         );
         assert!(
-            hotbar.slots.iter().filter(|slot| slot.is_some()).count() == 0,
-            "slot hors 36..=44 ignoré"
+            inventory.slots.iter().filter(|slot| slot.is_some()).count() == 0,
+            "slot hors 9..=44 ignoré"
         );
+    }
+
+    #[test]
+    fn creative_slot_fills_reserve_cases() {
+        let mut inventory = Inventory::new();
+        inventory.set_creative_slot(
+            GameMode::Creative,
+            9,
+            ItemStack::Item {
+                item: DIRT_ITEM,
+                count: 1,
+            },
+        );
+        inventory.set_creative_slot(
+            GameMode::Creative,
+            35,
+            ItemStack::Item {
+                item: GRASS_ITEM,
+                count: 1,
+            },
+        );
+        assert_eq!(inventory.slots[9], slot(DIRT_ITEM));
+        assert_eq!(inventory.slots[35], slot(GRASS_ITEM));
+        inventory.set_creative_slot(
+            GameMode::Creative,
+            8,
+            ItemStack::Item {
+                item: DIRT_ITEM,
+                count: 1,
+            },
+        );
+        assert!(
+            inventory.slots.iter().filter(|s| s.is_some()).count() == 2,
+            "slot menu 8 hors de la plage 9..=44"
+        );
+    }
+
+    #[test]
+    fn menu_slot_mapping_bounds() {
+        assert_eq!(menu_slot_to_index(9), Some(9));
+        assert_eq!(menu_slot_to_index(35), Some(35));
+        assert_eq!(menu_slot_to_index(36), Some(0));
+        assert_eq!(menu_slot_to_index(44), Some(8));
+        assert_eq!(menu_slot_to_index(8), None);
+        assert_eq!(menu_slot_to_index(45), None);
+
+        assert_eq!(index_to_menu_slot(0), 36);
+        assert_eq!(index_to_menu_slot(8), 44);
+        assert_eq!(index_to_menu_slot(9), 9);
+        assert_eq!(index_to_menu_slot(35), 35);
+    }
+
+    #[test]
+    fn adapted_hotbar_slot_rules() {
+        let mut inventory = Inventory::new();
+        inventory.selected = 3;
+        assert_eq!(inventory.adapted_hotbar_slot(), 3, "selected vide renvoyée");
+
+        for cell in inventory.slots.iter_mut().take(HOTBAR_SLOTS) {
+            *cell = slot(DIRT_ITEM);
+        }
+        inventory.slots[6] = None;
+        inventory.selected = 3;
+        assert_eq!(
+            inventory.adapted_hotbar_slot(),
+            6,
+            "première vide en tournant depuis selected"
+        );
+
+        for cell in inventory.slots.iter_mut().take(HOTBAR_SLOTS) {
+            *cell = slot(DIRT_ITEM);
+        }
+        inventory.selected = 2;
+        assert_eq!(
+            inventory.adapted_hotbar_slot(),
+            2,
+            "aucune vide renvoie selected"
+        );
+    }
+
+    fn pick(pos: BlockPos, include_data: bool) -> PickItemFromBlock {
+        PickItemFromBlock { pos, include_data }
+    }
+
+    fn pick_respond(result: PickResult) -> (Vec<SlotUpdate>, i16) {
+        match result {
+            PickResult::Respond { slots, selected } => (slots, selected),
+            other => panic!("attendu Respond, obtenu {other:?}"),
+        }
+    }
+
+    const GRASS_POS: BlockPos = BlockPos { x: 0, y: -61, z: 0 };
+
+    fn loaded_flat() -> World {
+        let world = World::flat().unwrap();
+        let _ = world.state_at(GRASS_POS.x, GRASS_POS.y, GRASS_POS.z);
+        world
+    }
+
+    #[test]
+    fn pick_found_in_hotbar_only_changes_selection() {
+        let world = loaded_flat();
+        let mut inventory = Inventory::new();
+        inventory.slots[4] = slot(GRASS_ITEM);
+        inventory.selected = 0;
+        let mut player = PlayerState::with_inventory(GameMode::Creative, SPAWN, inventory);
+        let result = player.handle_pick_item_from_block(&world, pick(GRASS_POS, false));
+        let (slots, selected) = pick_respond(result);
+        assert!(slots.is_empty(), "objet en barre: aucune case modifiée");
+        assert_eq!(selected, 4);
+        assert_eq!(player.inventory.selected, 4);
+    }
+
+    #[test]
+    fn pick_found_in_reserve_swaps_two_slots() {
+        let world = loaded_flat();
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = slot(DIRT_ITEM);
+        inventory.slots[20] = slot(GRASS_ITEM);
+        inventory.selected = 0;
+        let mut player = PlayerState::with_inventory(GameMode::Survival, SPAWN, inventory);
+        let result = player.handle_pick_item_from_block(&world, pick(GRASS_POS, false));
+        let (slots, selected) = pick_respond(result);
+        assert_eq!(selected, 1, "barre adaptée = première vide depuis 0");
+        assert_eq!(
+            slots,
+            vec![
+                SlotUpdate {
+                    menu_slot: 37,
+                    stack: ItemStack::Item {
+                        item: GRASS_ITEM,
+                        count: 1
+                    },
+                },
+                SlotUpdate {
+                    menu_slot: 20,
+                    stack: ItemStack::Empty,
+                },
+            ],
+            "ordre croissant des index: barre (index 1) puis réserve (index 20)"
+        );
+        assert_eq!(player.inventory.slots[1], slot(GRASS_ITEM));
+        assert_eq!(player.inventory.slots[20], None);
+    }
+
+    #[test]
+    fn pick_creative_not_found_with_empty_hotbar_places_without_displacement() {
+        let world = loaded_flat();
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = slot(DIRT_ITEM);
+        inventory.selected = 0;
+        let mut player = PlayerState::with_inventory(GameMode::Creative, SPAWN, inventory);
+        let result = player.handle_pick_item_from_block(&world, pick(GRASS_POS, false));
+        let (slots, selected) = pick_respond(result);
+        assert_eq!(selected, 1);
+        assert_eq!(
+            slots,
+            vec![SlotUpdate {
+                menu_slot: 37,
+                stack: ItemStack::Item {
+                    item: GRASS_ITEM,
+                    count: 1
+                },
+            }]
+        );
+        assert_eq!(player.inventory.slots[0], slot(DIRT_ITEM));
+        assert_eq!(player.inventory.slots[1], slot(GRASS_ITEM));
+    }
+
+    #[test]
+    fn pick_creative_not_found_with_full_hotbar_displaces_to_reserve() {
+        let world = loaded_flat();
+        let mut inventory = Inventory::new();
+        for cell in inventory.slots.iter_mut().take(HOTBAR_SLOTS) {
+            *cell = slot(DIRT_ITEM);
+        }
+        inventory.selected = 0;
+        let mut player = PlayerState::with_inventory(GameMode::Creative, SPAWN, inventory);
+        let result = player.handle_pick_item_from_block(&world, pick(GRASS_POS, false));
+        let (slots, selected) = pick_respond(result);
+        assert_eq!(selected, 0);
+        assert_eq!(
+            slots,
+            vec![
+                SlotUpdate {
+                    menu_slot: 36,
+                    stack: ItemStack::Item {
+                        item: GRASS_ITEM,
+                        count: 1
+                    },
+                },
+                SlotUpdate {
+                    menu_slot: 9,
+                    stack: ItemStack::Item {
+                        item: DIRT_ITEM,
+                        count: 1
+                    },
+                },
+            ],
+            "déplacement: herbe en index 0, terre en première vide (index 9)"
+        );
+        assert_eq!(player.inventory.slots[0], slot(GRASS_ITEM));
+        assert_eq!(player.inventory.slots[9], slot(DIRT_ITEM));
+    }
+
+    #[test]
+    fn pick_creative_not_found_full_inventory_overwrites_single_slot() {
+        let world = loaded_flat();
+        let mut inventory = Inventory::new();
+        for cell in inventory.slots.iter_mut() {
+            *cell = slot(DIRT_ITEM);
+        }
+        inventory.selected = 2;
+        let mut player = PlayerState::with_inventory(GameMode::Creative, SPAWN, inventory);
+        let result = player.handle_pick_item_from_block(&world, pick(GRASS_POS, false));
+        let (slots, selected) = pick_respond(result);
+        assert_eq!(selected, 2);
+        assert_eq!(
+            slots,
+            vec![SlotUpdate {
+                menu_slot: 38,
+                stack: ItemStack::Item {
+                    item: GRASS_ITEM,
+                    count: 1
+                },
+            }],
+            "inventaire plein: écrasement d'une seule case"
+        );
+        assert_eq!(player.inventory.slots[2], slot(GRASS_ITEM));
+    }
+
+    #[test]
+    fn pick_survival_not_found_only_sets_held_slot() {
+        let world = loaded_flat();
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = slot(DIRT_ITEM);
+        inventory.selected = 0;
+        let mut player = PlayerState::with_inventory(GameMode::Survival, SPAWN, inventory);
+        let result = player.handle_pick_item_from_block(&world, pick(GRASS_POS, false));
+        let (slots, selected) = pick_respond(result);
+        assert!(slots.is_empty(), "survie introuvable: aucune case modifiée");
+        assert_eq!(selected, 0, "case choisie inchangée");
+        assert_eq!(player.inventory.slots[0], slot(DIRT_ITEM));
+    }
+
+    #[test]
+    fn pick_on_air_block_is_ignored() {
+        let world = loaded_flat();
+        let mut player = player(GameMode::Creative);
+        let air = BlockPos { x: 0, y: -59, z: 0 };
+        assert_eq!(
+            player.handle_pick_item_from_block(&world, pick(air, false)),
+            PickResult::Ignored
+        );
+    }
+
+    #[test]
+    fn pick_on_water_block_is_ignored() {
+        let world = World::flat().unwrap();
+        world.set_state(0, -60, 0, 89);
+        let _ = world.state_at(0, -60, 0);
+        let mut player = player(GameMode::Creative);
+        let water = BlockPos { x: 0, y: -60, z: 0 };
+        assert_eq!(
+            player.handle_pick_item_from_block(&world, pick(water, false)),
+            PickResult::Ignored
+        );
+    }
+
+    #[test]
+    fn pick_outside_reach_is_ignored() {
+        let world = loaded_flat();
+        let mut player = player(GameMode::Creative);
+        let far = BlockPos {
+            x: 40,
+            y: -61,
+            z: 0,
+        };
+        assert_eq!(
+            player.handle_pick_item_from_block(&world, pick(far, false)),
+            PickResult::Ignored
+        );
+    }
+
+    #[test]
+    fn pick_on_unloaded_chunk_is_ignored() {
+        let world = World::flat().unwrap();
+        let mut player = player(GameMode::Creative);
+        assert_eq!(
+            player.handle_pick_item_from_block(&world, pick(GRASS_POS, false)),
+            PickResult::Ignored
+        );
+    }
+
+    #[test]
+    fn container_state_id_increments_per_player() {
+        let mut player = player(GameMode::Creative);
+        assert_eq!(player.next_container_state_id(), 1);
+        assert_eq!(player.next_container_state_id(), 2);
+        assert_eq!(player.next_container_state_id(), 3);
     }
 }

@@ -180,6 +180,14 @@ impl World {
         out
     }
 
+    pub fn is_chunk_loaded(&self, chunk_x: i32, chunk_z: i32) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .cache
+            .contains_key(&(chunk_x, chunk_z))
+    }
+
     pub fn loaded_len(&self) -> usize {
         self.inner.lock().unwrap().cache.len()
     }
@@ -339,6 +347,15 @@ mod tests {
             emitted, expected,
             "le chunk réémis doit correspondre aux states mutés"
         );
+    }
+
+    #[test]
+    fn chunk_loaded_only_after_touch() {
+        let world = World::flat().unwrap();
+        assert!(!world.is_chunk_loaded(0, 0));
+        let _ = world.state_at(0, -61, 0);
+        assert!(world.is_chunk_loaded(0, 0));
+        assert!(!world.is_chunk_loaded(5, 5));
     }
 
     #[test]

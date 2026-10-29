@@ -32,6 +32,8 @@ pub mod packet_ids {
         pub const PLAYER_ABILITIES: i32 = 0x41;
         pub const BLOCK_UPDATE: i32 = 0x08;
         pub const BLOCK_CHANGED_ACK: i32 = 0x04;
+        pub const CONTAINER_SET_SLOT: i32 = 0x14;
+        pub const SET_HELD_SLOT: i32 = 0x6B;
     }
 
     pub mod serverbound {
@@ -48,6 +50,7 @@ pub mod packet_ids {
         pub const USE_ITEM_ON: i32 = 0x42;
         pub const SET_CARRIED_ITEM: i32 = 0x36;
         pub const SET_CREATIVE_MODE_SLOT: i32 = 0x39;
+        pub const PICK_ITEM_FROM_BLOCK: i32 = 0x24;
     }
 }
 
@@ -526,6 +529,12 @@ pub struct SetCreativeModeSlot {
     pub stack: ItemStack,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickItemFromBlock {
+    pub pos: BlockPos,
+    pub include_data: bool,
+}
+
 fn take_i16(cursor: &mut &[u8]) -> Result<i16, ProtocolError> {
     match read_u16(cursor)? {
         Some((value, consumed)) => {
@@ -626,6 +635,42 @@ pub fn decode_set_creative_mode_slot(body: &[u8]) -> Result<SetCreativeModeSlot,
     Ok(SetCreativeModeSlot { slot, stack })
 }
 
+pub fn decode_pick_item_from_block(body: &[u8]) -> Result<PickItemFromBlock, ProtocolError> {
+    let mut cursor = body;
+    let pos = BlockPos::from_long(take_i64(&mut cursor)?);
+    let include_data = take_bool(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(PickItemFromBlock { pos, include_data })
+}
+
+pub fn container_set_slot_payload(
+    window_id: i32,
+    state_id: i32,
+    slot: i16,
+    stack: ItemStack,
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_var_int(window_id, &mut payload);
+    write_var_int(state_id, &mut payload);
+    crate::primitives::write_u16(slot as u16, &mut payload);
+    match stack {
+        ItemStack::Item { count, item } if count > 0 => {
+            write_var_int(count, &mut payload);
+            write_var_int(item, &mut payload);
+            write_var_int(0, &mut payload);
+            write_var_int(0, &mut payload);
+        }
+        _ => write_var_int(0, &mut payload),
+    }
+    payload
+}
+
+pub fn set_held_slot_payload(slot: i32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_var_int(slot, &mut payload);
+    payload
+}
+
 pub fn block_update_payload(pos: BlockPos, state: i32) -> Vec<u8> {
     let mut payload = Vec::new();
     write_i64(pos.to_long(), &mut payload);
@@ -665,6 +710,124 @@ mod tests {
         assert_eq!(packet_ids::serverbound::SET_CREATIVE_MODE_SLOT, 0x39);
         assert_eq!(packet_ids::clientbound::BLOCK_UPDATE, 0x08);
         assert_eq!(packet_ids::clientbound::BLOCK_CHANGED_ACK, 0x04);
+        assert_eq!(packet_ids::clientbound::CONTAINER_SET_SLOT, 0x14);
+        assert_eq!(packet_ids::clientbound::SET_HELD_SLOT, 0x6B);
+        assert_eq!(packet_ids::serverbound::PICK_ITEM_FROM_BLOCK, 0x24);
+    }
+
+    #[test]
+    fn decode_pick_item_from_block_fields() {
+        let mut body = Vec::new();
+        write_i64(
+            BlockPos {
+                x: 5,
+                y: -61,
+                z: -3,
+            }
+            .to_long(),
+            &mut body,
+        );
+        body.push(1);
+        assert_eq!(
+            decode_pick_item_from_block(&body).unwrap(),
+            PickItemFromBlock {
+                pos: BlockPos {
+                    x: 5,
+                    y: -61,
+                    z: -3
+                },
+                include_data: true,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_pick_item_from_block_reads_false_flag() {
+        let mut body = Vec::new();
+        write_i64(BlockPos { x: 0, y: 0, z: 0 }.to_long(), &mut body);
+        body.push(0);
+        assert_eq!(
+            decode_pick_item_from_block(&body).unwrap(),
+            PickItemFromBlock {
+                pos: BlockPos { x: 0, y: 0, z: 0 },
+                include_data: false,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_pick_item_from_block_truncated_is_eof() {
+        let mut body = Vec::new();
+        write_i64(BlockPos { x: 1, y: 2, z: 3 }.to_long(), &mut body);
+        assert_eq!(
+            decode_pick_item_from_block(&body),
+            Err(ProtocolError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn decode_pick_item_from_block_trailing_is_error() {
+        let mut body = Vec::new();
+        write_i64(BlockPos { x: 1, y: 2, z: 3 }.to_long(), &mut body);
+        body.push(0);
+        body.push(0xFF);
+        assert_eq!(
+            decode_pick_item_from_block(&body),
+            Err(ProtocolError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn container_set_slot_payload_with_item() {
+        let payload = container_set_slot_payload(0, 7, 36, ItemStack::Item { count: 1, item: 54 });
+        let mut cursor = &payload[..];
+        let (window, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(window, 0);
+        cursor = &cursor[c..];
+        let (state_id, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(state_id, 7);
+        cursor = &cursor[c..];
+        assert_eq!(u16::from_be_bytes([cursor[0], cursor[1]]), 36);
+        cursor = &cursor[2..];
+        let (count, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(count, 1);
+        cursor = &cursor[c..];
+        let (item, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(item, 54);
+        cursor = &cursor[c..];
+        let (added, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(added, 0);
+        cursor = &cursor[c..];
+        let (removed, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(removed, 0);
+        cursor = &cursor[c..];
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn container_set_slot_payload_empty_is_count_zero() {
+        let payload = container_set_slot_payload(0, 3, 9, ItemStack::Empty);
+        let mut cursor = &payload[..];
+        let (window, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(window, 0);
+        cursor = &cursor[c..];
+        let (state_id, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(state_id, 3);
+        cursor = &cursor[c..];
+        assert_eq!(u16::from_be_bytes([cursor[0], cursor[1]]), 9);
+        cursor = &cursor[2..];
+        let (count, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(count, 0);
+        cursor = &cursor[c..];
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn set_held_slot_payload_is_var_int() {
+        let payload = set_held_slot_payload(8);
+        let (slot, consumed) = read_var_int(&payload).unwrap().unwrap();
+        assert_eq!(slot, 8);
+        assert_eq!(consumed, payload.len());
     }
 
     #[test]

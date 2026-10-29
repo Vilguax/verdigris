@@ -104,6 +104,18 @@ pub fn item_to_placed_state(item: i32) -> Option<i32> {
     blocks().items.get(&item).copied()
 }
 
+pub fn block_item_of_state(state: i32) -> Option<i32> {
+    let block = state_to_block(state);
+    let lo = block.first_state;
+    let hi = block.first_state + block.state_count;
+    blocks()
+        .data
+        .items
+        .iter()
+        .find(|entry| entry.state >= lo && entry.state < hi)
+        .map(|entry| entry.item)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +180,18 @@ mod tests {
     fn items_map_to_placed_states() {
         assert_eq!(item_to_placed_state(1), Some(1));
         assert_eq!(item_to_placed_state(55), Some(10));
+    }
+
+    #[test]
+    fn block_items_resolve_from_state() {
+        assert_eq!(block_item_of_state(9), Some(54));
+        assert_eq!(block_item_of_state(10), Some(55));
+        assert_eq!(block_item_of_state(88), Some(87));
+    }
+
+    #[test]
+    fn blocks_without_item_resolve_to_none() {
+        assert_eq!(block_item_of_state(0), None);
+        assert_eq!(block_item_of_state(89), None);
     }
 }
