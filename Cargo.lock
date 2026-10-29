@@ -469,6 +469,8 @@ name = "verdigris-worldgen"
 version = "0.1.0"
 dependencies = [
  "md-5",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
