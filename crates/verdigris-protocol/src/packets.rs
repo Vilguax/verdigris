@@ -1,7 +1,7 @@
 use crate::error::ProtocolError;
 use crate::play::{
-    AcceptTeleportation, ChunkBatchReceived, decode_accept_teleportation,
-    decode_chunk_batch_received, decode_player_loaded, packet_ids as play_ids,
+    AcceptTeleportation, ChunkBatchReceived, KeepAlive, decode_accept_teleportation,
+    decode_chunk_batch_received, decode_keep_alive, decode_player_loaded, packet_ids as play_ids,
 };
 use crate::primitives::{read_i64, read_string, read_u16};
 use crate::varint::read_var_int;
@@ -44,6 +44,7 @@ pub enum Serverbound {
     PlayAcceptTeleportation(AcceptTeleportation),
     PlayerLoaded,
     PlayChunkBatchReceived(ChunkBatchReceived),
+    PlayKeepAlive(KeepAlive),
     PlayIgnored { id: i32 },
 }
 
@@ -147,6 +148,8 @@ fn decode_play(id: i32, body: &[u8]) -> Result<Serverbound, ProtocolError> {
         Ok(Serverbound::PlayChunkBatchReceived(
             decode_chunk_batch_received(body)?,
         ))
+    } else if id == play_ids::serverbound::KEEP_ALIVE {
+        Ok(Serverbound::PlayKeepAlive(decode_keep_alive(body)?))
     } else {
         Ok(Serverbound::PlayIgnored { id })
     }
@@ -375,6 +378,29 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_play_keep_alive() {
+        let mut body = Vec::new();
+        write_var_int(0x1C, &mut body);
+        write_i64(42, &mut body);
+        assert_eq!(
+            decode_serverbound(State::Play, &body).unwrap(),
+            Serverbound::PlayKeepAlive(KeepAlive { id: 42 })
+        );
+    }
+
+    #[test]
+    fn decode_play_keep_alive_trailing_is_error() {
+        let mut body = Vec::new();
+        write_var_int(0x1C, &mut body);
+        write_i64(42, &mut body);
+        body.push(0x00);
+        assert_eq!(
+            decode_serverbound(State::Play, &body),
+            Err(ProtocolError::TrailingBytes)
+        );
     }
 
     #[test]

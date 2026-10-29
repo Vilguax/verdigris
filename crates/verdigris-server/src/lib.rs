@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{Duration, Instant, timeout, timeout_at};
+use tokio::time::{Duration, Instant, MissedTickBehavior, interval, timeout, timeout_at};
 use tracing::{Instrument, debug, error, info, info_span, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -12,12 +12,12 @@ use verdigris_protocol::{
     SET_COMPRESSION_ID, Serverbound, State, StatusInfo, build_compressed_packet, build_packet,
     chunk_batch_finished_payload, chunk_batch_start_payload, client_has_core,
     config_disconnect_payload, decode_compressed_frame, decode_frame, decode_known_packs,
-    decode_serverbound, game_event_payload, known_packs_payload, level_chunk_with_light_payload,
-    login_disconnect_payload, login_play_payload, login_success_payload, network_data,
-    offline_uuid, packet_ids, player_position_payload, pong_payload, random_session_id,
-    read_var_int, registry_data_payload, server_known_pack, set_chunk_cache_center_payload,
-    set_compression_payload, status_json, status_response_payload, update_tags_payload,
-    validate_name,
+    decode_serverbound, game_event_payload, keep_alive_payload, known_packs_payload,
+    level_chunk_with_light_payload, login_disconnect_payload, login_play_payload,
+    login_success_payload, network_data, offline_uuid, packet_ids, player_position_payload,
+    pong_payload, random_session_id, read_var_int, registry_data_payload, server_known_pack,
+    set_chunk_cache_center_payload, set_compression_payload, status_json, status_response_payload,
+    update_tags_payload, validate_name,
 };
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
@@ -45,12 +45,100 @@ const PLAY_CHUNK_REACH: i32 = 4;
 pub const REASON_PROTOCOL_ERROR_PREFIX: &str = "Paquet invalide: ";
 pub const REASON_CONNECTION_LOST: &str = "Connexion interrompue";
 pub const REASON_READ_TIMEOUT: &str = "Délai de lecture dépassé";
+pub const REASON_KEEP_ALIVE_TIMEOUT: &str = "keep alive délai dépassé";
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_CHUNK: usize = 4096;
 const CLOSE_BUDGET: Duration = Duration::from_secs(1);
 const DRAIN_LIMIT: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+pub struct KeepAliveConfig {
+    pub interval: Duration,
+    pub timeout: Duration,
+    pub check_period: Duration,
+}
+
+impl Default for KeepAliveConfig {
+    fn default() -> Self {
+        KeepAliveConfig {
+            interval: Duration::from_secs(10),
+            timeout: Duration::from_secs(15),
+            check_period: Duration::from_secs(1),
+        }
+    }
+}
+
+struct Pending {
+    id: i64,
+    sent_at: Instant,
+}
+
+struct KeepAliveState {
+    pending: Option<Pending>,
+    last_sent: Instant,
+    next_id: i64,
+}
+
+impl KeepAliveState {
+    fn new(now: Instant) -> Self {
+        KeepAliveState {
+            pending: None,
+            last_sent: now,
+            next_id: 1,
+        }
+    }
+
+    fn take_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.checked_add(1).unwrap_or(1);
+        id
+    }
+}
+
+enum KeepAliveAction {
+    None,
+    Send(i64),
+    Timeout,
+}
+
+fn evaluate_keep_alive(
+    state: &mut KeepAliveState,
+    config: &KeepAliveConfig,
+    now: Instant,
+) -> KeepAliveAction {
+    if let Some(pending) = &state.pending {
+        if now.duration_since(pending.sent_at) >= config.timeout {
+            return KeepAliveAction::Timeout;
+        }
+        return KeepAliveAction::None;
+    }
+    if now.duration_since(state.last_sent) >= config.interval {
+        let id = state.take_id();
+        state.pending = Some(Pending { id, sent_at: now });
+        state.last_sent = now;
+        return KeepAliveAction::Send(id);
+    }
+    KeepAliveAction::None
+}
+
+fn ack_keep_alive(state: &mut KeepAliveState, id: i64, now: Instant) {
+    match &state.pending {
+        Some(pending) if pending.id == id => {
+            let elapsed = now.duration_since(pending.sent_at);
+            debug!(
+                id,
+                response_ms = elapsed.as_millis() as u64,
+                "keep alive confirmé"
+            );
+            state.pending = None;
+        }
+        _ => {
+            warn!(id, "keep alive inattendu ignoré");
+        }
+    }
+}
 
 enum Next {
     Continue,
@@ -120,6 +208,13 @@ pub async fn serve(bind: &str) -> std::io::Result<()> {
 }
 
 pub async fn run(listener: TcpListener) -> std::io::Result<()> {
+    run_with_config(listener, KeepAliveConfig::default()).await
+}
+
+pub async fn run_with_config(
+    listener: TcpListener,
+    keep_alive: KeepAliveConfig,
+) -> std::io::Result<()> {
     let counter = AtomicU64::new(0);
     loop {
         match listener.accept().await {
@@ -128,7 +223,7 @@ pub async fn run(listener: TcpListener) -> std::io::Result<()> {
                 let span = info_span!("conn", conn_id, peer = %peer);
                 tokio::spawn(
                     async move {
-                        handle_connection(stream).await;
+                        handle_connection(stream, keep_alive).await;
                     }
                     .instrument(span),
                 );
@@ -140,17 +235,17 @@ pub async fn run(listener: TcpListener) -> std::io::Result<()> {
     }
 }
 
-async fn handle_connection(stream: TcpStream) {
+async fn handle_connection(stream: TcpStream, keep_alive: KeepAliveConfig) {
     let started = Instant::now();
     info!("connexion acceptée");
-    serve_connection(stream).await;
+    serve_connection(stream, keep_alive).await;
     info!(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "fin de connexion"
     );
 }
 
-async fn serve_connection(mut stream: TcpStream) {
+async fn serve_connection(mut stream: TcpStream, keep_alive: KeepAliveConfig) {
     let mut buf: Vec<u8> = Vec::new();
     let mut state = State::Handshaking;
     let mut framing = Framing::Uncompressed;
@@ -181,8 +276,15 @@ async fn serve_connection(mut stream: TcpStream) {
             {
                 Next::Continue => {}
                 Next::EnterConfiguration => {
-                    run_configuration(&mut stream, &framing, &mut state, &mut buf, &mut chunk)
-                        .await;
+                    run_configuration(
+                        &mut stream,
+                        &framing,
+                        &mut state,
+                        &mut buf,
+                        &mut chunk,
+                        keep_alive,
+                    )
+                    .await;
                     return;
                 }
                 Next::Terminate(reason) => {
@@ -302,6 +404,7 @@ async fn dispatch(
         Serverbound::PlayAcceptTeleportation(_)
         | Serverbound::PlayerLoaded
         | Serverbound::PlayChunkBatchReceived(_)
+        | Serverbound::PlayKeepAlive(_)
         | Serverbound::PlayIgnored { .. } => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
         }
@@ -400,6 +503,7 @@ async fn run_configuration(
     state: &mut State,
     buf: &mut Vec<u8>,
     chunk: &mut [u8],
+    keep_alive: KeepAliveConfig,
 ) {
     let threshold = match framing {
         Framing::Compressed(threshold) => *threshold,
@@ -547,7 +651,7 @@ async fn run_configuration(
 
     set_state(state, State::Play);
     info!("entrée en jeu");
-    enter_play(stream, framing, state, buf, chunk).await;
+    enter_play(stream, framing, state, buf, chunk, keep_alive).await;
 }
 
 async fn enter_play(
@@ -556,6 +660,7 @@ async fn enter_play(
     state: &mut State,
     buf: &mut Vec<u8>,
     chunk: &mut [u8],
+    keep_alive: KeepAliveConfig,
 ) {
     let login = match login_play_payload(
         PLAY_PLAYER_ID,
@@ -669,7 +774,12 @@ async fn enter_play(
     }
     info!(chunks = sent, "monde vide envoyé");
 
-    run_play(stream, framing, state, buf, chunk).await;
+    run_play(stream, framing, state, buf, chunk, keep_alive).await;
+}
+
+enum PlayStep {
+    Timer,
+    Read(std::io::Result<usize>),
 }
 
 async fn run_play(
@@ -678,6 +788,7 @@ async fn run_play(
     state: &mut State,
     buf: &mut Vec<u8>,
     chunk: &mut [u8],
+    keep_alive: KeepAliveConfig,
 ) {
     let threshold = match framing {
         Framing::Compressed(threshold) => *threshold,
@@ -687,34 +798,84 @@ async fn run_play(
         }
     };
 
+    let mut ka = KeepAliveState::new(Instant::now());
+    let mut ticker = interval(keep_alive.check_period);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     loop {
-        let deadline = Instant::now() + READ_TIMEOUT;
-        match read_config_packet(stream, threshold, buf, chunk, deadline).await {
-            ReadOutcome::Packet(body) => match decode_serverbound(State::Play, &body) {
-                Ok(packet) => handle_play_packet(packet),
+        loop {
+            match decode_compressed_frame(buf, threshold) {
+                Ok(Some((body, consumed))) => {
+                    buf.drain(..consumed);
+                    match decode_serverbound(State::Play, &body) {
+                        Ok(packet) => handle_play_packet(packet, &mut ka, Instant::now()),
+                        Err(err) => {
+                            let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
+                            disconnect(stream, framing, *state, &reason).await;
+                            return;
+                        }
+                    }
+                    if run_keep_alive_action(stream, framing, *state, &mut ka, &keep_alive).await {
+                        return;
+                    }
+                }
+                Ok(None) => break,
                 Err(err) => {
                     let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
                     disconnect(stream, framing, *state, &reason).await;
                     return;
                 }
-            },
-            ReadOutcome::Eof => {
+            }
+        }
+
+        let step = tokio::select! {
+            _ = ticker.tick() => PlayStep::Timer,
+            read = stream.read(chunk) => PlayStep::Read(read),
+        };
+
+        match step {
+            PlayStep::Timer => {
+                if run_keep_alive_action(stream, framing, *state, &mut ka, &keep_alive).await {
+                    return;
+                }
+            }
+            PlayStep::Read(Ok(0)) => {
                 disconnect(stream, framing, *state, REASON_CONNECTION_LOST).await;
                 return;
             }
-            ReadOutcome::Protocol(reason) => {
+            PlayStep::Read(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+            PlayStep::Read(Err(err)) => {
+                let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
                 disconnect(stream, framing, *state, &reason).await;
-                return;
-            }
-            ReadOutcome::Timeout => {
-                disconnect(stream, framing, *state, REASON_READ_TIMEOUT).await;
                 return;
             }
         }
     }
 }
 
-fn handle_play_packet(packet: Serverbound) {
+async fn run_keep_alive_action(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    ka: &mut KeepAliveState,
+    config: &KeepAliveConfig,
+) -> bool {
+    match evaluate_keep_alive(ka, config, Instant::now()) {
+        KeepAliveAction::None => false,
+        KeepAliveAction::Send(id) => {
+            let payload = keep_alive_payload(id);
+            write_packet(stream, framing, state, play_cb::KEEP_ALIVE, &payload)
+                .await
+                .is_err()
+        }
+        KeepAliveAction::Timeout => {
+            disconnect(stream, framing, state, REASON_KEEP_ALIVE_TIMEOUT).await;
+            true
+        }
+    }
+}
+
+fn handle_play_packet(packet: Serverbound, ka: &mut KeepAliveState, now: Instant) {
     match packet {
         Serverbound::PlayAcceptTeleportation(accept) => {
             if accept.teleport_id == PLAY_TELEPORT_ID {
@@ -733,6 +894,9 @@ fn handle_play_packet(packet: Serverbound) {
                 chunks_par_tick = received.desired_chunks_per_tick as f64,
                 "lot de chunks reçu"
             );
+        }
+        Serverbound::PlayKeepAlive(keep_alive) => {
+            ack_keep_alive(ka, keep_alive.id, now);
         }
         Serverbound::PlayIgnored { id } => {
             trace_packet("paquet play ignoré", State::Play, id, 0);
