@@ -1,7 +1,8 @@
 use crate::error::ProtocolError;
 use crate::network::network_data;
 use crate::primitives::{
-    read_f32, read_f64, write_f32, write_f64, write_i32, write_i64, write_string, write_u16,
+    read_f32, read_f64, read_i64, write_f32, write_f64, write_i32, write_i64, write_string,
+    write_u16,
 };
 use crate::varint::{read_var_int, write_var_int};
 
@@ -228,6 +229,12 @@ pub fn chunk_batch_finished_payload(batch_size: i32) -> Vec<u8> {
     payload
 }
 
+pub fn keep_alive_payload(id: i64) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_i64(id, &mut payload);
+    payload
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcceptTeleportation {
     pub teleport_id: i32,
@@ -241,6 +248,11 @@ pub struct AcceptTeleportation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkBatchReceived {
     pub desired_chunks_per_tick: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeepAlive {
+    pub id: i64,
 }
 
 fn take_var_int(cursor: &mut &[u8]) -> Result<i32, ProtocolError> {
@@ -265,6 +277,16 @@ fn take_f32(cursor: &mut &[u8]) -> Result<f32, ProtocolError> {
 
 fn take_f64(cursor: &mut &[u8]) -> Result<f64, ProtocolError> {
     match read_f64(cursor)? {
+        Some((value, consumed)) => {
+            *cursor = &cursor[consumed..];
+            Ok(value)
+        }
+        None => Err(ProtocolError::UnexpectedEof),
+    }
+}
+
+fn take_i64(cursor: &mut &[u8]) -> Result<i64, ProtocolError> {
+    match read_i64(cursor)? {
         Some((value, consumed)) => {
             *cursor = &cursor[consumed..];
             Ok(value)
@@ -310,6 +332,15 @@ pub fn decode_chunk_batch_received(body: &[u8]) -> Result<ChunkBatchReceived, Pr
     Ok(ChunkBatchReceived {
         desired_chunks_per_tick,
     })
+}
+
+pub fn decode_keep_alive(body: &[u8]) -> Result<KeepAlive, ProtocolError> {
+    let mut cursor = body;
+    let id = take_i64(&mut cursor)?;
+    if !cursor.is_empty() {
+        return Err(ProtocolError::TrailingBytes);
+    }
+    Ok(KeepAlive { id })
 }
 
 #[cfg(test)]
@@ -684,5 +715,38 @@ mod tests {
             decode_chunk_batch_received(&body),
             Err(ProtocolError::TrailingBytes)
         );
+    }
+
+    #[test]
+    fn keep_alive_payload_is_eight_big_endian_bytes() {
+        let payload = keep_alive_payload(0x0102030405060708);
+        assert_eq!(payload.len(), 8);
+        assert_eq!(
+            payload,
+            vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        );
+    }
+
+    #[test]
+    fn keep_alive_round_trip() {
+        for id in [1i64, 0, -1, i64::MAX, i64::MIN, 123456789] {
+            let payload = keep_alive_payload(id);
+            assert_eq!(decode_keep_alive(&payload).unwrap(), KeepAlive { id });
+        }
+    }
+
+    #[test]
+    fn keep_alive_too_short_is_eof() {
+        assert_eq!(
+            decode_keep_alive(&[0x00, 0x00, 0x00]),
+            Err(ProtocolError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn keep_alive_trailing_is_error() {
+        let mut body = keep_alive_payload(7);
+        body.push(0xFF);
+        assert_eq!(decode_keep_alive(&body), Err(ProtocolError::TrailingBytes));
     }
 }
