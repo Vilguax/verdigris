@@ -403,6 +403,9 @@ where
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
+                    if let Err(error) = stream.set_nodelay(true) {
+                        warn!(%peer, %error, "TCP_NODELAY non applique");
+                    }
                     let conn_id = counter.fetch_add(1, Ordering::Relaxed);
                     let span = info_span!("conn", conn_id, peer = %peer);
                     let world = Arc::clone(&world);
