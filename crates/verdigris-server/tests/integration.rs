@@ -9,13 +9,25 @@ use verdigris_protocol::{
     encode_compressed_frame, encode_frame, offline_uuid, read_f64, read_i64, read_string,
     read_var_int, write_f32, write_f64, write_i64, write_string, write_u16, write_var_int,
 };
-use verdigris_server::{REASON_CONFIG_NOT_VANILLA, REASON_LOGIN_INVALID_NAME, run};
+use verdigris_server::{
+    KeepAliveConfig, REASON_CONFIG_NOT_VANILLA, REASON_KEEP_ALIVE_TIMEOUT,
+    REASON_LOGIN_INVALID_NAME, run, run_with_config,
+};
 
 async fn spawn_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let _ = run(listener).await;
+    });
+    addr
+}
+
+async fn spawn_server_with_keep_alive(config: KeepAliveConfig) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = run_with_config(listener, config).await;
     });
     addr
 }
@@ -522,6 +534,206 @@ async fn offline_login_rejects_unexpected_packet_after_success() {
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+fn compressed_keep_alive_frame(id: i64) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x1C, &mut body);
+    write_i64(id, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+async fn consume_empty_world(client: &mut TcpStream, buf: &mut Vec<u8>) {
+    let (login_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(login_id, 0x32);
+    let (position_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(position_id, 0x49);
+    let (game_event_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(game_event_id, 0x27);
+    let (center_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(center_id, 0x60);
+    let (batch_start_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(batch_start_id, 0x0C);
+    for _ in 0..81 {
+        let (chunk_id, _) = read_one_compressed_frame(client, buf).await;
+        assert_eq!(chunk_id, 0x2E);
+    }
+    let (batch_finished_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(batch_finished_id, 0x0B);
+}
+
+async fn read_keep_alive_id(client: &mut TcpStream, buf: &mut Vec<u8>) -> i64 {
+    let (id, body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(
+        id, 0x2D,
+        "serveur doit envoyer un Keep Alive clientbound 0x2D"
+    );
+    let (value, _) = read_i64(&body).unwrap().unwrap();
+    value
+}
+
+async fn try_read_compressed_frame(
+    stream: &mut TcpStream,
+    buf: &mut Vec<u8>,
+    budget: Duration,
+) -> Option<(i32, Vec<u8>)> {
+    let mut chunk = [0u8; 1024];
+    loop {
+        if let Some((body, consumed)) = decode_compressed_frame(buf, CLIENT_THRESHOLD).unwrap() {
+            let (id, header) = read_var_int(&body).unwrap().unwrap();
+            let payload = body[header..].to_vec();
+            buf.drain(..consumed);
+            return Some((id, payload));
+        }
+        let n = match timeout(budget, stream.read(&mut chunk)).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(err)) => panic!("read error: {err}"),
+            Err(_) => return None,
+        };
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+#[tokio::test]
+async fn keep_alive_responder_stays_connected_across_intervals() {
+    let addr = spawn_server_with_keep_alive(KeepAliveConfig {
+        interval: Duration::from_millis(120),
+        timeout: Duration::from_millis(600),
+        check_period: Duration::from_millis(20),
+    })
+    .await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    let id1 = read_keep_alive_id(&mut client, &mut buf).await;
+    assert_eq!(id1, 1, "le premier identifiant Keep Alive vaut 1");
+
+    let gap = Duration::from_millis(250);
+    let second = try_read_compressed_frame(&mut client, &mut buf, gap).await;
+    assert!(second.is_none(), "pas de second Keep Alive avant réponse");
+
+    client
+        .write_all(&compressed_keep_alive_frame(id1))
+        .await
+        .unwrap();
+
+    let id2 = read_keep_alive_id(&mut client, &mut buf).await;
+    assert_eq!(
+        id2,
+        id1 + 1,
+        "identifiants Keep Alive strictement croissants"
+    );
+    client
+        .write_all(&compressed_keep_alive_frame(id2))
+        .await
+        .unwrap();
+
+    let id3 = read_keep_alive_id(&mut client, &mut buf).await;
+    assert_eq!(id3, id2 + 1);
+    client
+        .write_all(&compressed_keep_alive_frame(id3))
+        .await
+        .unwrap();
+
+    let gap = Duration::from_millis(80);
+    let silence = try_read_compressed_frame(&mut client, &mut buf, gap).await;
+    assert!(
+        silence.is_none(),
+        "connexion maintenue sur plusieurs intervalles"
+    );
+}
+
+#[tokio::test]
+async fn silent_client_is_disconnected_after_timeout() {
+    let addr = spawn_server_with_keep_alive(KeepAliveConfig {
+        interval: Duration::from_millis(120),
+        timeout: Duration::from_millis(300),
+        check_period: Duration::from_millis(20),
+    })
+    .await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    let id1 = read_keep_alive_id(&mut client, &mut buf).await;
+    assert_eq!(id1, 1);
+
+    let gap = Duration::from_secs(2);
+    let frame = try_read_compressed_frame(&mut client, &mut buf, gap).await;
+    let (disconnect_id, disconnect_body) = frame.expect("Disconnect play attendu");
+    assert_eq!(
+        disconnect_id, 0x20,
+        "le Disconnect play a l'identifiant 0x20"
+    );
+    assert_eq!(
+        disconnect_body[0], 0x08,
+        "le Disconnect play est une chaîne NBT"
+    );
+    assert!(
+        contains_subslice(&disconnect_body, REASON_KEEP_ALIVE_TIMEOUT.as_bytes()),
+        "le Disconnect play mentionne le délai de keep alive dépassé"
+    );
+
+    expect_clean_eof(&mut client).await;
+}
+
+#[tokio::test]
+async fn wrong_and_zero_keep_alive_ids_do_not_disconnect() {
+    let addr = spawn_server_with_keep_alive(KeepAliveConfig {
+        interval: Duration::from_millis(200),
+        timeout: Duration::from_millis(800),
+        check_period: Duration::from_millis(20),
+    })
+    .await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    client
+        .write_all(&compressed_keep_alive_frame(0))
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_keep_alive_frame(999))
+        .await
+        .unwrap();
+
+    let id1 = read_keep_alive_id(&mut client, &mut buf).await;
+    assert_eq!(id1, 1, "identifiant ignoré avant tout Keep Alive serveur");
+
+    client
+        .write_all(&compressed_keep_alive_frame(id1 + 12345))
+        .await
+        .unwrap();
+
+    let gap = Duration::from_millis(300);
+    let second = try_read_compressed_frame(&mut client, &mut buf, gap).await;
+    assert!(
+        second.is_none(),
+        "identifiant erroné: attente conservée, pas d'envoi"
+    );
+
+    client
+        .write_all(&compressed_keep_alive_frame(id1))
+        .await
+        .unwrap();
+
+    let id2 = read_keep_alive_id(&mut client, &mut buf).await;
+    assert_eq!(
+        id2,
+        id1 + 1,
+        "surveillance maintenue après réponse correcte"
+    );
 }
 
 #[tokio::test]
