@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use crate::blocks::{is_air, is_fluid, state_to_block};
+use crate::light::{compute_chunk_light, write_light};
 use crate::network::network_data;
 use crate::primitives::{write_i32, write_i64, write_u16};
 use crate::varint::write_var_int;
@@ -261,7 +262,29 @@ fn state_matches(kind: HeightmapKind, state: u16) -> bool {
     }
 }
 
+pub fn world_surface_heights(column: &ChunkColumn) -> [u16; COLUMNS_PER_CHUNK] {
+    let mut heights = [0u16; COLUMNS_PER_CHUNK];
+    for z in 0..16 {
+        for x in 0..16 {
+            for y in (0..WORLD_HEIGHT).rev() {
+                if !is_air(column.state_at(x, y, z) as i32) {
+                    heights[x + z * 16] = (y + 1) as u16;
+                    break;
+                }
+            }
+        }
+    }
+    heights
+}
+
 fn heightmap_values(column: &ChunkColumn, kind: HeightmapKind) -> Vec<u32> {
+    if matches!(kind, HeightmapKind::WorldSurface) {
+        return world_surface_heights(column)
+            .iter()
+            .map(|&height| height as u32)
+            .collect();
+    }
+
     let mut values = vec![0u32; COLUMNS_PER_CHUNK];
     for z in 0..16 {
         for x in 0..16 {
@@ -320,9 +343,8 @@ pub fn write_chunk_payload(x: i32, z: i32, column: &ChunkColumn, out: &mut Vec<u
 
     write_var_int(0, out);
 
-    for _ in 0..6 {
-        write_var_int(0, out);
-    }
+    let light = compute_chunk_light(column);
+    write_light(&light, out);
 }
 
 #[cfg(test)]
@@ -507,8 +529,21 @@ mod tests {
         assert!(cursor.is_empty());
     }
 
+    fn take_bitset(cursor: &mut &[u8]) -> u64 {
+        let (longs, c) = read_var_int(cursor).unwrap().unwrap();
+        *cursor = &cursor[c..];
+        if longs == 0 {
+            return 0;
+        }
+        assert_eq!(longs, 1);
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&cursor[..8]);
+        *cursor = &cursor[8..];
+        u64::from_be_bytes(bytes)
+    }
+
     #[test]
-    fn empty_column_payload_matches_legacy_bytes() {
+    fn empty_column_payload_carries_full_sky_light() {
         let mut buffer = Vec::new();
         write_chunk_payload(0, 0, &ChunkColumn::empty(41), &mut buffer);
 
@@ -526,11 +561,25 @@ mod tests {
         assert_eq!(block_entities, 0);
         cursor = &cursor[c..];
 
-        for _ in 0..6 {
-            let (value, c) = read_var_int(cursor).unwrap().unwrap();
-            assert_eq!(value, 0);
+        assert_eq!(take_bitset(&mut cursor), 0x3FF_FFFE);
+        assert_eq!(take_bitset(&mut cursor), 0);
+        assert_eq!(take_bitset(&mut cursor), 0x1);
+        assert_eq!(take_bitset(&mut cursor), 0x3FF_FFFF);
+
+        let (sky_count, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(sky_count, 25);
+        cursor = &cursor[c..];
+        for _ in 0..sky_count {
+            let (len, c) = read_var_int(cursor).unwrap().unwrap();
+            assert_eq!(len, 2048);
             cursor = &cursor[c..];
+            cursor = &cursor[len as usize..];
         }
+
+        let (block_count, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(block_count, 0);
+        cursor = &cursor[c..];
+
         assert!(cursor.is_empty());
     }
 

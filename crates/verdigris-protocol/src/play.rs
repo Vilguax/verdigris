@@ -415,8 +415,21 @@ mod tests {
         assert_eq!(&zero[..8], &[0x00; 8]);
     }
 
+    fn take_bitset(cursor: &mut &[u8]) -> u64 {
+        let (longs, c) = read_var_int(cursor).unwrap().unwrap();
+        *cursor = &cursor[c..];
+        if longs == 0 {
+            return 0;
+        }
+        assert_eq!(longs, 1);
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&cursor[..8]);
+        *cursor = &cursor[8..];
+        u64::from_be_bytes(bytes)
+    }
+
     #[test]
-    fn chunk_data_prefix_and_trailers() {
+    fn chunk_data_prefix_and_light_trailers() {
         let payload = level_chunk_with_light_payload(0, 0).unwrap();
         let mut cursor = &payload[8..];
         let (heightmaps, c) = read_var_int(cursor).unwrap().unwrap();
@@ -432,11 +445,25 @@ mod tests {
         assert_eq!(block_entities, 0);
         cursor = &cursor[c..];
 
-        for _ in 0..6 {
-            let (value, c) = read_var_int(cursor).unwrap().unwrap();
-            assert_eq!(value, 0);
+        assert_eq!(take_bitset(&mut cursor), 0x3FF_FFFE);
+        assert_eq!(take_bitset(&mut cursor), 0);
+        assert_eq!(take_bitset(&mut cursor), 0x1);
+        assert_eq!(take_bitset(&mut cursor), 0x3FF_FFFF);
+
+        let (sky_count, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(sky_count, 25);
+        cursor = &cursor[c..];
+        for _ in 0..sky_count {
+            let (len, c) = read_var_int(cursor).unwrap().unwrap();
+            assert_eq!(len, 2048);
             cursor = &cursor[c..];
+            cursor = &cursor[len as usize..];
         }
+
+        let (block_count, c) = read_var_int(cursor).unwrap().unwrap();
+        assert_eq!(block_count, 0);
+        cursor = &cursor[c..];
+
         assert!(cursor.is_empty());
     }
 

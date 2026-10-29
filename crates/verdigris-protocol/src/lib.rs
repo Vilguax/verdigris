@@ -4,6 +4,7 @@ pub mod clientbound;
 pub mod config;
 pub mod error;
 pub mod framing;
+pub mod light;
 pub mod login;
 pub mod network;
 pub mod packets;
@@ -37,8 +38,8 @@ pub use blocks::{
 pub use chunk::{
     BIOMES_PER_SECTION, BLOCKS_PER_SECTION, COLUMNS_PER_CHUNK, ChunkColumn, HEIGHTMAP_BITS, MIN_Y,
     PaletteThresholds, Section, WORLD_HEIGHT, biome_global_bits, biome_index, biome_thresholds,
-    bits_for, block_index, block_thresholds, pack_longs, write_chunk_data, write_chunk_payload,
-    write_heightmaps, write_paletted_container, write_section,
+    bits_for, block_index, block_thresholds, pack_longs, world_surface_heights, write_chunk_data,
+    write_chunk_payload, write_heightmaps, write_paletted_container, write_section,
 };
 pub use clientbound::{
     COMPRESSION_THRESHOLD, EncodeError, MAX_NBT_STRING_BYTES, MAX_OUTBOUND_PACKET_LEN,
@@ -53,6 +54,10 @@ pub use error::ProtocolError;
 pub use framing::{
     MAX_UNCOMPRESSED_LEN, decode_compressed_frame, decode_frame, encode_compressed_frame,
     encode_frame,
+};
+pub use light::{
+    ChunkLight, EMPTY_BLOCK_MASK, compute_chunk_light, full_light_section, write_bitset,
+    write_light, write_light_section,
 };
 pub use login::{
     InvalidName, login_success_payload, offline_uuid, random_session_id, validate_name,
