@@ -92,10 +92,105 @@ pub fn jclamp_f32(v: f32, lo: f32, hi: f32) -> f32 {
     }
 }
 
+pub const C7: f64 = 1.0e-7_f32 as f64;
+pub const WRAP_PERIOD: f64 = 3.3554432e7;
+
+pub fn l(a: f32, p: f32, q: f32) -> f32 {
+    p + a * (q - p)
+}
+
+pub fn l2(ax: f32, ay: f32, p00: f32, p10: f32, p01: f32, p11: f32) -> f32 {
+    l(ay, l(ax, p00, p10), l(ax, p01, p11))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn l3(
+    ax: f32,
+    ay: f32,
+    az: f32,
+    p000: f32,
+    p100: f32,
+    p010: f32,
+    p110: f32,
+    p001: f32,
+    p101: f32,
+    p011: f32,
+    p111: f32,
+) -> f32 {
+    l(
+        az,
+        l2(ax, ay, p000, p100, p010, p110),
+        l2(ax, ay, p001, p101, p011, p111),
+    )
+}
+
+pub fn smooth(t: f32) -> f32 {
+    ((t * t) * t) * ((t * ((t * 6.0) - 15.0)) + 10.0)
+}
+
+pub fn floor_i32(v: f64) -> i32 {
+    if v.is_nan() {
+        return 0;
+    }
+    let f = v.floor();
+    if f <= i32::MIN as f64 {
+        i32::MIN
+    } else if f >= i32::MAX as f64 {
+        i32::MAX
+    } else {
+        f as i32
+    }
+}
+
+pub fn wrap(c: f64) -> f64 {
+    c - (c / WRAP_PERIOD + 0.5).floor() * WRAP_PERIOD
+}
+
 pub fn rotl(v: u64, k: u32) -> u64 {
     v.rotate_left(k)
 }
 
 pub fn trunc32(v: u64) -> i32 {
     v as u32 as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{floor_i32, l, smooth, wrap};
+
+    #[test]
+    fn wrap_is_identity_below_2p24() {
+        for &c in &[0.0, 1.0, -1.0, 16_777_215.0, -16_777_215.0, 123456.789] {
+            assert_eq!(wrap(c).to_bits(), c.to_bits());
+        }
+    }
+
+    #[test]
+    fn wrap_folds_beyond_period() {
+        assert_eq!(wrap(33_554_432.0).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(wrap(33_554_433.0).to_bits(), 1.0_f64.to_bits());
+    }
+
+    #[test]
+    fn smooth_at_characteristic_points() {
+        assert_eq!(smooth(0.0).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(smooth(1.0).to_bits(), 1.0_f32.to_bits());
+        assert_eq!(smooth(0.5).to_bits(), 0.5_f32.to_bits());
+    }
+
+    #[test]
+    fn l_endpoints_and_midpoint() {
+        assert_eq!(l(0.0, 2.0, 10.0).to_bits(), 2.0_f32.to_bits());
+        assert_eq!(l(1.0, 2.0, 10.0).to_bits(), 10.0_f32.to_bits());
+        assert_eq!(l(0.5, 0.0, 10.0).to_bits(), 5.0_f32.to_bits());
+    }
+
+    #[test]
+    fn floor_i32_bounds_and_nan() {
+        assert_eq!(floor_i32(f64::NAN), 0);
+        assert_eq!(floor_i32(3.7), 3);
+        assert_eq!(floor_i32(-0.5), -1);
+        assert_eq!(floor_i32(1.0e300), i32::MAX);
+        assert_eq!(floor_i32(-1.0e300), i32::MIN);
+    }
 }
