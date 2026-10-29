@@ -347,6 +347,17 @@ async fn play_sequence_sends_empty_world_and_stays_open() {
         "entrée en play commence par Login play 0x32"
     );
 
+    let (abilities_id, abilities_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(
+        abilities_id, 0x41,
+        "Login play is immediately followed by Player Abilities"
+    );
+    assert_eq!(
+        abilities_body,
+        vec![0x0D, 0x3D, 0x4C, 0xCC, 0xCD, 0x3D, 0xCC, 0xCC, 0xCD],
+        "creative par défaut: flags 0x0D, flying_speed 0.05, walking_speed 0.1"
+    );
+
     let (position_id, position_body) = read_one_compressed_frame(&mut client, &mut buf).await;
     assert_eq!(
         position_id, 0x49,
@@ -642,6 +653,8 @@ fn compressed_keep_alive_frame(id: i64) -> Vec<u8> {
 async fn consume_empty_world(client: &mut TcpStream, buf: &mut Vec<u8>) {
     let (login_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(login_id, 0x32);
+    let (abilities_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(abilities_id, 0x41);
     let (position_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(position_id, 0x49);
     let (game_event_id, _) = read_one_compressed_frame(client, buf).await;
