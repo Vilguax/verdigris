@@ -1,8 +1,8 @@
+use crate::chunk::{ChunkColumn, write_chunk_payload};
 use crate::error::ProtocolError;
 use crate::network::network_data;
 use crate::primitives::{
     read_f32, read_f64, read_i64, write_f32, write_f64, write_i32, write_i64, write_string,
-    write_u16,
 };
 use crate::varint::{read_var_int, write_var_int};
 
@@ -94,48 +94,25 @@ fn write_bool(value: bool, out: &mut Vec<u8>) {
     out.push(u8::from(value));
 }
 
-fn write_single_valued_container(value: i32, out: &mut Vec<u8>) {
-    out.push(0);
-    write_var_int(value, out);
-}
-
+#[cfg(test)]
 fn write_empty_section(biome_id: i32, out: &mut Vec<u8>) {
-    write_u16(0, out);
-    write_u16(0, out);
-    write_single_valued_container(0, out);
-    write_single_valued_container(biome_id, out);
+    crate::chunk::write_section(&crate::chunk::Section::air(biome_id as u16), out);
 }
 
+#[cfg(test)]
 fn build_empty_chunk_data(biome_id: i32) -> Vec<u8> {
     let mut data = Vec::with_capacity(EMPTY_CHUNK_DATA_LEN);
-    for _ in 0..SECTION_COUNT {
-        write_empty_section(biome_id, &mut data);
-    }
+    crate::chunk::write_chunk_data(&ChunkColumn::empty(biome_id as u16), &mut data);
     data
 }
 
 pub fn level_chunk_with_light_payload(x: i32, z: i32) -> Result<Vec<u8>, PlayError> {
     let biome_id = plains_biome_id()?;
 
+    let column = ChunkColumn::empty(biome_id as u16);
     let mut payload = Vec::new();
-    write_i32(x, &mut payload);
-    write_i32(z, &mut payload);
-
-    write_var_int(0, &mut payload);
-
-    let data = build_empty_chunk_data(biome_id);
-    debug_assert!(data.len() <= MAX_CHUNK_DATA_LEN);
-    write_var_int(data.len() as i32, &mut payload);
-    payload.extend_from_slice(&data);
-
-    write_var_int(0, &mut payload);
-
-    for _ in 0..4 {
-        write_var_int(0, &mut payload);
-    }
-    write_var_int(0, &mut payload);
-    write_var_int(0, &mut payload);
-
+    write_chunk_payload(x, z, &column, &mut payload);
+    debug_assert!(payload.len() <= MAX_CHUNK_DATA_LEN);
     Ok(payload)
 }
 
