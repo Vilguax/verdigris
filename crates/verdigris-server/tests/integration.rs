@@ -130,7 +130,11 @@ fn compressed_unknown_play_frame() -> Vec<u8> {
 }
 
 async fn drive_to_play(client: &mut TcpStream, buf: &mut Vec<u8>) {
-    drive_to_login_acknowledged(client, buf, "Verdi").await;
+    drive_to_play_named(client, buf, "Verdi").await;
+}
+
+async fn drive_to_play_named(client: &mut TcpStream, buf: &mut Vec<u8>, name: &str) {
+    drive_to_login_acknowledged(client, buf, name).await;
 
     let (known_packs_id, known_packs_body) = read_one_compressed_frame(client, buf).await;
     assert_eq!(known_packs_id, 0x0F);
@@ -429,6 +433,21 @@ async fn play_sequence_sends_empty_world_and_stays_open() {
         "Chunk Batch Finished reports the 289 chunks of the radius-8 square"
     );
 
+    let (player_info_id, player_info_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(
+        player_info_id, 0x47,
+        "le joueur reçoit sa propre entrée de liste (Player Info Update 0x47)"
+    );
+    let entries = parse_player_info_update(&player_info_body);
+    assert_eq!(
+        entries,
+        vec![offline_uuid("Verdi")],
+        "la liste initiale ne contient que le joueur lui-même"
+    );
+
+    let (tab_list_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(tab_list_id, 0x7D, "puis l'en-tete/pied de liste");
+
     client
         .write_all(&compressed_accept_teleportation_frame(
             teleport_id,
@@ -669,6 +688,10 @@ async fn consume_empty_world(client: &mut TcpStream, buf: &mut Vec<u8>) {
     }
     let (batch_finished_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(batch_finished_id, 0x0B);
+    let (player_info_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(player_info_id, 0x47, "Player Info Update 0x47");
+    let (tab_list_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(tab_list_id, 0x7D, "Tab List 0x7D");
 }
 
 fn chunk_coords(chunk_body: &[u8]) -> (i32, i32) {
@@ -1079,6 +1102,132 @@ fn unique_world_dir() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("verdigris-it-{}-{seq}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
+}
+
+async fn consume_world_only(client: &mut TcpStream, buf: &mut Vec<u8>) {
+    let (login_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(login_id, 0x32);
+    let (abilities_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(abilities_id, 0x41);
+    let (position_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(position_id, 0x49);
+    let (game_event_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(game_event_id, 0x27);
+    let (center_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(center_id, 0x60);
+    let (batch_start_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(batch_start_id, 0x0C);
+    for _ in 0..289 {
+        let (chunk_id, _) = read_one_compressed_frame(client, buf).await;
+        assert_eq!(chunk_id, 0x2E);
+    }
+    let (batch_finished_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(batch_finished_id, 0x0B);
+}
+
+fn parse_player_info_update(body: &[u8]) -> Vec<u128> {
+    assert_eq!(
+        body[0], 0xFF,
+        "une mise à jour d'ajout utilise le bitset 0xFF"
+    );
+    let mut cursor = &body[1..];
+    let (count, used) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[used..];
+    let mut uuids = Vec::new();
+    for _ in 0..count {
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&cursor[..16]);
+        uuids.push(u128::from_be_bytes(bytes));
+        cursor = &cursor[16..];
+        let (_name, used) = read_string(cursor, MAX_USERNAME_LEN).unwrap().unwrap();
+        cursor = &cursor[used..];
+        let (_props, used) = read_var_int(cursor).unwrap().unwrap();
+        cursor = &cursor[used..];
+        cursor = &cursor[1..];
+        let (_gamemode, used) = read_var_int(cursor).unwrap().unwrap();
+        cursor = &cursor[used..];
+        cursor = &cursor[1..];
+        let (_latency, used) = read_var_int(cursor).unwrap().unwrap();
+        cursor = &cursor[used..];
+        cursor = &cursor[1..];
+        let (_order, used) = read_var_int(cursor).unwrap().unwrap();
+        cursor = &cursor[used..];
+        cursor = &cursor[1..];
+    }
+    uuids
+}
+
+fn parse_player_info_remove(body: &[u8]) -> Vec<u128> {
+    let (count, used) = read_var_int(body).unwrap().unwrap();
+    let mut cursor = &body[used..];
+    let mut uuids = Vec::new();
+    for _ in 0..count {
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&cursor[..16]);
+        uuids.push(u128::from_be_bytes(bytes));
+        cursor = &cursor[16..];
+    }
+    uuids
+}
+
+#[tokio::test]
+async fn two_clients_share_the_tab_list() {
+    let addr = spawn_server().await;
+
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    consume_world_only(&mut alice, &mut buf_a).await;
+
+    let (info_id, info_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(info_id, 0x47);
+    assert_eq!(
+        parse_player_info_update(&info_body),
+        vec![offline_uuid("Alice")],
+        "Alice seule se voit à l'entrée"
+    );
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_named(&mut bob, &mut buf_b, "Bob").await;
+    consume_world_only(&mut bob, &mut buf_b).await;
+
+    let (info_id, info_body) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
+    assert_eq!(info_id, 0x47);
+    let mut bob_view = parse_player_info_update(&info_body);
+    bob_view.sort();
+    let mut expected = vec![offline_uuid("Alice"), offline_uuid("Bob")];
+    expected.sort();
+    assert_eq!(
+        bob_view, expected,
+        "Bob reçoit une unique mise à jour contenant Alice et Bob"
+    );
+    let (tab_id, _) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let (add_id, add_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(add_id, 0x47);
+    assert_eq!(
+        parse_player_info_update(&add_body),
+        vec![offline_uuid("Bob")],
+        "Alice reçoit l'ajout du seul nouveau joueur Bob"
+    );
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D, "le pied de liste d'Alice est réactualisé");
+
+    drop(bob);
+
+    let (remove_id, remove_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(remove_id, 0x46, "départ de Bob: Player Info Remove");
+    assert_eq!(
+        parse_player_info_remove(&remove_body),
+        vec![offline_uuid("Bob")],
+        "la suppression cible Bob"
+    );
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D, "le pied de liste repasse à un seul joueur");
 }
 
 #[tokio::test]

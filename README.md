@@ -14,9 +14,12 @@ Un client 26.3 vanilla :
 - apparaît sur un monde plat, reçoit ses chunks autour de lui et les voit se charger ou s'oublier quand il se déplace ;
 - casse et pose des blocs à portée, avec resynchronisation si le geste est refusé ;
 - utilise la molette (`pick_item_from_block`, 0x24) : l'objet correspondant à l'état du bloc visé est recherché dans l'inventaire principal suivi (36 cases, index 0 à 8 pour la barre, 9 à 35 pour la réserve) ; selon le cas la case choisie change, une occurrence en réserve est échangée, ou l'objet est ajouté en créatif, puis le serveur émet les `container_set_slot` (0x14) utiles dans l'ordre croissant des index avec un compteur d'état par joueur, suivis d'un `set_held_slot` (0x6B) ;
-- met à jour son inventaire en créatif via `set_creative_mode_slot` pour les cases menu 9 à 44.
+- met à jour son inventaire en créatif via `set_creative_mode_slot` pour les cases menu 9 à 44 ;
+- voit la liste des joueurs (touche Tab) : à l'entrée, chaque joueur reçoit une mise à jour unique contenant tous les joueurs présents, et les joueurs déjà connectés reçoivent l'ajout du nouveau ; à chaque départ (propre ou interrompu), les joueurs restants reçoivent la suppression du partant. L'en-tête affiche le MOTD, le pied `joueurs_en_ligne/maximum`. La latence mesurée par le keep alive est diffusée à tous toutes les 30 secondes, et un changement de mode de jeu est diffusé immédiatement avec l'action correspondante seule.
 
 Hors périmètre pour le choix de bloc : le booléen `include_data` et les entités de bloc (lus puis ignorés), `pick_item_from_entity`, l'inventaire de survie côté serveur, l'armure et la main secondaire, les menus et conteneurs. Plus largement : le mode online (chiffrement et authentification), les entités et les plugins ne sont pas implémentés.
+
+Hors périmètre de la liste Tab : les entités des autres joueurs dans le monde, les skins et propriétés signées, le chat et son initialisation, le nom d'affichage personnalisé.
 
 ## Lancer
 

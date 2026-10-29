@@ -11,6 +11,7 @@ pub mod login;
 pub mod network;
 pub mod packets;
 pub mod play;
+pub mod playerlist;
 pub mod primitives;
 pub mod status;
 pub mod varint;
@@ -51,6 +52,7 @@ pub use clientbound::{
     COMPRESSION_THRESHOLD, EncodeError, MAX_NBT_STRING_BYTES, MAX_OUTBOUND_PACKET_LEN,
     NBT_TAG_STRING, SET_COMPRESSION_ID, build_compressed_packet, build_packet,
     config_disconnect_payload, login_disconnect_payload, set_compression_payload,
+    text_component_nbt,
 };
 pub use config::{
     MAX_KNOWN_PACKS, client_has_core, decode_known_packs, known_packs_payload, packet_ids,
@@ -86,6 +88,10 @@ pub use play::{
     keep_alive_payload, level_chunk_with_light_payload, login_play_payload,
     overworld_dimension_type_id, plains_biome_id, player_abilities_payload,
     player_position_payload, set_chunk_cache_center_payload, set_held_slot_payload,
+};
+pub use playerlist::{
+    ListedPlayer, player_info_remove_payload, player_info_update_gamemode_payload,
+    player_info_update_init_payload, player_info_update_latency_payload, tab_list_payload,
 };
 pub use primitives::{
     read_f32, read_f64, read_i32, read_i64, read_string, read_u16, write_f32, write_f64, write_i32,

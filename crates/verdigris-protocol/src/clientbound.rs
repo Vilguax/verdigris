@@ -12,12 +12,14 @@ pub const COMPRESSION_THRESHOLD: i32 = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodeError {
     PacketTooLarge,
+    NameTooLong,
 }
 
 impl core::fmt::Display for EncodeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             EncodeError::PacketTooLarge => write!(f, "packet too large"),
+            EncodeError::NameTooLong => write!(f, "name exceeds 16 characters"),
         }
     }
 }
@@ -62,9 +64,13 @@ pub fn login_disconnect_payload(reason: &str) -> Vec<u8> {
 }
 
 pub fn config_disconnect_payload(reason: &str) -> Vec<u8> {
+    text_component_nbt(reason)
+}
+
+pub fn text_component_nbt(text: &str) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.push(NBT_TAG_STRING);
-    write_nbt_network_string(reason, &mut payload);
+    write_nbt_network_string(text, &mut payload);
     payload
 }
 
