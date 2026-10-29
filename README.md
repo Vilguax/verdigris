@@ -11,9 +11,12 @@ Un client 26.3 vanilla :
 - voit le serveur dans sa liste multijoueur (MOTD, version, joueurs, ping) ;
 - se connecte en mode offline, avec compression zlib ;
 - reçoit les 32 registres synchronisés et les tags, puis entre en play ;
-- est ensuite déconnecté proprement avec le message « le monde n'est pas encore disponible ».
+- apparaît sur un monde plat, reçoit ses chunks autour de lui et les voit se charger ou s'oublier quand il se déplace ;
+- casse et pose des blocs à portée, avec resynchronisation si le geste est refusé ;
+- utilise la molette (`pick_item_from_block`, 0x24) : l'objet correspondant à l'état du bloc visé est recherché dans l'inventaire principal suivi (36 cases, index 0 à 8 pour la barre, 9 à 35 pour la réserve) ; selon le cas la case choisie change, une occurrence en réserve est échangée, ou l'objet est ajouté en créatif, puis le serveur émet les `container_set_slot` (0x14) utiles dans l'ordre croissant des index avec un compteur d'état par joueur, suivis d'un `set_held_slot` (0x6B) ;
+- met à jour son inventaire en créatif via `set_creative_mode_slot` pour les cases menu 9 à 44.
 
-Pas encore implémenté : le monde (chunks, spawn, entités), le mode online (chiffrement et authentification), les plugins.
+Hors périmètre pour le choix de bloc : le booléen `include_data` et les entités de bloc (lus puis ignorés), `pick_item_from_entity`, l'inventaire de survie côté serveur, l'armure et la main secondaire, les menus et conteneurs. Plus largement : le mode online (chiffrement et authentification), les entités et les plugins ne sont pas implémentés.
 
 ## Lancer
 

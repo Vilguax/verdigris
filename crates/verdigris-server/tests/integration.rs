@@ -714,6 +714,32 @@ fn compressed_set_carried_item_frame(slot: i16) -> Vec<u8> {
     encode_compressed_frame(&body, CLIENT_THRESHOLD)
 }
 
+fn compressed_pick_item_from_block_frame(pos: BlockPos, include_data: bool) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x24, &mut body);
+    write_i64(pos.to_long(), &mut body);
+    body.push(u8::from(include_data));
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn read_container_set_slot(body: &[u8]) -> (i32, i16, Option<(i32, i32)>) {
+    let (window, c) = read_var_int(body).unwrap().unwrap();
+    assert_eq!(window, 0, "fenêtre 0 (inventaire du joueur)");
+    let mut cursor = &body[c..];
+    let (state_id, c) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[c..];
+    let slot = i16::from_be_bytes([cursor[0], cursor[1]]);
+    cursor = &cursor[2..];
+    let (count, c) = read_var_int(cursor).unwrap().unwrap();
+    if count > 0 {
+        cursor = &cursor[c..];
+        let (item, _) = read_var_int(cursor).unwrap().unwrap();
+        (state_id, slot, Some((item, count)))
+    } else {
+        (state_id, slot, None)
+    }
+}
+
 fn compressed_use_item_on_frame(pos: BlockPos, face: i32, sequence: i32) -> Vec<u8> {
     let mut body = Vec::new();
     write_var_int(0x42, &mut body);
@@ -803,6 +829,57 @@ async fn place_then_break_dirt_over_tcp() {
     assert_eq!(ack_id, 0x04, "casse: Block Changed Ack");
     let (sequence, _) = read_var_int(&ack_body).unwrap().unwrap();
     assert_eq!(sequence, 2);
+}
+
+#[tokio::test]
+async fn creative_pick_block_displaces_and_selects_over_tcp() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    for i in 0..9i16 {
+        client
+            .write_all(&compressed_set_creative_mode_slot_frame(36 + i, 55, 1))
+            .await
+            .unwrap();
+    }
+
+    let grass = BlockPos { x: 0, y: -61, z: 0 };
+    client
+        .write_all(&compressed_pick_item_from_block_frame(grass, false))
+        .await
+        .unwrap();
+
+    let (first_id, first_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(first_id, 0x14, "pick: Container Set Slot");
+    let (state1, slot1, stack1) = read_container_set_slot(&first_body);
+    assert_eq!(
+        slot1, 36,
+        "première case modifiée: la case choisie (menu 36)"
+    );
+    assert_eq!(stack1, Some((54, 1)), "l'herbe (objet 54) est placée");
+
+    let (second_id, second_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(second_id, 0x14, "pick: second Container Set Slot");
+    let (state2, slot2, stack2) = read_container_set_slot(&second_body);
+    assert_eq!(
+        slot2, 9,
+        "seconde case modifiée: la terre déplacée (menu 9)"
+    );
+    assert_eq!(stack2, Some((55, 1)), "la terre déplacée (objet 55)");
+
+    assert!(
+        state2 > state1,
+        "les identifiants d'état sont strictement croissants"
+    );
+
+    let (held_id, held_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(held_id, 0x6B, "pick: Set Held Slot après les cases");
+    let (selected, _) = read_var_int(&held_body).unwrap().unwrap();
+    assert_eq!(selected, 0, "la case choisie courante est la barre 0");
 }
 
 async fn read_keep_alive_id(client: &mut TcpStream, buf: &mut Vec<u8>) -> i64 {

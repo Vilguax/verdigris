@@ -25,13 +25,14 @@ use verdigris_protocol::{
     SET_COMPRESSION_ID, Serverbound, State, StatusInfo, World, block_changed_ack_payload,
     block_update_payload, build_compressed_packet, build_packet, chunk_batch_finished_payload,
     chunk_batch_start_payload, chunk_coord, chunks_to_forget, chunks_to_load, client_has_core,
-    config_disconnect_payload, decode_compressed_frame, decode_frame, decode_known_packs,
-    decode_serverbound, forget_level_chunk_payload, game_event_payload, keep_alive_payload,
-    known_packs_payload, login_disconnect_payload, login_play_payload, login_success_payload,
-    network_data, offline_uuid, packet_ids, player_abilities_payload, player_position_payload,
-    pong_payload, random_session_id, read_var_int, registry_data_payload, server_known_pack,
-    set_chunk_cache_center_payload, set_compression_payload, status_json, status_response_payload,
-    update_tags_payload, validate_name, write_chunk_payload,
+    config_disconnect_payload, container_set_slot_payload, decode_compressed_frame, decode_frame,
+    decode_known_packs, decode_serverbound, forget_level_chunk_payload, game_event_payload,
+    keep_alive_payload, known_packs_payload, login_disconnect_payload, login_play_payload,
+    login_success_payload, network_data, offline_uuid, packet_ids, player_abilities_payload,
+    player_position_payload, pong_payload, random_session_id, read_var_int, registry_data_payload,
+    server_known_pack, set_chunk_cache_center_payload, set_compression_payload,
+    set_held_slot_payload, status_json, status_response_payload, update_tags_payload,
+    validate_name, write_chunk_payload,
 };
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
@@ -523,6 +524,7 @@ async fn dispatch(
         | Serverbound::PlayUseItemOn(_)
         | Serverbound::PlaySetCarriedItem(_)
         | Serverbound::PlaySetCreativeModeSlot(_)
+        | Serverbound::PlayPickItemFromBlock(_)
         | Serverbound::PlayIgnored { .. } => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
         }
@@ -1226,7 +1228,7 @@ async fn handle_play_packet(
             emit_interaction(stream, framing, state, result).await
         }
         Serverbound::PlaySetCarriedItem(set) => {
-            session.player.hotbar.set_carried(set.slot);
+            session.player.inventory.set_carried(set.slot);
             debug!(slot = set.slot, "case active mise à jour");
             false
         }
@@ -1234,10 +1236,16 @@ async fn handle_play_packet(
             let mode = session.player.mode;
             session
                 .player
-                .hotbar
+                .inventory
                 .set_creative_slot(mode, set.slot, set.stack);
             debug!(slot = set.slot, "case créative mise à jour");
             false
+        }
+        Serverbound::PlayPickItemFromBlock(pick) => {
+            let result = session
+                .player
+                .handle_pick_item_from_block(session.world, pick);
+            emit_pick(stream, framing, state, &mut session.player, result).await
         }
         Serverbound::PlayIgnored { id } => {
             trace_packet("paquet play ignoré", State::Play, id, 0);
@@ -1283,6 +1291,44 @@ async fn emit_interaction(
                 state,
                 play_cb::BLOCK_CHANGED_ACK,
                 &block_changed_ack_payload(ack),
+            )
+            .await
+            .is_err()
+        }
+    }
+}
+
+async fn emit_pick(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    player_state: &mut PlayerState,
+    result: player::PickResult,
+) -> bool {
+    match result {
+        player::PickResult::Ignored => false,
+        player::PickResult::Respond { slots, selected } => {
+            for slot in slots {
+                let state_id = player_state.next_container_state_id();
+                if write_packet(
+                    stream,
+                    framing,
+                    state,
+                    play_cb::CONTAINER_SET_SLOT,
+                    &container_set_slot_payload(0, state_id, slot.menu_slot, slot.stack),
+                )
+                .await
+                .is_err()
+                {
+                    return true;
+                }
+            }
+            write_packet(
+                stream,
+                framing,
+                state,
+                play_cb::SET_HELD_SLOT,
+                &set_held_slot_payload(selected as i32),
             )
             .await
             .is_err()
