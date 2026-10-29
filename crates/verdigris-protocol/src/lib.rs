@@ -1,3 +1,5 @@
+pub mod blocks;
+pub mod chunk;
 pub mod clientbound;
 pub mod config;
 pub mod error;
@@ -28,6 +30,16 @@ pub enum State {
     Play,
 }
 
+pub use blocks::{
+    Block, BlocksData, ItemState, blocks_data, default_state_of_name, is_air, is_fluid,
+    item_to_placed_state, state_to_block,
+};
+pub use chunk::{
+    BIOMES_PER_SECTION, BLOCKS_PER_SECTION, COLUMNS_PER_CHUNK, ChunkColumn, HEIGHTMAP_BITS, MIN_Y,
+    PaletteThresholds, Section, WORLD_HEIGHT, biome_global_bits, biome_index, biome_thresholds,
+    bits_for, block_index, block_thresholds, pack_longs, write_chunk_data, write_chunk_payload,
+    write_heightmaps, write_paletted_container, write_section,
+};
 pub use clientbound::{
     COMPRESSION_THRESHOLD, EncodeError, MAX_NBT_STRING_BYTES, MAX_OUTBOUND_PACKET_LEN,
     NBT_TAG_STRING, SET_COMPRESSION_ID, build_compressed_packet, build_packet,
