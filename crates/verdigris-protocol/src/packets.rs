@@ -1,7 +1,9 @@
 use crate::error::ProtocolError;
 use crate::play::{
-    AcceptTeleportation, ChunkBatchReceived, KeepAlive, decode_accept_teleportation,
-    decode_chunk_batch_received, decode_keep_alive, decode_player_loaded, packet_ids as play_ids,
+    AcceptTeleportation, ChunkBatchReceived, KeepAlive, MovePlayerPos, MovePlayerPosRot,
+    MovePlayerRot, MovePlayerStatus, decode_accept_teleportation, decode_chunk_batch_received,
+    decode_keep_alive, decode_move_player_pos, decode_move_player_pos_rot, decode_move_player_rot,
+    decode_move_player_status, decode_player_loaded, packet_ids as play_ids,
 };
 use crate::primitives::{read_i64, read_string, read_u16};
 use crate::varint::read_var_int;
@@ -45,6 +47,10 @@ pub enum Serverbound {
     PlayerLoaded,
     PlayChunkBatchReceived(ChunkBatchReceived),
     PlayKeepAlive(KeepAlive),
+    PlayMovePlayerPos(MovePlayerPos),
+    PlayMovePlayerPosRot(MovePlayerPosRot),
+    PlayMovePlayerRot(MovePlayerRot),
+    PlayMovePlayerStatus(MovePlayerStatus),
     PlayIgnored { id: i32 },
 }
 
@@ -150,6 +156,22 @@ fn decode_play(id: i32, body: &[u8]) -> Result<Serverbound, ProtocolError> {
         ))
     } else if id == play_ids::serverbound::KEEP_ALIVE {
         Ok(Serverbound::PlayKeepAlive(decode_keep_alive(body)?))
+    } else if id == play_ids::serverbound::MOVE_PLAYER_POS {
+        Ok(Serverbound::PlayMovePlayerPos(decode_move_player_pos(
+            body,
+        )?))
+    } else if id == play_ids::serverbound::MOVE_PLAYER_POS_ROT {
+        Ok(Serverbound::PlayMovePlayerPosRot(
+            decode_move_player_pos_rot(body)?,
+        ))
+    } else if id == play_ids::serverbound::MOVE_PLAYER_ROT {
+        Ok(Serverbound::PlayMovePlayerRot(decode_move_player_rot(
+            body,
+        )?))
+    } else if id == play_ids::serverbound::MOVE_PLAYER_STATUS_ONLY {
+        Ok(Serverbound::PlayMovePlayerStatus(
+            decode_move_player_status(body)?,
+        ))
     } else {
         Ok(Serverbound::PlayIgnored { id })
     }
@@ -400,6 +422,34 @@ mod tests {
         assert_eq!(
             decode_serverbound(State::Play, &body),
             Err(ProtocolError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn decode_play_move_player_pos() {
+        let mut body = Vec::new();
+        write_var_int(0x1E, &mut body);
+        for value in [48.5f64, -60.0, 0.5] {
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+        body.push(0x01);
+        match decode_serverbound(State::Play, &body).unwrap() {
+            Serverbound::PlayMovePlayerPos(pos) => {
+                assert_eq!((pos.x, pos.y, pos.z), (48.5, -60.0, 0.5));
+                assert_eq!(pos.flags, 0x01);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_play_move_player_status_only() {
+        let mut body = Vec::new();
+        write_var_int(0x21, &mut body);
+        body.push(0x00);
+        assert_eq!(
+            decode_serverbound(State::Play, &body).unwrap(),
+            Serverbound::PlayMovePlayerStatus(crate::play::MovePlayerStatus { flags: 0x00 })
         );
     }
 

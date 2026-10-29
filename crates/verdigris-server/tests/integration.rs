@@ -362,8 +362,8 @@ async fn play_sequence_sends_empty_world_and_stays_open() {
     let (z, _) = read_f64(cursor).unwrap().unwrap();
     assert_eq!(
         (x, y, z),
-        (0.5, 100.0, 0.5),
-        "spawn position is (0.5,100,0.5)"
+        (0.5, -60.0, 0.5),
+        "spawn position is (0.5,-60,0.5)"
     );
 
     let (game_event_id, game_event_body) = read_one_compressed_frame(&mut client, &mut buf).await;
@@ -389,13 +389,22 @@ async fn play_sequence_sends_empty_world_and_stays_open() {
         "Chunk Batch Start has no payload"
     );
 
-    for index in 0..81 {
-        let (chunk_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    let mut first_chunk = None;
+    for index in 0..289 {
+        let (chunk_id, chunk_body) = read_one_compressed_frame(&mut client, &mut buf).await;
         assert_eq!(
             chunk_id, 0x2E,
             "chunk #{index} must be Level Chunk With Light 0x2E"
         );
+        if index == 0 {
+            first_chunk = Some(chunk_coords(&chunk_body));
+        }
     }
+    assert_eq!(
+        first_chunk,
+        Some((0, 0)),
+        "the nearest chunk to the spawn is sent first"
+    );
 
     let (batch_finished_id, batch_finished_body) =
         read_one_compressed_frame(&mut client, &mut buf).await;
@@ -404,13 +413,16 @@ async fn play_sequence_sends_empty_world_and_stays_open() {
         "chunks are followed by Chunk Batch Finished"
     );
     let (count, _) = read_var_int(&batch_finished_body).unwrap().unwrap();
-    assert_eq!(count, 81, "Chunk Batch Finished reports the 81 chunks sent");
+    assert_eq!(
+        count, 289,
+        "Chunk Batch Finished reports the 289 chunks of the radius-8 square"
+    );
 
     client
         .write_all(&compressed_accept_teleportation_frame(
             teleport_id,
             0.5,
-            100.0,
+            -60.0,
             0.5,
             0.0,
             0.0,
@@ -432,6 +444,90 @@ async fn play_sequence_sends_empty_world_and_stays_open() {
         outcome.is_err(),
         "connection must stay open in play without sending a disconnect or FIN"
     );
+}
+
+#[tokio::test]
+async fn moving_three_chunks_loads_and_forgets() {
+    use std::collections::HashSet;
+
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    client
+        .write_all(&compressed_move_player_pos_frame(48.5, -60.0, 0.5, 0x01))
+        .await
+        .unwrap();
+
+    let (center_id, center_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(center_id, 0x60, "a chunk change re-sends the cache center");
+    let (cx, consumed) = read_var_int(&center_body).unwrap().unwrap();
+    let (cz, _) = read_var_int(&center_body[consumed..]).unwrap().unwrap();
+    assert_eq!((cx, cz), (3, 0), "the new center is the player's chunk");
+
+    let mut forgotten = HashSet::new();
+    for _ in 0..34 {
+        let (forget_id, forget_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+        assert_eq!(
+            forget_id, 0x26,
+            "chunks leaving the radius-9 square use Forget Level Chunk 0x26"
+        );
+        forgotten.insert(forget_coords(&forget_body));
+    }
+    let mut expected_forget = HashSet::new();
+    for x in -8..=-7 {
+        for z in -8..=8 {
+            expected_forget.insert((x, z));
+        }
+    }
+    assert_eq!(
+        forgotten, expected_forget,
+        "only the two far columns are forgotten"
+    );
+
+    let (batch_start_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(batch_start_id, 0x0C, "the new chunks arrive in a batch");
+
+    let mut loaded = Vec::new();
+    for _ in 0..51 {
+        let (chunk_id, chunk_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+        assert_eq!(chunk_id, 0x2E);
+        loaded.push(chunk_coords(&chunk_body));
+    }
+
+    let (batch_finished_id, batch_finished_body) =
+        read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(batch_finished_id, 0x0B);
+    let (count, _) = read_var_int(&batch_finished_body).unwrap().unwrap();
+    assert_eq!(count, 51, "exactly the 51 missing chunks are announced");
+
+    let loaded_set: HashSet<(i32, i32)> = loaded.iter().copied().collect();
+    let mut expected_load = HashSet::new();
+    for x in 9..=11 {
+        for z in -8..=8 {
+            expected_load.insert((x, z));
+        }
+    }
+    assert_eq!(
+        loaded_set, expected_load,
+        "only the three new columns are loaded"
+    );
+
+    assert_eq!(loaded[0], (9, 0), "the nearest new chunk is sent first");
+    let mut previous = -1i64;
+    for &(x, z) in &loaded {
+        let dx = (x - 3) as i64;
+        let dz = z as i64;
+        let d2 = dx * dx + dz * dz;
+        assert!(
+            d2 >= previous,
+            "chunks are sent in order of growing distance"
+        );
+        previous = d2;
+    }
 }
 
 #[tokio::test]
@@ -554,12 +650,37 @@ async fn consume_empty_world(client: &mut TcpStream, buf: &mut Vec<u8>) {
     assert_eq!(center_id, 0x60);
     let (batch_start_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(batch_start_id, 0x0C);
-    for _ in 0..81 {
+    for _ in 0..289 {
         let (chunk_id, _) = read_one_compressed_frame(client, buf).await;
         assert_eq!(chunk_id, 0x2E);
     }
     let (batch_finished_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(batch_finished_id, 0x0B);
+}
+
+fn chunk_coords(chunk_body: &[u8]) -> (i32, i32) {
+    let mut x = [0u8; 4];
+    x.copy_from_slice(&chunk_body[..4]);
+    let mut z = [0u8; 4];
+    z.copy_from_slice(&chunk_body[4..8]);
+    (i32::from_be_bytes(x), i32::from_be_bytes(z))
+}
+
+fn forget_coords(forget_body: &[u8]) -> (i32, i32) {
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&forget_body[..8]);
+    let value = i64::from_be_bytes(bytes);
+    ((value & 0xFFFF_FFFF) as i32, (value >> 32) as i32)
+}
+
+fn compressed_move_player_pos_frame(x: f64, y: f64, z: f64, flags: u8) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x1E, &mut body);
+    write_f64(x, &mut body);
+    write_f64(y, &mut body);
+    write_f64(z, &mut body);
+    body.push(flags);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
 }
 
 async fn read_keep_alive_id(client: &mut TcpStream, buf: &mut Vec<u8>) -> i64 {
