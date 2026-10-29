@@ -1,10 +1,16 @@
 mod player;
+mod storage;
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use player::{GAMEMODE_ENV, PlayerState, read_gamemode, resolve_gamemode};
+pub use storage::{
+    CHUNKS_SUBDIR, ChunkStore, DEFAULT_WORLD_DIR, DiskLoader, LoadOutcome, REJECTED_SUFFIX,
+    WORLD_ENV, world_dir,
+};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -14,16 +20,16 @@ use tracing_subscriber::EnvFilter;
 
 use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
-    COMPRESSION_THRESHOLD, EncodeError, GAME_EVENT_WAIT_FOR_CHUNKS, Intent, MovePlayerPos,
-    MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PROTOCOL_VERSION, SET_COMPRESSION_ID,
-    Serverbound, State, StatusInfo, World, block_changed_ack_payload, block_update_payload,
-    build_compressed_packet, build_packet, chunk_batch_finished_payload, chunk_batch_start_payload,
-    chunk_coord, chunks_to_forget, chunks_to_load, client_has_core, config_disconnect_payload,
-    decode_compressed_frame, decode_frame, decode_known_packs, decode_serverbound,
-    forget_level_chunk_payload, game_event_payload, keep_alive_payload, known_packs_payload,
-    login_disconnect_payload, login_play_payload, login_success_payload, network_data,
-    offline_uuid, packet_ids, player_abilities_payload, player_position_payload, pong_payload,
-    random_session_id, read_var_int, registry_data_payload, server_known_pack,
+    COMPRESSION_THRESHOLD, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, Intent,
+    MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PROTOCOL_VERSION,
+    SET_COMPRESSION_ID, Serverbound, State, StatusInfo, World, block_changed_ack_payload,
+    block_update_payload, build_compressed_packet, build_packet, chunk_batch_finished_payload,
+    chunk_batch_start_payload, chunk_coord, chunks_to_forget, chunks_to_load, client_has_core,
+    config_disconnect_payload, decode_compressed_frame, decode_frame, decode_known_packs,
+    decode_serverbound, forget_level_chunk_payload, game_event_payload, keep_alive_payload,
+    known_packs_payload, login_disconnect_payload, login_play_payload, login_success_payload,
+    network_data, offline_uuid, packet_ids, player_abilities_payload, player_position_payload,
+    pong_payload, random_session_id, read_var_int, registry_data_payload, server_known_pack,
     set_chunk_cache_center_payload, set_compression_payload, status_json, status_response_payload,
     update_tags_payload, validate_name, write_chunk_payload,
 };
@@ -57,6 +63,7 @@ pub const REASON_KEEP_ALIVE_TIMEOUT: &str = "keep alive délai dépassé";
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+const FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 const READ_CHUNK: usize = 4096;
 const CLOSE_BUDGET: Duration = Duration::from_secs(1);
 const DRAIN_LIMIT: usize = 64 * 1024;
@@ -223,27 +230,105 @@ pub async fn run_with_config(
     listener: TcpListener,
     keep_alive: KeepAliveConfig,
 ) -> std::io::Result<()> {
-    let world = Arc::new(World::flat().map_err(std::io::Error::other)?);
-    info!("monde plat partagé prêt");
-    let counter = AtomicU64::new(0);
-    loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                let conn_id = counter.fetch_add(1, Ordering::Relaxed);
-                let span = info_span!("conn", conn_id, peer = %peer);
-                let world = Arc::clone(&world);
-                tokio::spawn(
-                    async move {
-                        handle_connection(stream, keep_alive, world).await;
-                    }
-                    .instrument(span),
-                );
-            }
+    run_with_shutdown(listener, keep_alive, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+}
+
+pub async fn run_with_shutdown<F>(
+    listener: TcpListener,
+    keep_alive: KeepAliveConfig,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: Future<Output = ()>,
+{
+    run_with_store(
+        listener,
+        keep_alive,
+        Arc::new(ChunkStore::from_env()),
+        shutdown,
+    )
+    .await
+}
+
+pub async fn run_with_store<F>(
+    listener: TcpListener,
+    keep_alive: KeepAliveConfig,
+    store: Arc<ChunkStore>,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: Future<Output = ()>,
+{
+    let generator = FlatGenerator::new().map_err(std::io::Error::other)?;
+    let loader = DiskLoader::new(Arc::clone(&store));
+    let world = Arc::new(World::with_loader(Box::new(generator), Box::new(loader)));
+    info!(monde = %store.base().display(), "monde plat partagé prêt");
+    run_core(listener, keep_alive, world, store, shutdown).await
+}
+
+pub fn flush_dirty(world: &World, store: &ChunkStore) -> usize {
+    let pending = world.take_dirty();
+    let mut written = 0usize;
+    for (x, z, column) in pending {
+        match store.save_chunk(x, z, &column) {
+            Ok(()) => written += 1,
             Err(err) => {
-                error!("accept error: {err}");
+                error!(x, z, erreur = %err, "écriture de chunk échouée, remis en attente");
+                world.mark_dirty(x, z);
             }
         }
     }
+    info!(chunks_ecrits = written, "flush");
+    written
+}
+
+async fn run_core<F>(
+    listener: TcpListener,
+    keep_alive: KeepAliveConfig,
+    world: Arc<World>,
+    store: Arc<ChunkStore>,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: Future<Output = ()>,
+{
+    let counter = AtomicU64::new(0);
+    let mut ticker = interval(FLUSH_INTERVAL);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    ticker.tick().await;
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, peer)) => {
+                    let conn_id = counter.fetch_add(1, Ordering::Relaxed);
+                    let span = info_span!("conn", conn_id, peer = %peer);
+                    let world = Arc::clone(&world);
+                    tokio::spawn(
+                        async move {
+                            handle_connection(stream, keep_alive, world).await;
+                        }
+                        .instrument(span),
+                    );
+                }
+                Err(err) => {
+                    error!("accept error: {err}");
+                }
+            },
+            _ = ticker.tick() => {
+                flush_dirty(&world, &store);
+            }
+            _ = &mut shutdown => break,
+        }
+    }
+
+    info!("arrêt demandé, flush final");
+    flush_dirty(&world, &store);
+    Ok(())
 }
 
 async fn handle_connection(stream: TcpStream, keep_alive: KeepAliveConfig, world: Arc<World>) {

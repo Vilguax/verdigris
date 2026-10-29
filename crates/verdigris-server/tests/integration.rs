@@ -5,13 +5,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, timeout};
 
 use verdigris_protocol::{
-    BlockPos, MAX_STRING_LEN, MAX_USERNAME_LEN, decode_compressed_frame, decode_frame,
+    BlockPos, MAX_STRING_LEN, MAX_USERNAME_LEN, WORLD_MIN_Y, decode_compressed_frame, decode_frame,
     encode_compressed_frame, encode_frame, offline_uuid, read_f64, read_i64, read_string,
     read_var_int, write_f32, write_f64, write_i64, write_string, write_u16, write_var_int,
 };
 use verdigris_server::{
-    KeepAliveConfig, REASON_CONFIG_NOT_VANILLA, REASON_KEEP_ALIVE_TIMEOUT,
-    REASON_LOGIN_INVALID_NAME, run, run_with_config,
+    ChunkStore, KeepAliveConfig, LoadOutcome, REASON_CONFIG_NOT_VANILLA, REASON_KEEP_ALIVE_TIMEOUT,
+    REASON_LOGIN_INVALID_NAME, run, run_with_config, run_with_store,
 };
 
 async fn spawn_server() -> SocketAddr {
@@ -991,4 +991,87 @@ async fn unknown_packet_id_closes() {
     let mut scratch = [0u8; 16];
     let closed = client.read(&mut scratch).await.unwrap();
     assert_eq!(closed, 0, "unknown handshake id must close the connection");
+}
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static WORLD_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn unique_world_dir() -> std::path::PathBuf {
+    let seq = WORLD_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("verdigris-it-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+#[tokio::test]
+async fn placed_block_persists_across_restart() {
+    let base = unique_world_dir();
+    let store = std::sync::Arc::new(ChunkStore::new(&base));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server_store = std::sync::Arc::clone(&store);
+    let handle = tokio::spawn(async move {
+        let _ = run_with_store(
+            listener,
+            KeepAliveConfig::default(),
+            server_store,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await;
+    });
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    client
+        .write_all(&compressed_set_creative_mode_slot_frame(36, 55, 1))
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_set_carried_item_frame(0))
+        .await
+        .unwrap();
+
+    let ground = BlockPos { x: 0, y: -61, z: 0 };
+    let placed = BlockPos { x: 0, y: -60, z: 0 };
+    client
+        .write_all(&compressed_use_item_on_frame(ground, 1, 1))
+        .await
+        .unwrap();
+
+    let (_, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    let (update_id, update_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(update_id, 0x08);
+    let (pos, state) = read_block_update(&update_body);
+    assert_eq!(pos, placed);
+    assert_eq!(state, 10, "le dirt est posé avant l'arrêt");
+
+    let (ack_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(ack_id, 0x04);
+
+    shutdown_tx.send(()).unwrap();
+    handle.await.unwrap();
+
+    let reopened = ChunkStore::new(&base);
+    match reopened.load_chunk(0, 0) {
+        LoadOutcome::Loaded(column) => {
+            let rel = (-60 - WORLD_MIN_Y) as usize;
+            assert_eq!(
+                column.state_at(0, rel, 0),
+                10,
+                "le bloc posé est relu à l'identique après redémarrage"
+            );
+        }
+        LoadOutcome::Absent => panic!("chunk absent après redémarrage"),
+        LoadOutcome::Rejected => panic!("chunk rejeté après redémarrage"),
+    }
+
+    let _ = std::fs::remove_dir_all(&base);
 }

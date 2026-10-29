@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::blocks::default_state_of_name;
@@ -21,6 +21,10 @@ pub const FLOOR_GRASS_Y: i32 = -61;
 
 pub trait ChunkGenerator: Send + Sync {
     fn generate(&self, chunk_x: i32, chunk_z: i32) -> ChunkColumn;
+}
+
+pub trait ChunkLoader: Send + Sync {
+    fn load(&self, chunk_x: i32, chunk_z: i32) -> Option<ChunkColumn>;
 }
 
 fn block_state(name: &'static str) -> Result<u16, PlayError> {
@@ -68,16 +72,37 @@ impl ChunkGenerator for FlatGenerator {
 
 pub type SharedChunk = Arc<Mutex<ChunkColumn>>;
 
+struct WorldInner {
+    cache: HashMap<(i32, i32), SharedChunk>,
+    dirty: HashSet<(i32, i32)>,
+}
+
 pub struct World {
     generator: Box<dyn ChunkGenerator>,
-    cache: Mutex<HashMap<(i32, i32), SharedChunk>>,
+    loader: Option<Box<dyn ChunkLoader>>,
+    inner: Mutex<WorldInner>,
 }
 
 impl World {
     pub fn new(generator: Box<dyn ChunkGenerator>) -> Self {
         World {
             generator,
-            cache: Mutex::new(HashMap::new()),
+            loader: None,
+            inner: Mutex::new(WorldInner {
+                cache: HashMap::new(),
+                dirty: HashSet::new(),
+            }),
+        }
+    }
+
+    pub fn with_loader(generator: Box<dyn ChunkGenerator>, loader: Box<dyn ChunkLoader>) -> Self {
+        World {
+            generator,
+            loader: Some(loader),
+            inner: Mutex::new(WorldInner {
+                cache: HashMap::new(),
+                dirty: HashSet::new(),
+            }),
         }
     }
 
@@ -86,11 +111,23 @@ impl World {
     }
 
     pub fn chunk(&self, chunk_x: i32, chunk_z: i32) -> SharedChunk {
-        let mut cache = self.cache.lock().unwrap();
-        cache
-            .entry((chunk_x, chunk_z))
-            .or_insert_with(|| Arc::new(Mutex::new(self.generator.generate(chunk_x, chunk_z))))
-            .clone()
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(existing) = inner.cache.get(&(chunk_x, chunk_z)) {
+            return existing.clone();
+        }
+        let column = self.load_or_generate(chunk_x, chunk_z);
+        let shared = Arc::new(Mutex::new(column));
+        inner.cache.insert((chunk_x, chunk_z), Arc::clone(&shared));
+        shared
+    }
+
+    fn load_or_generate(&self, chunk_x: i32, chunk_z: i32) -> ChunkColumn {
+        if let Some(loader) = &self.loader
+            && let Some(column) = loader.load(chunk_x, chunk_z)
+        {
+            return column;
+        }
+        self.generator.generate(chunk_x, chunk_z)
     }
 
     pub fn state_at(&self, x: i32, y: i32, z: i32) -> u16 {
@@ -110,19 +147,45 @@ impl World {
         if !(WORLD_MIN_Y..=WORLD_MAX_Y).contains(&y) {
             return;
         }
-        let column = self.chunk(x.div_euclid(16), z.div_euclid(16));
-        let mut column = column.lock().unwrap();
-        let rel = (y - WORLD_MIN_Y) as usize;
-        let index = block_index(
-            x.rem_euclid(16) as usize,
-            rel % 16,
-            z.rem_euclid(16) as usize,
-        );
-        column.sections[rel / 16].states[index] = state;
+        let chunk_x = x.div_euclid(16);
+        let chunk_z = z.div_euclid(16);
+        let column = self.chunk(chunk_x, chunk_z);
+        {
+            let mut column = column.lock().unwrap();
+            let rel = (y - WORLD_MIN_Y) as usize;
+            let index = block_index(
+                x.rem_euclid(16) as usize,
+                rel % 16,
+                z.rem_euclid(16) as usize,
+            );
+            column.sections[rel / 16].states[index] = state;
+        }
+        self.mark_dirty(chunk_x, chunk_z);
+    }
+
+    pub fn mark_dirty(&self, chunk_x: i32, chunk_z: i32) {
+        self.inner.lock().unwrap().dirty.insert((chunk_x, chunk_z));
+    }
+
+    pub fn take_dirty(&self) -> Vec<(i32, i32, ChunkColumn)> {
+        let mut inner = self.inner.lock().unwrap();
+        let coords: Vec<(i32, i32)> = inner.dirty.drain().collect();
+        let mut out = Vec::with_capacity(coords.len());
+        for (x, z) in coords {
+            if let Some(shared) = inner.cache.get(&(x, z)) {
+                let column = shared.lock().unwrap().clone();
+                out.push((x, z, column));
+            }
+        }
+        out
     }
 
     pub fn loaded_len(&self) -> usize {
-        self.cache.lock().unwrap().len()
+        self.inner.lock().unwrap().cache.len()
+    }
+
+    pub fn dirty_len(&self) -> usize {
+        self.inner.lock().unwrap().dirty.len()
     }
 }
 

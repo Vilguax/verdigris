@@ -1,5 +1,6 @@
 pub mod blocks;
 pub mod chunk;
+pub mod chunkfile;
 pub mod clientbound;
 pub mod config;
 pub mod error;
@@ -41,9 +42,11 @@ pub use blocks::{
 pub use chunk::{
     BIOMES_PER_SECTION, BLOCKS_PER_SECTION, COLUMNS_PER_CHUNK, ChunkColumn, HEIGHTMAP_BITS, MIN_Y,
     PaletteThresholds, Section, WORLD_HEIGHT, biome_global_bits, biome_index, biome_thresholds,
-    bits_for, block_index, block_thresholds, pack_longs, world_surface_heights, write_chunk_data,
-    write_chunk_payload, write_heightmaps, write_paletted_container, write_section,
+    bits_for, block_index, block_thresholds, pack_longs, unpack_longs, world_surface_heights,
+    write_chunk_data, write_chunk_payload, write_heightmaps, write_paletted_container,
+    write_section,
 };
+pub use chunkfile::{ChunkFileError, decode_chunk, encode_chunk};
 pub use clientbound::{
     COMPRESSION_THRESHOLD, EncodeError, MAX_NBT_STRING_BYTES, MAX_OUTBOUND_PACKET_LEN,
     NBT_TAG_STRING, SET_COMPRESSION_ID, build_compressed_packet, build_packet,
@@ -95,7 +98,7 @@ pub use varint::{read_var_int, read_var_long, write_var_int, write_var_long};
 pub use view::{
     KEEP_RADIUS, LOAD_RADIUS, chebyshev, chunk_coord, chunks_to_forget, chunks_to_load,
 };
-pub use world::{ChunkGenerator, FlatGenerator, WORLD_MAX_Y, WORLD_MIN_Y, World};
+pub use world::{ChunkGenerator, ChunkLoader, FlatGenerator, WORLD_MAX_Y, WORLD_MIN_Y, World};
 
 #[cfg(test)]
 mod tests {

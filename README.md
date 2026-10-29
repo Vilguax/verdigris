@@ -31,6 +31,18 @@ VERDIGRIS_LOG=debug cargo run --release
 
 Le niveau par défaut est `info`. `debug` liste chaque paquet reçu et émis.
 
+## Persistance des chunks
+
+Les chunks modifiés (blocs posés ou cassés) sont sauvegardés sur disque dans un format maison versionné, puis rechargés à l'identique au redémarrage.
+
+- Répertoire du monde : variable `VERDIGRIS_WORLD` (défaut `world`). Les chunks vivent dans `VERDIGRIS_WORLD/chunks/<x>.<z>.bin`.
+- Au premier besoin d'un chunk, le serveur le charge depuis son fichier s'il existe, sinon il le génère.
+- Seuls les chunks effectivement modifiés sont écrits. L'écriture a lieu au plus tard toutes les 30 secondes, et systématiquement lors d'un arrêt propre (`Ctrl+C`) avant la fin du processus. Chaque passage journalise le nombre de chunks écrits.
+- Chaque écriture remplace le fichier cible de façon atomique (fichier temporaire puis renommage) et ne laisse aucun fichier temporaire après succès.
+- Format maison : en-tête clair (magique `VRDG`, version de format, version de jeu) puis corps zlib de sections palettisées auto-descriptives. Un fichier illisible (mauvaise version, en-tête ou corps corrompu) est renommé en `<x>.<z>.bin.rejete` et le chunk est régénéré.
+
+Hors périmètre : le format région vanilla `.mca`, les joueurs, les inventaires et les entités ne sont pas persistés.
+
 ## Structure
 
 | Chemin | Rôle |
