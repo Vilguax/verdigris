@@ -186,9 +186,15 @@ def blocks_doc(generated, static, server_jar):
         block = ITEM_TO_BLOCK.get(item, item)
         if block in defaults:
             items.append({"item": item_id, "state": defaults[block]})
+    components = Path(generated) / "reports" / "minecraft" / "components" / "item"
+    item_props = {}
+    for item in sorted(item_ids, key=item_ids.get):
+        body = json.loads((components / f"{item.split(':', 1)[1]}.json").read_text(encoding="utf-8"))["components"]
+        item_props[item] = {"max_stack_size": body["minecraft:max_stack_size"],
+                            "equip_slot": body.get("minecraft:equippable", {}).get("slot")}
     return {"game_version": GAME_VERSION, "server_jar_sha1": hashlib.sha1(Path(server_jar).read_bytes()).hexdigest(),
             "state_count": total, "blocks": blocks, "fluid_states": sorted(fluid_states), "items": items,
-            "item_ids": dict(sorted(item_ids.items(), key=lambda kv: kv[1]))}
+            "item_ids": dict(sorted(item_ids.items(), key=lambda kv: kv[1])), "item_props": item_props}
 
 
 if __name__ == "__main__":
