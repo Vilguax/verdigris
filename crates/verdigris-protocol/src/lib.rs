@@ -39,9 +39,9 @@ pub enum State {
 }
 
 pub use blocks::{
-    Block, BlocksData, ItemState, Property, block_has_property, block_item_of_state, blocks_data,
-    default_state_of_name, is_air, is_fluid, item_to_placed_state, property_of, state_to_block,
-    state_with, with_property,
+    Block, BlocksData, ItemState, Property, block_has_property, block_id_of_name,
+    block_item_of_state, blocks_data, default_state_of_name, is_air, is_fluid,
+    item_to_placed_state, property_of, state_to_block, state_with, with_property,
 };
 pub use chunk::{
     BIOMES_PER_SECTION, BLOCKS_PER_SECTION, COLUMNS_PER_CHUNK, ChunkColumn, HEIGHTMAP_BITS, MIN_Y,
@@ -81,9 +81,9 @@ pub use mth::{
 pub use network::{KnownPack, NetworkData, Registry, Source, TagEntry, TagRegistry, network_data};
 pub use packets::{Handshake, Intent, Serverbound, decode_serverbound};
 pub use placement_tables::{
-    HorizFacingKind, SixFacingKind, SlabType, full_block, horiz_facing_kind, is_slab_block,
-    is_stair_block, six_facing_kind, slab_block_of_item, slab_type, state_in_replaceable,
-    water_source_state,
+    HorizFacingKind, PlacementKind, SixFacingKind, SlabType, full_block, horiz_facing_kind,
+    is_slab_block, is_stair_block, placement_kind_of_block, placement_kind_of_item,
+    six_facing_kind, slab_block_of_item, slab_type, state_in_replaceable, water_source_state,
 };
 pub use play::{
     ABORT_DESTROY_BLOCK, AIR_STATE, AcceptTeleportation, BlockPos, CHANGE_DESTROY_DIRECTION,

@@ -198,6 +198,14 @@ pub fn default_state_of_name(name: &str) -> Option<i32> {
         .map(|&index| handle.data.blocks[index].default_state)
 }
 
+pub fn block_id_of_name(name: &str) -> Option<i32> {
+    let handle = blocks();
+    handle
+        .by_name
+        .get(name)
+        .map(|&index| handle.data.blocks[index].id)
+}
+
 pub fn is_air(state: i32) -> bool {
     if state == 0 {
         return true;
@@ -260,6 +268,14 @@ mod tests {
         assert_eq!(default_state_of_name("minecraft:bedrock"), Some(88));
         assert_eq!(default_state_of_name("minecraft:water"), Some(89));
         assert_eq!(default_state_of_name("minecraft:not_a_block"), None);
+    }
+
+    #[test]
+    fn block_ids_resolve_from_name() {
+        assert_eq!(block_id_of_name("minecraft:air"), Some(0));
+        assert_eq!(block_id_of_name("minecraft:stone"), Some(1));
+        assert_eq!(block_id_of_name("minecraft:oak_door"), Some(265));
+        assert_eq!(block_id_of_name("minecraft:not_a_block"), None);
     }
 
     #[test]
