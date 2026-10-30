@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use flate2::read::ZlibDecoder;
 use serde_json::Value;
 
-use verdigris_worldgen::{ChunkTerrain, WorldGenerator};
+use verdigris_worldgen::{AquiferMode, ChunkTerrain, WorldGenerator};
 
 const CELL_SOLID: u8 = 1;
 const CELL_EXCLUDED: u8 = 2;
@@ -82,7 +82,7 @@ fn final_fill_matches_oracle_on_all_chunks() {
     let height = idx["height"].as_u64().expect("height") as usize;
     let area = height * 256;
 
-    let generator = WorldGenerator::new(seed).expect("generator");
+    let generator = WorldGenerator::with_mode(seed, AquiferMode::Disabled).expect("generator");
     assert_eq!(generator.min_y(), min_y, "min_y matches oracle");
     assert_eq!(generator.height(), height, "height matches oracle");
 

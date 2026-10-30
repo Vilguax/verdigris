@@ -177,6 +177,20 @@ impl Node {
         }
     }
 
+    pub fn find_top_surface_parts(&self) -> Option<(&Node, &Node, i32, i32)> {
+        match self {
+            Node::FindTopSurface {
+                density,
+                upper_bound,
+                lower_bound,
+                cell_height,
+                ..
+            } => Some((density, upper_bound, *lower_bound, *cell_height)),
+            Node::Cache(inner) => inner.find_top_surface_parts(),
+            _ => None,
+        }
+    }
+
     pub fn interval(&self) -> Interval {
         match self {
             Node::Const(c) => Interval::point(*c),

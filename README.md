@@ -129,11 +129,19 @@ Les règles de matériaux (surface, filons, deepslate) ont l'oracle `tests-data/
 python tools/oracle.py export-blocs <monde>/dimensions/minecraft/overworld/region tests-data/oracle-materiaux 0,0 1,0
 ```
 
-La porte oracle est le test d'intégration `final_fill_matches_oracle_on_all_chunks` du crate `verdigris-worldgen`. Elle construit le générateur une fois, remplit les 40 chunks et exige l'égalité exacte (solide ⇔ pierre) sur toutes les cases non exclues, avec diagnostic de chunk, position et densité en cas d'écart :
+La porte oracle 1a est le test d'intégration `final_fill_matches_oracle_on_all_chunks` du crate `verdigris-worldgen`. Elle construit le générateur en mode `AquiferMode::Disabled` (règle simple, sans aquifères), remplit les 40 chunks et exige l'égalité exacte (solide ⇔ pierre) sur toutes les cases non exclues, avec diagnostic de chunk, position et densité en cas d'écart :
 
 ```sh
 cargo test -p verdigris-worldgen --test oracle
 ```
+
+La porte oracle 1b est le test `aquifer_categories_match_oracle_1b`. Elle lit `tests-data/oracle-1b/index.json` (format 2, graine 20261029, `min_y` −64, hauteur 384, 64 chunks), construit le générateur en mode `AquiferMode::Noise` (aquifères de la spec 05) et exige l'égalité exacte des quatre catégories (solide, eau, lave, air) sur toutes les cases non exclues, avec par chunk le nombre de cases fausses par couple (attendu, obtenu) et les premières positions :
+
+```sh
+cargo test -p verdigris-worldgen --test oracle_1b
+```
+
+Le mode d'aquifère est explicite à la construction : `WorldGenerator::new(seed)` crée le générateur en `Noise` (défaut du serveur `VERDIGRIS_GENERATOR=noise`), `WorldGenerator::with_mode(seed, AquiferMode::Disabled)` garde la règle simple de la porte 1a. La présence du champ `aquifers` dans `worldgen.json` ne pilote jamais le mode.
 
 ## Mesure de charge
 

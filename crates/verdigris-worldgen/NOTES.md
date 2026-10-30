@@ -116,3 +116,93 @@ en `y = 0`), ce qui garantit l'égalité volume == point.
 `eval_volume` alloue un `Vec<f32>` par nœud et par appel (décision mémoire :
 pas de pool). Les nœuds binaires réutilisent le `Vec` de l'opérande gauche comme
 tampon de sortie ; aucune allocation par bloc ni par point.
+
+## Phase 1b — aquifères (spec 05)
+
+### Activation explicite (D1, [HYP])
+Le mode est porté par `AquiferMode` passé à la construction de `WorldGenerator`
+(`new` = `Noise`, `with_mode(seed, Disabled)`), jamais déduit de la présence du
+champ `aquifers`. `Disabled` câble la règle simple (spec 04 §4.3) via
+`category_for` : la porte oracle-1a tourne dessus et reste verte (les barrières
+d'aquifère qui transforment un bloc non solide en pierre ne peuvent donc pas
+régresser la solidité comparée en 1a). `Noise` exige que `aquifers` soit présent,
+sinon `with_mode` échoue (pas de repli silencieux). Le serveur construit en
+`Noise` par défaut. [HYP] tranche la cause REJECT « activation par présence vs
+mode explicite sans aquifères ».
+
+### Compilation commune et caches volume en mode point (D3, spec 05 §6.2, 03 §4.13)
+`WorldgenData::build_world_density` compile `final_density` et les six fonctions
+`aquifers.*` avec un seul `Assets` (une instanciation de bruits par graine).
+
+Correction tranchée par oracle-1b (chunk (5,6), 31 cases eau→air) : la neutralité
+point/volume de §6.2 est FAUSSE pour ces données. Vanilla évalue `exclusion` et
+`surface_level` en mode point, mais leurs nœuds `cache` 2D (`erosion`, `offset`,
+`factor`, `shift_x`, `shift_z`) renvoient la valeur calculée en mode VOLUME lors
+du remplissage du chunk (03 §4.13 : une valeur mise en cache par une évaluation
+volume est renvoyée en point si la position est dans le volume conservé). Le
+bruit 2D n'étant pas dyadique, point ≠ volume d'un ULP, ce qui décalait la surface
+préliminaire d'une cellule et bloquait l'inondation (sous_mer) d'un aquifère.
+
+Implémentation : ni interning `Arc<Node>`, ni pré-chauffage par évaluation volume
+(une première version pré-chauffait un `VolumeContext` par un eval volume 16×H×16
+de `exclusion`/`density` par chunk — correct mais ~×60 trop lent, les nœuds 2D
+étant réévalués à chaque y, d'où un timeout de la porte). À la place,
+`df::volume::eval_point_ctx` reçoit le footprint du chunk (`AquiferScratch.footprint`,
+posé par `prepare`) et, à chaque nœud `cache`, si la position est dans le footprint,
+évalue l'entrée en mode VOLUME sur ce seul point (`eval(input, Mode::Volume)`) ;
+sinon il poursuit en mode point. La valeur volume d'un nœud non interpolé ne
+dépendant que de la position (03 §3.1) et aucun des deux arbres ne contenant
+d'`interpolated`, cet eval volume ponctuel reproduit bit à bit la valeur que vanilla
+a mise en cache lors du remplissage, sans allocation ni redondance en y. Hors
+footprint, vanilla rate aussi le cache et recalcule en point : identique. Les quatre
+bruits de l'aquifère (`barrier`, `floodedness`, `spread`, `lava`) restent en mode
+point pur (§2.2), jamais routés par `eval_point_ctx`.
+
+### Surfaces préremplies (D2)
+`AquiferScratch::prepare` calcule le rectangle complet des quarts couvrant à la
+fois les centres (§4.1) et les décalages de recherche (§4.2) : pour un chunk,
+X de `16·cx−64` à `16·cx+40` (27 colonnes), Z de `16·cz−32` à `16·cz+40`
+(19 colonnes). `surface_level` y est évalué une fois, floor_i32 mémorisé. Le
+maximum `M` du seuil de saut est pris sur le sous-rectangle des centres (§4.1,
+11×11 pour un chunk), pas sur le rectangle étendu. `Y_saut = 12·(⌊(M+20)/12⌋+1)+10`.
+
+### Caches par volume, zéro allocation par bloc
+`ChunkTerrain` porte un `AquiferScratch` réutilisé entre chunks : `prepare`
+redimensionne et remet à zéro les tables (centres, statuts bornés aux ~315
+cellules, surfaces 27×19) sans réallouer après le premier chunk, et le bitset de
+post-traitement `post` est réutilisé. La décision d'un bloc n'alloue rien ; le
+bruit `barrier` est mémoïsé pour la durée d'une décision. Les surfaces sont
+remplies par `eval_point` (find_top_surface est indépendant du mode) directement
+dans le tampon préalloué, sans `Vec` temporaire.
+
+### Hauteur de base d'une colonne (D4, [HYP])
+`WorldGenerator::column_base_height` évalue `final_density` sur `1×H×1` puis
+applique la même décision d'aquifère de haut en bas (sans lire `φ`), renvoyant le
+premier bloc non-air. Ajoutée car spec 05 §1.5 la rend normative même si aucun
+consommateur serveur ne l'appelle encore ; exposée `pub` et couverte par test de
+cohérence avec le remplissage du chunk.
+
+### Drapeau de post-traitement `φ`
+Exposé par bloc dans un bitset du chunk (`ChunkTerrain::post_flag_at`), calculé
+sur tous les chemins de §5 et réécrit à chaque décision, sans effet sur les
+catégories (spec 05 §7.1). Marqué seulement si le bloc écrit est un fluide et
+`φ` vrai.
+
+### INCERTAIN conservés
+- §8.2 (centres d'aquifères) : vecteurs issus d'un calcul indépendant non
+  confronté à vanilla. Tests dans `tests/aquifer_vectors.rs` laissés ACTIFS : ils
+  dérivent du RNG déjà validé en 1a (`aquifer_factory` + `next_int_bounded`) ;
+  à passer en `#[ignore]` s'ils échouaient après relecture.
+- §7 (post-traitement des fluides au statut `full`) : non implémenté (hors
+  périmètre 1b, code vanilla absent). Si un écart oracle-1b ressemble à de
+  l'écoulement de fluide, consigner les positions ici sans ajuster le code.
+- §6.2 neutralité point/volume : INFIRMÉE par oracle-1b (voir « Compilation
+  commune et caches volume en mode point » ci-dessus) ; le pré-chauffage des
+  caches volume est désormais requis pour `exclusion` et `surface_level`.
+
+### Perf avant/après ([HYP] méthode)
+Méthode : micro-bench `#[ignore]` de génération d'un chunk de référence (règle
+simple `Disabled`) vs mode `Noise`, même graine 20261029. Les mesures sont à
+relever en exécutant `cargo test -p verdigris-worldgen` (non lancé dans cet
+environnement sandboxé). Critère tenu par revue : aucune allocation dans la
+boucle de décision ; tables préallouées et réutilisées entre chunks.

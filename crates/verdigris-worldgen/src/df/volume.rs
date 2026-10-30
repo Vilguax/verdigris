@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::arith::{floor_div_i32, floor_mod_i32, jabs_f32, jclamp_f32, l};
+use crate::arith::{
+    floor_div_i32, floor_i32, floor_mod_i32, jabs_f32, jclamp_f32, jmax_f32, jmin_f32, l,
+};
 use crate::df::eval::{Mode, eval};
 use crate::df::node::{Axis, Node, Spline, SplinePoint, SplineValue, extrapolate, squeeze_value};
 
@@ -41,6 +43,31 @@ impl Volume {
             self.origin[1].wrapping_add((j as i32).wrapping_mul(self.steps[1])),
             self.origin[2].wrapping_add((k as i32).wrapping_mul(self.steps[2])),
         ]
+    }
+
+    pub fn point_index(&self, x: i32, y: i32, z: i32) -> Option<usize> {
+        let axis = |c: i32, o: i32, s: i32, n: usize| -> Option<usize> {
+            if n == 0 {
+                return None;
+            }
+            let d = c.wrapping_sub(o);
+            if s == 0 {
+                return if d == 0 { Some(0) } else { None };
+            }
+            if d % s != 0 {
+                return None;
+            }
+            let i = d / s;
+            if i >= 0 && (i as usize) < n {
+                Some(i as usize)
+            } else {
+                None
+            }
+        };
+        let i = axis(x, self.origin[0], self.steps[0], self.sizes[0])?;
+        let j = axis(y, self.origin[1], self.steps[1], self.sizes[1])?;
+        let k = axis(z, self.origin[2], self.steps[2], self.sizes[2])?;
+        Some(self.linear_index(i, j, k))
     }
 }
 
@@ -101,6 +128,278 @@ pub fn eval_volume_with(
     vol: &Volume,
 ) -> Result<Box<[f32]>, VolumeError> {
     Ok(ev(ctx, node, vol)?.into_boxed_slice())
+}
+
+#[allow(clippy::float_cmp)]
+pub fn eval_point_ctx(footprint: &Volume, node: &Node, x: i32, y: i32, z: i32) -> f32 {
+    match node {
+        Node::Cache(input) => {
+            if footprint.point_index(x, y, z).is_some() {
+                eval(input, x, y, z, Mode::Volume)
+            } else {
+                eval_point_ctx(footprint, input, x, y, z)
+            }
+        }
+        Node::Const(_)
+        | Node::Gradient(_)
+        | Node::ShiftA(_)
+        | Node::ShiftB(_)
+        | Node::Shift(_)
+        | Node::OldBlended(_)
+        | Node::BlendAlpha
+        | Node::BlendOffset
+        | Node::Beardifier
+        | Node::Interpolated { .. }
+        | Node::DistanceToPoint { .. }
+        | Node::EndOuterIslands => eval(node, x, y, z, Mode::Point),
+        Node::Add(a, b) => {
+            eval_point_ctx(footprint, a, x, y, z) + eval_point_ctx(footprint, b, x, y, z)
+        }
+        Node::Sub(a, b) => {
+            eval_point_ctx(footprint, a, x, y, z) - eval_point_ctx(footprint, b, x, y, z)
+        }
+        Node::Mul(a, b) => {
+            let va = eval_point_ctx(footprint, a, x, y, z);
+            if va == 0.0 {
+                0.0
+            } else {
+                va * eval_point_ctx(footprint, b, x, y, z)
+            }
+        }
+        Node::MulConst { input, factor } => eval_point_ctx(footprint, input, x, y, z) * factor,
+        Node::Div(a, b) => {
+            let va = eval_point_ctx(footprint, a, x, y, z);
+            if va == 0.0 {
+                0.0
+            } else {
+                va / eval_point_ctx(footprint, b, x, y, z)
+            }
+        }
+        Node::DivConst { input, reciprocal } => {
+            eval_point_ctx(footprint, input, x, y, z) * reciprocal
+        }
+        Node::Min {
+            left,
+            right,
+            right_interval,
+        } => {
+            let a = eval_point_ctx(footprint, left, x, y, z);
+            if a <= right_interval.min {
+                a
+            } else {
+                jmin_f32(a, eval_point_ctx(footprint, right, x, y, z))
+            }
+        }
+        Node::Max {
+            left,
+            right,
+            right_interval,
+        } => {
+            let a = eval_point_ctx(footprint, left, x, y, z);
+            if a >= right_interval.max {
+                a
+            } else {
+                jmax_f32(a, eval_point_ctx(footprint, right, x, y, z))
+            }
+        }
+        Node::MinConst { input, constant } => {
+            jmin_f32(eval_point_ctx(footprint, input, x, y, z), *constant)
+        }
+        Node::MaxConst { input, constant } => {
+            jmax_f32(eval_point_ctx(footprint, input, x, y, z), *constant)
+        }
+        Node::Abs(a) => jabs_f32(eval_point_ctx(footprint, a, x, y, z)),
+        Node::Square(a) => {
+            let v = eval_point_ctx(footprint, a, x, y, z);
+            v * v
+        }
+        Node::Cube(a) => {
+            let v = eval_point_ctx(footprint, a, x, y, z);
+            (v * v) * v
+        }
+        Node::HalfNegative(a) => {
+            let v = eval_point_ctx(footprint, a, x, y, z);
+            if v > 0.0 { v } else { v * 0.5 }
+        }
+        Node::QuarterNegative(a) => {
+            let v = eval_point_ctx(footprint, a, x, y, z);
+            if v > 0.0 { v } else { v * 0.25 }
+        }
+        Node::Sqrt(a) => {
+            let v = eval_point_ctx(footprint, a, x, y, z);
+            (f64::from(v).sqrt()) as f32
+        }
+        Node::Reciprocal(a) => 1.0 / eval_point_ctx(footprint, a, x, y, z),
+        Node::Negate(a) => -eval_point_ctx(footprint, a, x, y, z),
+        Node::Squeeze(a) => squeeze_value(eval_point_ctx(footprint, a, x, y, z)),
+        Node::Clamp { input, min, max } => {
+            jclamp_f32(eval_point_ctx(footprint, input, x, y, z), *min, *max)
+        }
+        Node::Lerp {
+            alpha,
+            first,
+            second,
+        } => {
+            let al = eval_point_ctx(footprint, alpha, x, y, z);
+            if al == 0.0 {
+                eval_point_ctx(footprint, first, x, y, z)
+            } else if al == 1.0 {
+                eval_point_ctx(footprint, second, x, y, z)
+            } else {
+                l(
+                    al,
+                    eval_point_ctx(footprint, first, x, y, z),
+                    eval_point_ctx(footprint, second, x, y, z),
+                )
+            }
+        }
+        Node::RangeChoice {
+            input,
+            min_inclusive,
+            max_exclusive,
+            in_range,
+            out_range,
+        } => {
+            let v = eval_point_ctx(footprint, input, x, y, z);
+            if v >= *min_inclusive && v < *max_exclusive {
+                eval_point_ctx(footprint, in_range, x, y, z)
+            } else {
+                eval_point_ctx(footprint, out_range, x, y, z)
+            }
+        }
+        Node::IntervalSelect {
+            input,
+            thresholds,
+            functions,
+        } => {
+            let v = eval_point_ctx(footprint, input, x, y, z);
+            let mut idx = functions.len() - 1;
+            for (i, t) in thresholds.iter().enumerate() {
+                if v < *t {
+                    idx = i;
+                    break;
+                }
+            }
+            eval_point_ctx(footprint, &functions[idx], x, y, z)
+        }
+        Node::Spline(s) => eval_spline_ctx(footprint, s, x, y, z),
+        Node::Noise(n) => {
+            if n.shift_x.is_none() && n.shift_y.is_none() && n.shift_z.is_none() {
+                eval(node, x, y, z, Mode::Point)
+            } else {
+                let sx = n
+                    .shift_x
+                    .as_ref()
+                    .map(|s| f64::from(eval_point_ctx(footprint, s, x, y, z)))
+                    .unwrap_or(0.0);
+                let sy = n
+                    .shift_y
+                    .as_ref()
+                    .map(|s| f64::from(eval_point_ctx(footprint, s, x, y, z)))
+                    .unwrap_or(0.0);
+                let sz = n
+                    .shift_z
+                    .as_ref()
+                    .map(|s| f64::from(eval_point_ctx(footprint, s, x, y, z)))
+                    .unwrap_or(0.0);
+                let cx = f64::from(x) * n.xz_scale + sx;
+                let cy = f64::from(y) * n.y_scale + sy;
+                let cz = f64::from(z) * n.xz_scale + sz;
+                n.stack.sample_point(cx, cy, cz, None)
+            }
+        }
+        Node::BlendDensity(input) => eval_point_ctx(footprint, input, x, y, z),
+        Node::Slice {
+            axis,
+            coordinate,
+            input,
+        } => {
+            let (nx, ny, nz) = match axis {
+                Axis::X => (*coordinate, y, z),
+                Axis::Y => (x, *coordinate, z),
+                Axis::Z => (x, y, *coordinate),
+            };
+            eval_point_ctx(footprint, input, nx, ny, nz)
+        }
+        Node::FindTopSurface {
+            density,
+            upper_bound,
+            lower_bound,
+            cell_height,
+            ..
+        } => {
+            let u = eval_point_ctx(footprint, upper_bound, x, 0, z);
+            let top = floor_i32(f64::from(u / (*cell_height as f32))).wrapping_mul(*cell_height);
+            if top <= *lower_bound {
+                return *lower_bound as f32;
+            }
+            let mut yy = top;
+            while yy >= *lower_bound {
+                if eval_point_ctx(footprint, density, x, yy, z) > 0.0 {
+                    return yy as f32;
+                }
+                yy = yy.wrapping_sub(*cell_height);
+            }
+            *lower_bound as f32
+        }
+    }
+}
+
+#[allow(clippy::float_cmp)]
+fn eval_spline_ctx(footprint: &Volume, spline: &Spline, x: i32, y: i32, z: i32) -> f32 {
+    let u = eval_point_ctx(footprint, &spline.coordinate, x, y, z);
+    let points = &spline.points;
+    let n = points.len();
+    let mut idx = None;
+    for (i, p) in points.iter().enumerate() {
+        if u < p.location {
+            idx = Some(i);
+            break;
+        }
+    }
+    let j: isize = match idx {
+        Some(i) => i as isize - 1,
+        None => n as isize - 1,
+    };
+    if j < 0 {
+        let p = &points[0];
+        return extrapolate(
+            u,
+            spline_point_value_ctx(footprint, p, x, y, z),
+            p.location,
+            p.derivative,
+        );
+    }
+    if j as usize == n - 1 {
+        let p = &points[n - 1];
+        return extrapolate(
+            u,
+            spline_point_value_ctx(footprint, p, x, y, z),
+            p.location,
+            p.derivative,
+        );
+    }
+    let jl = j as usize;
+    let p1 = &points[jl];
+    let p2 = &points[jl + 1];
+    let x1 = p1.location;
+    let x2 = p2.location;
+    let y1 = spline_point_value_ctx(footprint, p1, x, y, z);
+    let y2 = spline_point_value_ctx(footprint, p2, x, y, z);
+    let d1 = p1.derivative;
+    let d2 = p2.derivative;
+    let delta = x2 - x1;
+    let t = (u - x1) / delta;
+    let a = d1 * delta - (y2 - y1);
+    let b = (-d2) * delta + (y2 - y1);
+    l(t, y1, y2) + (t * (1.0 - t)) * l(t, a, b)
+}
+
+fn spline_point_value_ctx(footprint: &Volume, sp: &SplinePoint, x: i32, y: i32, z: i32) -> f32 {
+    match &sp.value {
+        SplineValue::Const(c) => *c,
+        SplineValue::Nested(s) => eval_spline_ctx(footprint, s, x, y, z),
+    }
 }
 
 pub fn contains_interpolated(node: &Node) -> bool {
