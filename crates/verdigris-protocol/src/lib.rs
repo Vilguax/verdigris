@@ -11,6 +11,7 @@ pub mod login;
 pub mod mth;
 pub mod network;
 pub mod packets;
+pub mod placement_tables;
 pub mod play;
 pub mod playerlist;
 pub mod primitives;
@@ -79,6 +80,11 @@ pub use mth::{
 };
 pub use network::{KnownPack, NetworkData, Registry, Source, TagEntry, TagRegistry, network_data};
 pub use packets::{Handshake, Intent, Serverbound, decode_serverbound};
+pub use placement_tables::{
+    HorizFacingKind, SixFacingKind, SlabType, full_block, horiz_facing_kind, is_slab_block,
+    is_stair_block, six_facing_kind, slab_block_of_item, slab_type, state_in_replaceable,
+    water_source_state,
+};
 pub use play::{
     ABORT_DESTROY_BLOCK, AIR_STATE, AcceptTeleportation, BlockPos, CHANGE_DESTROY_DIRECTION,
     ChunkBatchReceived, GAME_EVENT_WAIT_FOR_CHUNKS, ItemStack, KeepAlive, MovePlayerPos,

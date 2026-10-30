@@ -1,9 +1,10 @@
 use tracing::warn;
 use verdigris_protocol::{
-    AIR_STATE, BlockPos, GameMode, ItemStack, PickItemFromBlock, PlayerAction, START_DESTROY_BLOCK,
-    STOP_DESTROY_BLOCK, UseItemOn, WORLD_MAX_Y, WORLD_MIN_Y, World, block_item_of_state, is_air,
-    item_to_placed_state, state_to_block,
+    AIR_STATE, BlockPos, Direction, GameMode, ItemStack, PickItemFromBlock, PlayerAction,
+    START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, UseItemOn, World, block_item_of_state, state_to_block,
 };
+
+use crate::placement::{PlaceContext, Placement, SmallPositions, offset, resolve_placement};
 
 pub const GAMEMODE_ENV: &str = "VERDIGRIS_GAMEMODE";
 
@@ -197,18 +198,6 @@ fn is_bedrock(state: u16) -> bool {
     state_to_block(state as i32).name == BEDROCK
 }
 
-fn face_offset(face: i32) -> (i32, i32, i32) {
-    match face {
-        0 => (0, -1, 0),
-        1 => (0, 1, 0),
-        2 => (0, 0, -1),
-        3 => (0, 0, 1),
-        4 => (-1, 0, 0),
-        5 => (1, 0, 0),
-        _ => (0, 0, 0),
-    }
-}
-
 pub struct PlayerState {
     pub name: String,
     pub mode: GameMode,
@@ -307,32 +296,61 @@ impl PlayerState {
             return ActionResult::ProtocolError;
         }
 
-        let (dx, dy, dz) = face_offset(packet.face);
-        let target = packet.pos.offset(dx, dy, dz);
+        let p = packet.pos;
+        let face = Direction::from_face(packet.face);
 
-        if packet.hand == 0 {
-            let can_place = matches!(self.mode, GameMode::Creative | GameMode::Survival);
-            if can_place
-                && let Some(slot) = self.inventory.selected_item()
-                && let Some(state) = item_to_placed_state(slot.item)
-                && self.within_reach(packet.pos)
-                && (WORLD_MIN_Y..=WORLD_MAX_Y).contains(&target.y)
-                && is_air(world.state_at(target.x, target.y, target.z) as i32)
-            {
-                world.set_state(target.x, target.y, target.z, state as u16);
+        let placement = if packet.hand == 0
+            && matches!(self.mode, GameMode::Creative | GameMode::Survival)
+            && self.within_reach(p)
+            && let Some(dir) = face
+            && let Some(slot) = self.inventory.selected_item()
+        {
+            let ctx = PlaceContext {
+                pos: p,
+                face: dir,
+                cursor: (packet.cursor[0], packet.cursor[1], packet.cursor[2]),
+                yaw: self.yaw,
+                pitch: self.pitch,
+            };
+            resolve_placement(world, ctx, slot.item)
+        } else {
+            Placement::Nothing
+        };
+
+        let resync = match placement {
+            Placement::Place {
+                write,
+                state,
+                resync,
+            }
+            | Placement::Fuse {
+                write,
+                state,
+                resync,
+            } => {
+                world.set_state(write.x, write.y, write.z, state as u16);
                 if self.mode == GameMode::Survival {
                     self.inventory.consume_one(self.inventory.selected);
                 }
+                resync
             }
+            Placement::Nothing => {
+                let target = match face {
+                    Some(dir) => offset(p, dir),
+                    None => p,
+                };
+                SmallPositions::pair(p, target)
+            }
+        };
+
+        let mut updates = Vec::with_capacity(resync.as_slice().len());
+        for &pos in resync.as_slice() {
+            let state = world.state_at(pos.x, pos.y, pos.z) as i32;
+            updates.push((pos, state));
         }
 
-        let pos_state = world.state_at(packet.pos.x, packet.pos.y, packet.pos.z);
-        let target_state = world.state_at(target.x, target.y, target.z);
         ActionResult::Respond {
-            updates: vec![
-                (packet.pos, pos_state as i32),
-                (target, target_state as i32),
-            ],
+            updates,
             ack: packet.sequence,
         }
     }

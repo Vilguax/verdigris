@@ -1,3 +1,4 @@
+mod placement;
 mod player;
 mod registry;
 mod storage;

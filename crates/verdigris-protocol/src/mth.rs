@@ -21,6 +21,62 @@ impl Direction {
             Direction::East => Direction::West,
         }
     }
+
+    pub fn from_face(face: i32) -> Option<Direction> {
+        match face {
+            0 => Some(Direction::Down),
+            1 => Some(Direction::Up),
+            2 => Some(Direction::North),
+            3 => Some(Direction::South),
+            4 => Some(Direction::West),
+            5 => Some(Direction::East),
+            _ => None,
+        }
+    }
+
+    pub fn is_horizontal(self) -> bool {
+        !matches!(self, Direction::Down | Direction::Up)
+    }
+
+    pub fn axis(self) -> &'static str {
+        match self {
+            Direction::Down | Direction::Up => "y",
+            Direction::North | Direction::South => "z",
+            Direction::West | Direction::East => "x",
+        }
+    }
+
+    pub fn horizontal_cw(self) -> Direction {
+        match self {
+            Direction::North => Direction::East,
+            Direction::East => Direction::South,
+            Direction::South => Direction::West,
+            Direction::West => Direction::North,
+            other => other,
+        }
+    }
+
+    pub fn facing_str(self) -> &'static str {
+        match self {
+            Direction::Down => "down",
+            Direction::Up => "up",
+            Direction::North => "north",
+            Direction::South => "south",
+            Direction::West => "west",
+            Direction::East => "east",
+        }
+    }
+
+    pub fn delta(self) -> (i32, i32, i32) {
+        match self {
+            Direction::Down => (0, -1, 0),
+            Direction::Up => (0, 1, 0),
+            Direction::North => (0, 0, -1),
+            Direction::South => (0, 0, 1),
+            Direction::West => (-1, 0, 0),
+            Direction::East => (1, 0, 0),
+        }
+    }
 }
 
 const SIN_SCALE: f32 = 10430.378;
