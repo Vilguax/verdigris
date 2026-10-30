@@ -12,6 +12,29 @@ pub fn write_u16(value: u16, out: &mut Vec<u8>) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
+pub fn read_i16(buf: &[u8]) -> Result<Option<(i16, usize)>, ProtocolError> {
+    if buf.len() < 2 {
+        return Ok(None);
+    }
+    Ok(Some((i16::from_be_bytes([buf[0], buf[1]]), 2)))
+}
+
+pub fn write_i16(value: i16, out: &mut Vec<u8>) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+pub fn pack_degrees(deg: f32) -> u8 {
+    ((deg as f64 * 256.0 / 360.0).floor() as i32) as u8
+}
+
+pub fn quantize(v: f64) -> i64 {
+    (v * 4096.0 + 0.5).floor() as i64
+}
+
+pub fn fits_i16(d: i64) -> bool {
+    (-32768..=32767).contains(&d)
+}
+
 pub fn read_i32(buf: &[u8]) -> Result<Option<(i32, usize)>, ProtocolError> {
     if buf.len() < 4 {
         return Ok(None);
@@ -108,6 +131,44 @@ mod tests {
     #[test]
     fn u16_incomplete() {
         assert_eq!(read_u16(&[0x01]).unwrap(), None);
+    }
+
+    #[test]
+    fn i16_round_trip() {
+        let mut buf = Vec::new();
+        write_i16(4096, &mut buf);
+        assert_eq!(buf, vec![0x10, 0x00]);
+        assert_eq!(read_i16(&buf).unwrap().unwrap(), (4096, 2));
+    }
+
+    #[test]
+    fn pack_degrees_vectors() {
+        assert_eq!(pack_degrees(0.0), 0x00);
+        assert_eq!(pack_degrees(90.0), 0x40);
+        assert_eq!(pack_degrees(-90.0), 0xC0);
+        assert_eq!(pack_degrees(180.0), 0x80);
+        assert_eq!(pack_degrees(-180.0), 0x80);
+        assert_eq!(pack_degrees(45.5), 0x20);
+        assert_eq!(pack_degrees(-0.1), 0xFF);
+        assert_eq!(pack_degrees(359.9), 0xFF);
+        assert_eq!(pack_degrees(370.0), 0x07);
+    }
+
+    #[test]
+    fn quantize_negative_halves_floor_not_round() {
+        assert_eq!(quantize(-0.5 / 4096.0), 0);
+        assert_eq!(quantize(-1.5 / 4096.0), -1);
+        assert_eq!(quantize(0.5 / 4096.0), 1);
+        assert_eq!(quantize(1.0), 4096);
+        assert_eq!(quantize(-1.0), -4096);
+    }
+
+    #[test]
+    fn fits_i16_bounds() {
+        assert!(fits_i16(-32768));
+        assert!(fits_i16(32767));
+        assert!(!fits_i16(-32769));
+        assert!(!fits_i16(32768));
     }
 
     #[test]
