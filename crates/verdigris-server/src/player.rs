@@ -2,15 +2,16 @@ use tracing::warn;
 use verdigris_protocol::{
     AIR_STATE, BlockPos, BucketIds, Direction, GameMode, ItemStack, PickItemFromBlock,
     PlayerAction, START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, UseItem, UseItemOn, World,
-    block_item_of_state, bucket_ids, horizontal_direction, is_air, is_liquid_block,
-    is_source_fluid, is_waterloggable, lava_source_state, property_of, state_in_replaceable,
-    state_to_block, water_source_state, with_property,
+    block_item_of_state, bucket_ids, horizontal_direction, is_air, is_filled_frame,
+    is_liquid_block, is_source_fluid, is_waterloggable, lava_source_state, property_of,
+    state_in_replaceable, state_to_block, water_source_state, with_property,
 };
 
 use crate::interaction::resolve_interaction;
 use crate::placement::{
     PlaceContext, Placement, SmallPositions, offset, resolve_placement, twin_to_break,
 };
+use crate::portal;
 use crate::raycast::{cast_ray, look_direction};
 
 pub const GAMEMODE_ENV: &str = "VERDIGRIS_GAMEMODE";
@@ -448,6 +449,14 @@ impl PlayerState {
         }
         if outcome.consume_eye() && self.mode == GameMode::Survival {
             self.inventory.consume_one(self.inventory.selected);
+        }
+
+        let completed = updates.first().copied();
+        if let Some((pos, new_state)) = completed
+            && pos == p
+            && is_filled_frame(new_state)
+        {
+            portal::try_complete(world, p, &mut updates);
         }
 
         Some(ActionResult::Respond {

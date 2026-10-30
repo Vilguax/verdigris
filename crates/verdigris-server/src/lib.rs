@@ -1,6 +1,7 @@
 mod interaction;
 mod placement;
 mod player;
+mod portal;
 mod raycast;
 mod registry;
 mod storage;
