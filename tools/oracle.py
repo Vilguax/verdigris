@@ -13,7 +13,8 @@ NON_SOLID = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air", "minec
 EXCLUDED = {"minecraft:ice"}
 GENERATED = {"minecraft:terrain", "minecraft:features", "minecraft:initialize_light", "minecraft:light",
              "minecraft:spawn", "minecraft:full"}
-CELL_NON_SOLID, CELL_SOLID, CELL_EXCLUDED = 0, 1, 2
+CELL_NON_SOLID, CELL_SOLID, CELL_EXCLUDED, CELL_WATER, CELL_LAVA = 0, 1, 2, 3, 4
+FLUID_CELLS = {"minecraft:water": CELL_WATER, "minecraft:lava": CELL_LAVA}
 
 
 def nbt(buf, i, tag):
@@ -87,7 +88,7 @@ def section_blocks(sec):
     return out
 
 
-def cells_of(chunk):
+def cells_of(chunk, fluids=False):
     cells = bytearray([CELL_NON_SOLID]) * (HEIGHT * 256)
     for sec in chunk["sections"]:
         if "block_states" not in sec:
@@ -98,12 +99,14 @@ def cells_of(chunk):
         for i, name in enumerate(section_blocks(sec)):
             if name in EXCLUDED:
                 cells[base + i] = CELL_EXCLUDED
+            elif fluids and name in FLUID_CELLS:
+                cells[base + i] = FLUID_CELLS[name]
             elif name not in NON_SOLID:
                 cells[base + i] = CELL_SOLID
     return cells
 
 
-def datapack(server_jar, out):
+def datapack(server_jar, out, aquifers=False):
     with zipfile.ZipFile(server_jar) as outer:
         inner = next(n for n in outer.namelist() if n.startswith("META-INF/versions/") and n.endswith(".jar"))
         jar = zipfile.ZipFile(__import__("io").BytesIO(outer.read(inner)))
@@ -123,15 +126,17 @@ def datapack(server_jar, out):
             body["features"], body["carvers"] = [], []
             (wg / "biome" / Path(name).name).write_text(json.dumps(body, indent=2), encoding="utf-8")
     settings = json.loads(jar.read("data/minecraft/worldgen/noise_settings/overworld.json"))
-    settings.pop("aquifers", None)
+    if not aquifers:
+        settings.pop("aquifers", None)
     (wg / "noise_settings" / "overworld.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
-    meta = {"pack": {"description": "Verdigris oracle phase 1a: sans aquiferes, carvers ni features",
+    phase = "1b: aquiferes, sans carvers ni features" if aquifers else "1a: sans aquiferes, carvers ni features"
+    meta = {"pack": {"description": f"Verdigris oracle phase {phase}",
                      "min_format": PACK_FORMAT, "max_format": PACK_FORMAT}}
     (root / "pack.mcmeta").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"datapack ecrit dans {root}")
 
 
-def export(region_dir, out_dir, wanted):
+def export(region_dir, out_dir, wanted, fluids=False):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     found = {}
@@ -145,15 +150,19 @@ def export(region_dir, out_dir, wanted):
         raise SystemExit(f"chunks absents ou non generes: {missing}")
     index = []
     for (x, z), c in sorted(found.items()):
-        cells = cells_of(c)
+        cells = cells_of(c, fluids)
         name = f"{x}.{z}.bin"
         (out / name).write_bytes(zlib.compress(bytes(cells), 9))
-        index.append({"x": x, "z": z, "file": name, "solid": cells.count(CELL_SOLID),
-                      "excluded": cells.count(CELL_EXCLUDED)})
-    meta = {"format": 1, "game_version": GAME_VERSION, "seed": SEED, "min_y": MIN_Y, "height": HEIGHT,
-            "index": "(y - min_y) * 256 + z * 16 + x",
-            "cells": {"0": "non solide", "1": "solide", "2": "exclu"},
-            "chunks": index}
+        entry = {"x": x, "z": z, "file": name, "solid": cells.count(CELL_SOLID),
+                 "excluded": cells.count(CELL_EXCLUDED)}
+        if fluids:
+            entry["water"], entry["lava"] = cells.count(CELL_WATER), cells.count(CELL_LAVA)
+        index.append(entry)
+    legend = {"0": "non solide", "1": "solide", "2": "exclu"}
+    if fluids:
+        legend = {"0": "air", "1": "solide", "2": "exclu", "3": "eau", "4": "lave"}
+    meta = {"format": 2 if fluids else 1, "game_version": GAME_VERSION, "seed": SEED, "min_y": MIN_Y,
+            "height": HEIGHT, "index": "(y - min_y) * 256 + z * 16 + x", "cells": legend, "chunks": index}
     (out / "index.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
     print(f"{len(index)} chunks exportes vers {out}")
 
@@ -163,10 +172,12 @@ def parse_chunks(args):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 4 and sys.argv[1] == "datapack":
-        datapack(sys.argv[2], sys.argv[3])
-    elif len(sys.argv) >= 4 and sys.argv[1] == "export":
-        export(sys.argv[2], sys.argv[3], parse_chunks(sys.argv[4:]))
+    flags = {a for a in sys.argv[2:] if a.startswith("--")}
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if len(args) >= 3 and args[0] == "datapack":
+        datapack(args[1], args[2], aquifers="--aquiferes" in flags)
+    elif len(args) >= 3 and args[0] == "export":
+        export(args[1], args[2], parse_chunks(args[3:]), fluids="--fluides" in flags)
     else:
-        raise SystemExit("usage: oracle.py datapack <server.jar> <dossier datapack>\n"
-                         "       oracle.py export <dossier region> <dossier sortie> [cx,cz ...]")
+        raise SystemExit("usage: oracle.py datapack <server.jar> <dossier datapack> [--aquiferes]\n"
+                         "       oracle.py export <dossier region> <dossier sortie> [cx,cz ...] [--fluides]")
