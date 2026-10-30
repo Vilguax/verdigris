@@ -1,0 +1,31 @@
+[package]
+name = "verdigris-bots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "verdigris-bots"
+path = "src/main.rs"
+
+[lib]
+name = "verdigris_bots"
+path = "src/lib.rs"
+
+[dependencies]
+verdigris-protocol.workspace = true
+tokio.workspace = true
+tokio-util = "0.7"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+verdigris-server = { path = "../verdigris-server" }
+tokio.workspace = true
+
+[lints]
+workspace = true

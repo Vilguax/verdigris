@@ -66,6 +66,7 @@ const PLAY_SIMULATION_DISTANCE: i32 = 8;
 const PLAY_MAX_PLAYERS: i32 = 20;
 const PLAY_TELEPORT_ID: i32 = 1;
 const PLAY_SPAWN: [f64; 3] = [0.5, -60.0, 0.5];
+const CHUNK_SEND_YIELD_STRIDE: usize = 8;
 pub const REASON_PROTOCOL_ERROR_PREFIX: &str = "Paquet invalide: ";
 pub const REASON_CONNECTION_LOST: &str = "Connexion interrompue";
 pub const REASON_INVALID_SEQUENCE: &str = "séquence d'interaction négative";
@@ -1198,7 +1199,7 @@ async fn update_chunks(
         return true;
     }
 
-    for &(x, z) in &load {
+    for (sent_count, &(x, z)) in load.iter().enumerate() {
         let column = world.chunk(x, z);
         let mut payload = Vec::new();
         {
@@ -1218,6 +1219,9 @@ async fn update_chunks(
             return true;
         }
         view.sent.insert((x, z));
+        if sent_count % CHUNK_SEND_YIELD_STRIDE == CHUNK_SEND_YIELD_STRIDE - 1 {
+            tokio::task::yield_now().await;
+        }
     }
 
     if write_packet(

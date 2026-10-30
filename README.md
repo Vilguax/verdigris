@@ -55,6 +55,7 @@ Hors périmètre : le format région vanilla `.mca`, les joueurs, les inventaire
 |---|---|
 | `crates/verdigris-protocol` | Codec et paquets, sans aucune entrée/sortie : VarInt, chaînes, trames compressées, login, configuration |
 | `crates/verdigris-server` | Binaire `verdigris` : réseau tokio, une tâche par connexion, machine à états du protocole |
+| `crates/verdigris-bots` | Binaire `verdigris-bots` : générateur de charge, un faux client 26.3 par bot |
 | `crates/verdigris-protocol/data/26.3/network.json` | Registres synchronisés et tags de la 26.3 |
 | `crates/verdigris-protocol/data/26.3/worldgen.json` | Réglages de bruit de l'overworld, fonctions de densité et bruits de la 26.3 |
 | `tools/datagen.py` | Génère `network.json`, `blocks.json` et `worldgen.json` à partir du générateur de données officiel |
@@ -89,6 +90,48 @@ python tools/oracle.py export <monde>/dimensions/minecraft/overworld/region test
 ```
 
 `tests-data/oracle-1a/index.json` décrit le format et liste les chunks.
+
+## Mesure de charge
+
+Le binaire `verdigris-bots` ouvre un grand nombre de faux clients Java 26.3 (protocole 777) pour mesurer la tenue en charge d'un serveur. Chaque bot se connecte en **mode hors ligne** (UUID dérivé du pseudo, compression zlib), traverse login puis configuration, entre en jeu, répond aux keep-alive, ping et téléportations, accuse réception des lots de chunks et émet un tick toutes les 50 ms. Les données de chunks reçues sont comptées puis **jetées** : rien n'est conservé en mémoire.
+
+Le générateur ne dépend d'aucune particularité de Verdigris : il n'utilise que les identifiants et formats de la 26.3, et fonctionne donc aussi contre un serveur **vanilla** ou **Paper** 26.3 configuré en mode hors ligne (`online-mode=false`). Le mode hors ligne des deux côtés est la condition d'une comparaison équitable.
+
+```sh
+cargo run --release -p verdigris-bots -- \
+  --count 200 --rate 10 --duration 60 --walk 4 --view-distance 8 --json report.json
+```
+
+Le même appel vise un serveur vanilla ou Paper hors ligne en précisant `--host` et `--port` :
+
+```sh
+cargo run --release -p verdigris-bots -- \
+  --host 127.0.0.1 --port 25565 --count 200 --rate 10 --duration 60 --json report.json
+```
+
+Options :
+
+- `--host` (défaut `127.0.0.1`), `--port` (défaut `25565`) ;
+- `--count N` : nombre de bots (erreur si `0`) ;
+- `--rate R` : bots lancés par seconde (erreur si non fini ou `<= 0`), intervalle de lancement `1/R` ;
+- `--duration S` : durée de mesure en secondes (défaut `60`), **décomptée à partir du dernier lancement** ;
+- `--prefix` (défaut `Bot`) : les pseudos sont `Bot0001`, `Bot0002`, … (quatre chiffres, index à partir de 1) ;
+- `--view-distance` (défaut `8`), `--walk D` : déplacement aléatoire de `D * 0,05` bloc par tick dans le plan XZ (défaut `0`, erreur si négatif ou non fini) ;
+- `--json <chemin>` : écrit le rapport final en JSON (écriture atomique).
+
+La fenêtre de mesure démarre après la montée en charge : `measure_deadline = fin de la montée + duration`. À cette échéance l'arrêt global est déclenché ; `Ctrl+C` le déclenche aussi immédiatement, et tous les bots se terminent proprement. Un bot encore en jeu à l'arrêt est compté « en jeu » (ce n'est pas un échec).
+
+Délais par défaut (en dur) qui produisent la cause d'échec `Timeout` : connexion TCP 10 s, login 15 s, configuration 15 s, première position en jeu 20 s, silence réseau en jeu 30 s.
+
+Toutes les 5 secondes, un rapport intermédiaire affiche les bots en jeu, les échecs, les chunks par seconde et le débit. Le rapport final (texte et JSON) donne les bots demandés, en jeu et en échec ventilés par cause, les raisons de déconnexion lisibles, les percentiles p50/p95/p99 et le maximum (avec leur taille d'échantillon `n`) des durées jusqu'au login terminé, à l'entrée en jeu et au premier chunk, ainsi que les chunks et octets reçus.
+
+Hors périmètre : le mode online (chiffrement, authentification), le chat, l'édition du monde, le rendu, et la mesure de la charge CPU ou mémoire côté serveur.
+
+Un test de conformité rejoue une séquence login → configuration → jeu au format 26.3 sans socket réel et vérifie les réponses de la machine à états, indépendamment de Verdigris. Un test d'intégration optionnel, activé par `VERDIGRIS_BOTS_EXTERNAL_PORT`, lance 20 bots contre un serveur vanilla ou Paper hors ligne déjà démarré sur ce port :
+
+```sh
+VERDIGRIS_BOTS_EXTERNAL_PORT=25565 cargo test -p verdigris-bots -- --ignored external_offline
+```
 
 ## Vérifications
 
