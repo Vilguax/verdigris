@@ -79,6 +79,7 @@ Hors périmètre : le format région vanilla `.mca`, les joueurs, les inventaire
 | `tests-data/oracle-1a` | Relief vanilla de référence : 40 chunks, solide ou non solide bloc par bloc |
 | `tests-data/oracle-1b` | Relief et aquifères vanilla : 64 chunks, air, solide, eau ou lave bloc par bloc |
 | `tests-data/oracle-biomes` | Biomes vanilla : 64 chunks couvrant 21 biomes, un identifiant réseau par cellule de 4 × 4 × 4 blocs |
+| `tests-data/oracle-materiaux` | Blocs vanilla après les règles de matériaux : 48 chunks au statut terrain, un identifiant de bloc u16 par case |
 
 ## Données du jeu
 
@@ -120,6 +121,12 @@ Les biomes ont leur oracle, `tests-data/oracle-biomes`, tiré du même monde : u
 
 ```sh
 python tools/oracle.py export-biomes <monde>/dimensions/minecraft/overworld/region tests-data/oracle-biomes 0,0 1,0
+```
+
+Les règles de matériaux (surface, filons, deepslate) ont l'oracle `tests-data/oracle-materiaux`, tiré du même monde mais seulement des chunks au statut `terrain` à `spawn` : les chunks complets ont été modifiés par le jeu en marche (gel de l'eau autour du point d'apparition). Chaque case vaut l'identifiant du bloc (champ `id` de `blocks.json`) en u16 petit-boutiste, indexé comme `oracle-1a`. Les 48 chunks couvrent 21 types de blocs ; aucun biome à sable ni badlands n'est généré autour du point d'apparition de la graine.
+
+```sh
+python tools/oracle.py export-blocs <monde>/dimensions/minecraft/overworld/region tests-data/oracle-materiaux 0,0 1,0
 ```
 
 La porte oracle est le test d'intégration `final_fill_matches_oracle_on_all_chunks` du crate `verdigris-worldgen`. Elle construit le générateur une fois, remplit les 40 chunks et exige l'égalité exacte (solide ⇔ pierre) sur toutes les cases non exclues, avec diagnostic de chunk, position et densité en cas d'écart :

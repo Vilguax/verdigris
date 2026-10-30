@@ -229,6 +229,49 @@ def export_biomes(region_dir, out_dir, wanted):
     print(f"{len(index)} chunks exportes vers {out}")
 
 
+TERRAIN_ONLY = {"minecraft:terrain", "minecraft:features", "minecraft:initialize_light", "minecraft:light",
+                "minecraft:spawn"}
+
+
+def block_ids():
+    blocks = Path(__file__).resolve().parent.parent / "crates/verdigris-protocol/data/26.3/blocks.json"
+    return {b["name"]: b["id"] for b in json.loads(blocks.read_text(encoding="utf-8"))["blocks"]}
+
+
+def export_blocks(region_dir, out_dir, wanted):
+    ids = block_ids()
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    found = {}
+    for region in sorted(Path(region_dir).glob("r.*.mca")):
+        for c in region_chunks(region):
+            key = (c["xPos"], c["zPos"])
+            if c.get("Status") in TERRAIN_ONLY and (not wanted or key in wanted):
+                found[key] = c
+    missing = sorted(set(wanted) - set(found)) if wanted else []
+    if missing:
+        raise SystemExit(f"chunks absents ou hors des statuts terrain a spawn: {missing}")
+    index = []
+    for (x, z), c in sorted(found.items()):
+        cells = [ids["minecraft:air"]] * (HEIGHT * 256)
+        for sec in c["sections"]:
+            if "block_states" not in sec:
+                continue
+            base = (sec["Y"] * 16 - MIN_Y) * 256
+            if 0 <= base < len(cells):
+                cells[base:base + 4096] = [ids[n] for n in section_blocks(sec)]
+        raw = b"".join(v.to_bytes(2, "little") for v in cells)
+        name = f"{x}.{z}.bin"
+        (out / name).write_bytes(zlib.compress(raw, 9))
+        index.append({"x": x, "z": z, "file": name, "status": c["Status"], "distinct": len(set(cells))})
+    meta = {"format": 1, "game_version": GAME_VERSION, "seed": SEED, "min_y": MIN_Y, "height": HEIGHT,
+            "index": "(y - min_y) * 256 + z * 16 + x",
+            "value": "identifiant de bloc u16 petit-boutiste (champ id de blocks.json, registre minecraft:block)",
+            "chunks": index}
+    (out / "index.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
+    print(f"{len(index)} chunks exportes vers {out}")
+
+
 def parse_chunks(args):
     return {tuple(int(v) for v in a.split(",")) for a in args}
 
@@ -238,6 +281,8 @@ if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if len(args) >= 3 and args[0] == "datapack":
         datapack(args[1], args[2], aquifers="--aquiferes" in flags)
+    elif len(args) >= 3 and args[0] == "export-blocs":
+        export_blocks(args[1], args[2], parse_chunks(args[3:]))
     elif len(args) >= 3 and args[0] == "export-biomes":
         export_biomes(args[1], args[2], parse_chunks(args[3:]))
     elif len(args) >= 3 and args[0] == "export":
@@ -245,4 +290,5 @@ if __name__ == "__main__":
     else:
         raise SystemExit("usage: oracle.py datapack <server.jar> <dossier datapack> [--aquiferes]\n"
                          "       oracle.py export <dossier region> <dossier sortie> [cx,cz ...] [--fluides]\n"
-                         "       oracle.py export-biomes <dossier region> <dossier sortie> [cx,cz ...]")
+                         "       oracle.py export-biomes <dossier region> <dossier sortie> [cx,cz ...]\n"
+                         "       oracle.py export-blocs <dossier region> <dossier sortie> [cx,cz ...]")
