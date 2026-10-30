@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod framing;
 pub mod gamemode;
+pub mod interaction_tables;
 pub mod light;
 pub mod login;
 pub mod mth;
@@ -40,7 +41,7 @@ pub enum State {
 
 pub use blocks::{
     Block, BlocksData, ItemState, Property, block_has_property, block_id_of_name,
-    block_item_of_state, blocks_data, default_state_of_name, is_air, is_fluid,
+    block_item_of_state, blocks_data, default_state_of_name, is_air, is_fluid, item_id_of_name,
     item_to_placed_state, property_of, state_to_block, state_with, with_property,
 };
 pub use chunk::{
@@ -67,6 +68,7 @@ pub use framing::{
     encode_frame,
 };
 pub use gamemode::GameMode;
+pub use interaction_tables::{InteractionKind, ender_eye_item, interaction_kind};
 pub use light::{
     ChunkLight, EMPTY_BLOCK_MASK, compute_chunk_light, full_light_section, write_bitset,
     write_light, write_light_section,
