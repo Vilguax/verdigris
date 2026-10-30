@@ -77,6 +77,7 @@ Hors périmètre : le format région vanilla `.mca`, les joueurs, les inventaire
 | `tools/datagen.py` | Génère `network.json`, `blocks.json` et `worldgen.json` à partir du générateur de données officiel |
 | `tools/oracle.py` | Construit le datapack de l'oracle et exporte ses chunks en fixtures de test |
 | `tests-data/oracle-1a` | Relief vanilla de référence : 40 chunks, solide ou non solide bloc par bloc |
+| `tests-data/oracle-1b` | Relief et aquifères vanilla : 64 chunks, air, solide, eau ou lave bloc par bloc |
 
 ## Données du jeu
 
@@ -106,6 +107,13 @@ python tools/oracle.py export <monde>/dimensions/minecraft/overworld/region test
 ```
 
 `tests-data/oracle-1a/index.json` décrit le format et liste les chunks.
+
+La phase des aquifères a son propre oracle, `tests-data/oracle-1b` : même graine, datapack qui garde les aquifères (`--aquiferes`) et retire toujours carvers, features et structures, export à cinq valeurs par bloc (0 air, 1 solide, 2 exclu, 3 eau, 4 lave, option `--fluides`). Il compte 64 chunks : les 40 de `oracle-1a` et 24 choisis pour leur eau souterraine et leur lave d'aquifère.
+
+```sh
+python tools/oracle.py datapack server.jar <monde>/datapacks/oracle-1b --aquiferes
+python tools/oracle.py export <monde>/dimensions/minecraft/overworld/region tests-data/oracle-1b 0,0 1,0 --fluides
+```
 
 La porte oracle est le test d'intégration `final_fill_matches_oracle_on_all_chunks` du crate `verdigris-worldgen`. Elle construit le générateur une fois, remplit les 40 chunks et exige l'égalité exacte (solide ⇔ pierre) sur toutes les cases non exclues, avec diagnostic de chunk, position et densité en cas d'écart :
 
