@@ -16,6 +16,7 @@ pub mod packets;
 pub mod placement_tables;
 pub mod play;
 pub mod playerlist;
+pub mod portal_tables;
 pub mod primitives;
 pub mod status;
 pub mod varint;
@@ -111,6 +112,10 @@ pub use play::{
 pub use playerlist::{
     ListedPlayer, player_info_remove_payload, player_info_update_gamemode_payload,
     player_info_update_init_payload, player_info_update_latency_payload, tab_list_payload,
+};
+pub use portal_tables::{
+    INTERIOR_OFFSETS, INTERIOR_SIZE, RING_SIZE, RING_TEMPLATE, RingSlot, end_portal_state,
+    frame_block_id, is_filled_frame, is_frame_facing,
 };
 pub use primitives::{
     read_f32, read_f64, read_i32, read_i64, read_string, read_u16, write_f32, write_f64, write_i32,

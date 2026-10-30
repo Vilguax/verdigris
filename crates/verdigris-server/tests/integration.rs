@@ -1770,3 +1770,246 @@ async fn rotation_and_sneak_are_tracked_server_side() {
         .unwrap();
     wait_for_orientation(&registry, uuid, (90.0, 30.0, false)).await;
 }
+
+async fn drain_until_ack(client: &mut TcpStream, buf: &mut Vec<u8>) -> (Vec<(BlockPos, i32)>, i32) {
+    let mut updates = Vec::new();
+    loop {
+        let (id, body) = read_one_compressed_frame(client, buf).await;
+        if id == 0x04 {
+            let (sequence, _) = read_var_int(&body).unwrap().unwrap();
+            return (updates, sequence);
+        }
+        assert_eq!(id, 0x08, "seuls des block_update precedent l'accuse");
+        updates.push(read_block_update(&body));
+    }
+}
+
+#[tokio::test]
+async fn completing_end_portal_ring_over_tcp() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    let frame_item =
+        block_item_of_state(default_state_of_name("minecraft:end_portal_frame").unwrap()).unwrap();
+    let ender_eye = item_id_of_name("minecraft:ender_eye").unwrap();
+    let end_portal = default_state_of_name("minecraft:end_portal").unwrap();
+
+    let y = -60;
+    let frames: [(BlockPos, f32); 12] = [
+        (
+            BlockPos {
+                x: -1,
+                y: y - 1,
+                z: -2,
+            },
+            180.0,
+        ),
+        (
+            BlockPos {
+                x: 0,
+                y: y - 1,
+                z: -2,
+            },
+            180.0,
+        ),
+        (
+            BlockPos {
+                x: 1,
+                y: y - 1,
+                z: -2,
+            },
+            180.0,
+        ),
+        (
+            BlockPos {
+                x: -1,
+                y: y - 1,
+                z: 2,
+            },
+            0.0,
+        ),
+        (
+            BlockPos {
+                x: 0,
+                y: y - 1,
+                z: 2,
+            },
+            0.0,
+        ),
+        (
+            BlockPos {
+                x: 1,
+                y: y - 1,
+                z: 2,
+            },
+            0.0,
+        ),
+        (
+            BlockPos {
+                x: -2,
+                y: y - 1,
+                z: -1,
+            },
+            90.0,
+        ),
+        (
+            BlockPos {
+                x: -2,
+                y: y - 1,
+                z: 0,
+            },
+            90.0,
+        ),
+        (
+            BlockPos {
+                x: -2,
+                y: y - 1,
+                z: 1,
+            },
+            90.0,
+        ),
+        (
+            BlockPos {
+                x: 2,
+                y: y - 1,
+                z: -1,
+            },
+            -90.0,
+        ),
+        (
+            BlockPos {
+                x: 2,
+                y: y - 1,
+                z: 0,
+            },
+            -90.0,
+        ),
+        (
+            BlockPos {
+                x: 2,
+                y: y - 1,
+                z: 1,
+            },
+            -90.0,
+        ),
+    ];
+
+    client
+        .write_all(&compressed_set_creative_mode_slot_frame(36, frame_item, 1))
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_set_carried_item_frame(0))
+        .await
+        .unwrap();
+
+    let mut seq = 1;
+    for (ground, yaw) in frames {
+        client
+            .write_all(&compressed_move_player_rot_frame(yaw, 0.0, 0))
+            .await
+            .unwrap();
+        client
+            .write_all(&compressed_use_item_on_frame(ground, 1, seq))
+            .await
+            .unwrap();
+        let (updates, ack) = drain_until_ack(&mut client, &mut buf).await;
+        assert_eq!(ack, seq, "accuse de pose du cadre");
+        let placed = ground.offset(0, 1, 0);
+        assert!(
+            updates.iter().any(|&(p, _)| p == placed),
+            "cadre pose a {placed:?}"
+        );
+        seq += 1;
+    }
+
+    client
+        .write_all(&compressed_set_creative_mode_slot_frame(36, ender_eye, 1))
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_set_carried_item_frame(0))
+        .await
+        .unwrap();
+
+    let frame_positions: Vec<BlockPos> = frames
+        .iter()
+        .map(|(ground, _)| ground.offset(0, 1, 0))
+        .collect();
+    let last = *frame_positions.last().unwrap();
+
+    for fp in &frame_positions[..frame_positions.len() - 1] {
+        client
+            .write_all(&compressed_use_item_on_frame(*fp, 1, seq))
+            .await
+            .unwrap();
+        let (updates, ack) = drain_until_ack(&mut client, &mut buf).await;
+        assert_eq!(ack, seq);
+        assert_eq!(
+            updates.len(),
+            1,
+            "pose d'oeil non finale: seul le cadre est mis a jour"
+        );
+        assert_eq!(updates[0].0, *fp);
+        assert_eq!(property_of(updates[0].1, "eye"), Some("true"));
+        seq += 1;
+    }
+
+    client
+        .write_all(&compressed_use_item_on_frame(last, 1, seq))
+        .await
+        .unwrap();
+
+    let (id, body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(
+        id, 0x08,
+        "12e oeil: le cadre complete est mis a jour en premier"
+    );
+    let (pos, state) = read_block_update(&body);
+    assert_eq!(pos, last, "mise a jour du cadre venant d'etre complete");
+    assert_eq!(property_of(state, "eye"), Some("true"));
+
+    let mut interior = Vec::new();
+    let ack;
+    loop {
+        let (id, body) = read_one_compressed_frame(&mut client, &mut buf).await;
+        if id == 0x04 {
+            let (sequence, _) = read_var_int(&body).unwrap().unwrap();
+            ack = sequence;
+            break;
+        }
+        assert_eq!(id, 0x08, "aucun accuse entre les mises a jour interieures");
+        interior.push(read_block_update(&body));
+    }
+
+    assert_eq!(interior.len(), 9, "neuf mises a jour pour l'interieur 3x3");
+    assert_eq!(ack, seq, "un seul accuse 0x04, celui de la pose de l'oeil");
+
+    let mut expected = Vec::new();
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            expected.push(BlockPos { x: dx, y, z: dz });
+        }
+    }
+    for cell in &expected {
+        let entry = interior
+            .iter()
+            .find(|&&(p, _)| p == *cell)
+            .unwrap_or_else(|| panic!("case interieure {cell:?} manquante"));
+        assert_eq!(entry.1, end_portal, "case interieure posee en end_portal");
+    }
+    let mut keys: Vec<(i32, i32, i32)> = interior.iter().map(|&(p, _)| (p.x, p.y, p.z)).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), 9, "les neuf cases sont distinctes");
+    for (p, _) in &interior {
+        assert!(
+            expected.contains(p),
+            "mise a jour hors de l'interieur: {p:?}"
+        );
+    }
+}
