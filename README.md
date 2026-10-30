@@ -109,7 +109,7 @@ python tools/oracle.py export <monde>/dimensions/minecraft/overworld/region test
 
 `tests-data/oracle-1a/index.json` décrit le format et liste les chunks.
 
-La phase des aquifères a son propre oracle, `tests-data/oracle-1b` : même graine, datapack qui garde les aquifères (`--aquiferes`) et retire toujours carvers, features et structures, export à cinq valeurs par bloc (0 air, 1 solide, 2 exclu, 3 eau, 4 lave, option `--fluides`). Il compte 64 chunks : les 40 de `oracle-1a` et 24 choisis pour leur eau souterraine et leur lave d'aquifère.
+La phase des aquifères a son propre oracle, `tests-data/oracle-1b` : même graine, datapack qui garde les aquifères (`--aquiferes`) et retire toujours carvers, features et structures, export à cinq valeurs par bloc (0 air, 1 solide, 2 exclu, 3 eau, 4 lave, option `--fluides`). Il compte 64 chunks : les 40 de `oracle-1a` et 24 choisis pour leur eau souterraine et leur lave d'aquifère. Les fluides courants (niveau différent de 0) sont exclus : ils viennent de l'écoulement pendant que le monde vanilla tournait, pas de la génération.
 
 ```sh
 python tools/oracle.py datapack server.jar <monde>/datapacks/oracle-1b --aquiferes

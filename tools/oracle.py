@@ -72,9 +72,16 @@ def palette_name(entry):
     return entry.get("Name", entry.get("", entry.get("id")))
 
 
-def section_blocks(sec):
+def palette_level(entry):
+    if isinstance(entry, str):
+        return "0"
+    props = entry.get("Properties", entry.get("properties", {}))
+    return props.get("level", "0")
+
+
+def section_blocks(sec, levels=False):
     bs = sec["block_states"]
-    pal = [palette_name(p) for p in bs["palette"]]
+    pal = [(palette_name(p), palette_level(p)) if levels else palette_name(p) for p in bs["palette"]]
     if len(pal) == 1:
         return [pal[0]] * 4096
     bits = max(4, (len(pal) - 1).bit_length())
@@ -96,8 +103,8 @@ def cells_of(chunk, fluids=False):
         base = (sec["Y"] * 16 - MIN_Y) * 256
         if base < 0 or base >= len(cells):
             continue
-        for i, name in enumerate(section_blocks(sec)):
-            if name in EXCLUDED:
+        for i, (name, level) in enumerate(section_blocks(sec, levels=True)):
+            if name in EXCLUDED or (fluids and name in FLUID_CELLS and level != "0"):
                 cells[base + i] = CELL_EXCLUDED
             elif fluids and name in FLUID_CELLS:
                 cells[base + i] = FLUID_CELLS[name]
