@@ -153,8 +153,16 @@ def blocks_doc(generated, static, server_jar):
         for s in body["states"]:
             if name in ALWAYS_FLUID or s.get("properties", {}).get("waterlogged") == "true":
                 fluid_states.append(s["id"])
+        props = [{"name": k, "values": v} for k, v in sorted(body.get("properties", {}).items())]
+        for index, s in enumerate(body["states"]):
+            rest, expected = index, {}
+            for prop in reversed(props):
+                rest, digit = divmod(rest, len(prop["values"]))
+                expected[prop["name"]] = prop["values"][digit]
+            if expected != s.get("properties", {}):
+                raise SystemExit(f"ordre des proprietes inattendu pour {name}, etat {s['id']}")
         blocks.append({"name": name, "id": block_ids[name], "first_state": first, "state_count": count,
-                       "default_state": default, "air": name in AIR})
+                       "default_state": default, "air": name in AIR, "properties": props})
         total += count
     blocks.sort(key=lambda b: b["first_state"])
     items = []
@@ -165,7 +173,8 @@ def blocks_doc(generated, static, server_jar):
         if block in defaults:
             items.append({"item": item_id, "state": defaults[block]})
     return {"game_version": GAME_VERSION, "server_jar_sha1": hashlib.sha1(Path(server_jar).read_bytes()).hexdigest(),
-            "state_count": total, "blocks": blocks, "fluid_states": sorted(fluid_states), "items": items}
+            "state_count": total, "blocks": blocks, "fluid_states": sorted(fluid_states), "items": items,
+            "item_ids": dict(sorted(item_ids.items(), key=lambda kv: kv[1]))}
 
 
 if __name__ == "__main__":
