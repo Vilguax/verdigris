@@ -356,11 +356,29 @@ pub async fn run_with_store<F>(
 where
     F: Future<Output = ()>,
 {
+    let players = Arc::new(PlayerRegistry::new(DEFAULT_MOTD, DEFAULT_MAX_PLAYERS));
     let generator = FlatGenerator::new().map_err(std::io::Error::other)?;
     let loader = DiskLoader::new(Arc::clone(&store));
     let world = Arc::new(World::with_loader(Box::new(generator), Box::new(loader)));
     info!(monde = %store.base().display(), "monde plat partagé prêt");
-    run_core(listener, keep_alive, world, store, shutdown).await
+    run_core(listener, keep_alive, world, store, players, shutdown).await
+}
+
+pub async fn run_with_registry<F>(
+    listener: TcpListener,
+    keep_alive: KeepAliveConfig,
+    players: Arc<PlayerRegistry>,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: Future<Output = ()>,
+{
+    let store = Arc::new(ChunkStore::from_env());
+    let generator = FlatGenerator::new().map_err(std::io::Error::other)?;
+    let loader = DiskLoader::new(Arc::clone(&store));
+    let world = Arc::new(World::with_loader(Box::new(generator), Box::new(loader)));
+    info!(monde = %store.base().display(), "monde plat partagé prêt");
+    run_core(listener, keep_alive, world, store, players, shutdown).await
 }
 
 pub fn flush_dirty(world: &World, store: &ChunkStore) -> usize {
@@ -384,13 +402,13 @@ async fn run_core<F>(
     keep_alive: KeepAliveConfig,
     world: Arc<World>,
     store: Arc<ChunkStore>,
+    players: Arc<PlayerRegistry>,
     shutdown: F,
 ) -> std::io::Result<()>
 where
     F: Future<Output = ()>,
 {
     let counter = AtomicU64::new(0);
-    let players = Arc::new(PlayerRegistry::new(DEFAULT_MOTD, DEFAULT_MAX_PLAYERS));
     let mut ticker = interval(FLUSH_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     ticker.tick().await;
@@ -636,6 +654,8 @@ async fn dispatch(
         | Serverbound::PlayMovePlayerStatus(_)
         | Serverbound::PlayPlayerAbilities { .. }
         | Serverbound::PlayPlayerAction(_)
+        | Serverbound::PlayPlayerCommand(_)
+        | Serverbound::PlayPlayerInput(_)
         | Serverbound::PlayUseItemOn(_)
         | Serverbound::PlaySetCarriedItem(_)
         | Serverbound::PlaySetCreativeModeSlot(_)
@@ -1342,6 +1362,13 @@ async fn run_keep_alive_action(
     }
 }
 
+fn publish_orientation(session: &Session<'_>) {
+    let (yaw, pitch, sneaking) = session.player.orientation();
+    session
+        .registry
+        .set_orientation(session.uuid, yaw, pitch, sneaking);
+}
+
 async fn handle_play_packet(
     stream: &mut TcpStream,
     framing: &Framing,
@@ -1390,13 +1417,27 @@ async fn handle_play_packet(
             follow_player(stream, framing, state, session).await
         }
         Serverbound::PlayMovePlayerPosRot(m) => {
+            if !(m.yaw.is_finite() && m.pitch.is_finite()) {
+                debug!("rotation non finie ignorée");
+                return false;
+            }
             session.view.apply_pos_rot(&m);
             session.player.pos = (m.x, m.y, m.z);
+            session.player.yaw = m.yaw;
+            session.player.pitch = m.pitch;
+            publish_orientation(session);
             session.view.log_position("déplacement et rotation");
             follow_player(stream, framing, state, session).await
         }
         Serverbound::PlayMovePlayerRot(m) => {
+            if !(m.yaw.is_finite() && m.pitch.is_finite()) {
+                debug!("rotation non finie ignorée");
+                return false;
+            }
             session.view.apply_rot(&m);
+            session.player.yaw = m.yaw;
+            session.player.pitch = m.pitch;
+            publish_orientation(session);
             session.view.log_position("rotation");
             false
         }
@@ -1447,6 +1488,20 @@ async fn handle_play_packet(
                 .player
                 .handle_pick_item_from_block(session.world, pick);
             emit_pick(stream, framing, state, &mut session.player, result).await
+        }
+        Serverbound::PlayPlayerInput(input) => {
+            session.player.sneaking = input.sneaking();
+            publish_orientation(session);
+            debug!(sneaking = session.player.sneaking, "entrée joueur");
+            false
+        }
+        Serverbound::PlayPlayerCommand(command) => {
+            debug!(
+                entity = command.entity_id,
+                action = command.action,
+                "commande joueur ignorée"
+            );
+            false
         }
         Serverbound::PlayIgnored { id } => {
             trace_packet("paquet play ignoré", State::Play, id, 0);

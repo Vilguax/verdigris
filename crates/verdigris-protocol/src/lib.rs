@@ -8,6 +8,7 @@ pub mod framing;
 pub mod gamemode;
 pub mod light;
 pub mod login;
+pub mod mth;
 pub mod network;
 pub mod packets;
 pub mod play;
@@ -72,23 +73,28 @@ pub use light::{
 pub use login::{
     InvalidName, login_success_payload, offline_uuid, random_session_id, validate_name,
 };
+pub use mth::{
+    Direction, cos, horizontal_direction, nearest_looking_direction, nearest_looking_directions,
+    sin,
+};
 pub use network::{KnownPack, NetworkData, Registry, Source, TagEntry, TagRegistry, network_data};
 pub use packets::{Handshake, Intent, Serverbound, decode_serverbound};
 pub use play::{
     ABORT_DESTROY_BLOCK, AIR_STATE, AcceptTeleportation, BlockPos, CHANGE_DESTROY_DIRECTION,
     ChunkBatchReceived, GAME_EVENT_WAIT_FOR_CHUNKS, ItemStack, KeepAlive, MovePlayerPos,
     MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PickItemFromBlock, PlayError, PlayerAction,
-    START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, SetCarriedItem, SetCreativeModeSlot, UseItemOn,
-    block_changed_ack_payload, block_update_payload, chunk_batch_finished_payload,
-    chunk_batch_start_payload, container_set_slot_payload, decode_accept_teleportation,
-    decode_chunk_batch_received, decode_keep_alive, decode_move_player_pos,
-    decode_move_player_pos_rot, decode_move_player_rot, decode_move_player_status,
-    decode_pick_item_from_block, decode_player_abilities, decode_player_action,
-    decode_player_loaded, decode_set_carried_item, decode_set_creative_mode_slot,
-    decode_use_item_on, ensure_play_registries, forget_level_chunk_payload, game_event_payload,
-    keep_alive_payload, level_chunk_with_light_payload, login_play_payload,
-    overworld_dimension_type_id, plains_biome_id, player_abilities_payload,
-    player_position_payload, set_chunk_cache_center_payload, set_held_slot_payload,
+    PlayerCommand, PlayerInput, START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, SetCarriedItem,
+    SetCreativeModeSlot, UseItemOn, block_changed_ack_payload, block_update_payload,
+    chunk_batch_finished_payload, chunk_batch_start_payload, container_set_slot_payload,
+    decode_accept_teleportation, decode_chunk_batch_received, decode_keep_alive,
+    decode_move_player_pos, decode_move_player_pos_rot, decode_move_player_rot,
+    decode_move_player_status, decode_pick_item_from_block, decode_player_abilities,
+    decode_player_action, decode_player_command, decode_player_input, decode_player_loaded,
+    decode_set_carried_item, decode_set_creative_mode_slot, decode_use_item_on,
+    ensure_play_registries, forget_level_chunk_payload, game_event_payload, keep_alive_payload,
+    level_chunk_with_light_payload, login_play_payload, overworld_dimension_type_id,
+    plains_biome_id, player_abilities_payload, player_position_payload,
+    set_chunk_cache_center_payload, set_held_slot_payload,
 };
 pub use playerlist::{
     ListedPlayer, player_info_remove_payload, player_info_update_gamemode_payload,
