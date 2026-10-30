@@ -1,0 +1,396 @@
+{
+ "format": 1,
+ "game_version": "26.3",
+ "seed": 20261029,
+ "min_y": -64,
+ "height": 384,
+ "cell": 4,
+ "index": "(qy - min_y / 4) * 16 + qz * 4 + qx",
+ "value": "identifiant reseau du biome (ordre du registre minecraft:worldgen/biome de network.json)",
+ "chunks": [
+  {
+   "x": -192,
+   "z": 323,
+   "file": "-192.323.bin",
+   "distinct": 2
+  },
+  {
+   "x": -187,
+   "z": 329,
+   "file": "-187.329.bin",
+   "distinct": 2
+  },
+  {
+   "x": -183,
+   "z": 315,
+   "file": "-183.315.bin",
+   "distinct": 2
+  },
+  {
+   "x": -182,
+   "z": 311,
+   "file": "-182.311.bin",
+   "distinct": 3
+  },
+  {
+   "x": -13,
+   "z": -3,
+   "file": "-13.-3.bin",
+   "distinct": 4
+  },
+  {
+   "x": -12,
+   "z": -10,
+   "file": "-12.-10.bin",
+   "distinct": 4
+  },
+  {
+   "x": -11,
+   "z": -11,
+   "file": "-11.-11.bin",
+   "distinct": 4
+  },
+  {
+   "x": -10,
+   "z": -11,
+   "file": "-10.-11.bin",
+   "distinct": 4
+  },
+  {
+   "x": -8,
+   "z": -10,
+   "file": "-8.-10.bin",
+   "distinct": 4
+  },
+  {
+   "x": -4,
+   "z": -2,
+   "file": "-4.-2.bin",
+   "distinct": 4
+  },
+  {
+   "x": -1,
+   "z": 2,
+   "file": "-1.2.bin",
+   "distinct": 4
+  },
+  {
+   "x": -1,
+   "z": 10,
+   "file": "-1.10.bin",
+   "distinct": 4
+  },
+  {
+   "x": 0,
+   "z": 1,
+   "file": "0.1.bin",
+   "distinct": 4
+  },
+  {
+   "x": 0,
+   "z": 10,
+   "file": "0.10.bin",
+   "distinct": 4
+  },
+  {
+   "x": 1,
+   "z": 11,
+   "file": "1.11.bin",
+   "distinct": 4
+  },
+  {
+   "x": 247,
+   "z": -126,
+   "file": "247.-126.bin",
+   "distinct": 4
+  },
+  {
+   "x": 247,
+   "z": -125,
+   "file": "247.-125.bin",
+   "distinct": 4
+  },
+  {
+   "x": 247,
+   "z": -122,
+   "file": "247.-122.bin",
+   "distinct": 4
+  },
+  {
+   "x": 248,
+   "z": -128,
+   "file": "248.-128.bin",
+   "distinct": 4
+  },
+  {
+   "x": 248,
+   "z": -127,
+   "file": "248.-127.bin",
+   "distinct": 4
+  },
+  {
+   "x": 248,
+   "z": -126,
+   "file": "248.-126.bin",
+   "distinct": 4
+  },
+  {
+   "x": 248,
+   "z": -122,
+   "file": "248.-122.bin",
+   "distinct": 4
+  },
+  {
+   "x": 249,
+   "z": -128,
+   "file": "249.-128.bin",
+   "distinct": 4
+  },
+  {
+   "x": 249,
+   "z": -127,
+   "file": "249.-127.bin",
+   "distinct": 4
+  },
+  {
+   "x": 249,
+   "z": -126,
+   "file": "249.-126.bin",
+   "distinct": 5
+  },
+  {
+   "x": 249,
+   "z": -122,
+   "file": "249.-122.bin",
+   "distinct": 4
+  },
+  {
+   "x": 250,
+   "z": -128,
+   "file": "250.-128.bin",
+   "distinct": 4
+  },
+  {
+   "x": 250,
+   "z": -126,
+   "file": "250.-126.bin",
+   "distinct": 4
+  },
+  {
+   "x": 250,
+   "z": -121,
+   "file": "250.-121.bin",
+   "distinct": 4
+  },
+  {
+   "x": 250,
+   "z": -120,
+   "file": "250.-120.bin",
+   "distinct": 4
+  },
+  {
+   "x": 251,
+   "z": -119,
+   "file": "251.-119.bin",
+   "distinct": 4
+  },
+  {
+   "x": 251,
+   "z": -118,
+   "file": "251.-118.bin",
+   "distinct": 4
+  },
+  {
+   "x": 251,
+   "z": -115,
+   "file": "251.-115.bin",
+   "distinct": 4
+  },
+  {
+   "x": 252,
+   "z": -126,
+   "file": "252.-126.bin",
+   "distinct": 4
+  },
+  {
+   "x": 252,
+   "z": -125,
+   "file": "252.-125.bin",
+   "distinct": 4
+  },
+  {
+   "x": 252,
+   "z": -118,
+   "file": "252.-118.bin",
+   "distinct": 4
+  },
+  {
+   "x": 252,
+   "z": -115,
+   "file": "252.-115.bin",
+   "distinct": 4
+  },
+  {
+   "x": 253,
+   "z": -136,
+   "file": "253.-136.bin",
+   "distinct": 5
+  },
+  {
+   "x": 253,
+   "z": -133,
+   "file": "253.-133.bin",
+   "distinct": 4
+  },
+  {
+   "x": 253,
+   "z": -132,
+   "file": "253.-132.bin",
+   "distinct": 4
+  },
+  {
+   "x": 253,
+   "z": -126,
+   "file": "253.-126.bin",
+   "distinct": 4
+  },
+  {
+   "x": 253,
+   "z": -125,
+   "file": "253.-125.bin",
+   "distinct": 4
+  },
+  {
+   "x": 253,
+   "z": -124,
+   "file": "253.-124.bin",
+   "distinct": 4
+  },
+  {
+   "x": 253,
+   "z": -123,
+   "file": "253.-123.bin",
+   "distinct": 4
+  },
+  {
+   "x": 253,
+   "z": -122,
+   "file": "253.-122.bin",
+   "distinct": 4
+  },
+  {
+   "x": 253,
+   "z": -121,
+   "file": "253.-121.bin",
+   "distinct": 4
+  },
+  {
+   "x": 253,
+   "z": -120,
+   "file": "253.-120.bin",
+   "distinct": 4
+  },
+  {
+   "x": 253,
+   "z": -118,
+   "file": "253.-118.bin",
+   "distinct": 4
+  },
+  {
+   "x": 253,
+   "z": -115,
+   "file": "253.-115.bin",
+   "distinct": 4
+  },
+  {
+   "x": 254,
+   "z": -135,
+   "file": "254.-135.bin",
+   "distinct": 4
+  },
+  {
+   "x": 254,
+   "z": -134,
+   "file": "254.-134.bin",
+   "distinct": 4
+  },
+  {
+   "x": 254,
+   "z": -133,
+   "file": "254.-133.bin",
+   "distinct": 4
+  },
+  {
+   "x": 254,
+   "z": -127,
+   "file": "254.-127.bin",
+   "distinct": 4
+  },
+  {
+   "x": 254,
+   "z": -125,
+   "file": "254.-125.bin",
+   "distinct": 4
+  },
+  {
+   "x": 254,
+   "z": -119,
+   "file": "254.-119.bin",
+   "distinct": 4
+  },
+  {
+   "x": 254,
+   "z": -118,
+   "file": "254.-118.bin",
+   "distinct": 4
+  },
+  {
+   "x": 254,
+   "z": -115,
+   "file": "254.-115.bin",
+   "distinct": 4
+  },
+  {
+   "x": 255,
+   "z": -132,
+   "file": "255.-132.bin",
+   "distinct": 4
+  },
+  {
+   "x": 255,
+   "z": -129,
+   "file": "255.-129.bin",
+   "distinct": 5
+  },
+  {
+   "x": 257,
+   "z": -131,
+   "file": "257.-131.bin",
+   "distinct": 4
+  },
+  {
+   "x": 257,
+   "z": -130,
+   "file": "257.-130.bin",
+   "distinct": 5
+  },
+  {
+   "x": 257,
+   "z": -121,
+   "file": "257.-121.bin",
+   "distinct": 5
+  },
+  {
+   "x": 259,
+   "z": -123,
+   "file": "259.-123.bin",
+   "distinct": 5
+  },
+  {
+   "x": 259,
+   "z": -122,
+   "file": "259.-122.bin",
+   "distinct": 5
+  }
+ ]
+}
