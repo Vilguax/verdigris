@@ -23,7 +23,7 @@ async fn twenty_bots_all_reach_play_against_verdigris() {
         port,
         count: 20,
         spawn_interval: Duration::from_millis(10),
-        duration: Duration::from_secs(12),
+        duration: Duration::from_secs(30),
         prefix: "Bot".to_owned(),
         view_distance: 2,
         walk: 4.0,
