@@ -2,6 +2,7 @@
 
 pub mod arith;
 pub mod blended;
+pub mod chunk_fill;
 pub mod data;
 pub mod df;
 pub mod gradient;
@@ -16,6 +17,7 @@ pub mod strict_json;
 pub mod xoroshiro;
 
 pub use blended::{BlendedParams, OldBlendedNoise};
+pub use chunk_fill::{Category, ChunkTerrain, WorldGenerator, category_for};
 pub use data::{Aquifers, DataError, Router, WorldgenData};
 pub use df::{
     Mode, Node, Volume, VolumeContext, VolumeError, contains_interpolated, eval, eval_point,

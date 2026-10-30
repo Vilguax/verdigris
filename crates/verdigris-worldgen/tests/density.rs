@@ -394,10 +394,4 @@ mod oracle {
             idx["chunks"][0]["solid"].as_i64().expect("solid count")
         );
     }
-
-    #[test]
-    #[ignore = "nécessite le mode volume (tâche suivante): final_density est évaluée en mode volume par le remplissage vanilla"]
-    fn final_density_matches_oracle() {
-        let _ = (MIN_Y, AREA, index(), read_chunk("-7.0.bin"));
-    }
 }
