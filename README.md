@@ -73,7 +73,7 @@ Hors périmètre : le format région vanilla `.mca`, les joueurs, les inventaire
 | `crates/verdigris-bots` | Binaire `verdigris-bots` : générateur de charge, un faux client 26.3 par bot |
 | `crates/verdigris-worldgen` | Génération de relief pure (sans E/S ni tokio) : bruits, fonctions de densité, remplissage de chunk en catégories pierre/eau/lave/air |
 | `crates/verdigris-protocol/data/26.3/network.json` | Registres synchronisés et tags de la 26.3 |
-| `crates/verdigris-protocol/data/26.3/worldgen.json` | Réglages de bruit de l'overworld, fonctions de densité et bruits de la 26.3 |
+| `crates/verdigris-protocol/data/26.3/worldgen.json` | Réglages de bruit de l'overworld, fonctions de densité, bruits, règles de matériaux, climat des biomes et points climatiques des biomes (rapport `biome_parameters`, une ligne par point dans l'ordre température, humidité, continentalité, érosion, profondeur, bizarrerie, décalage) de la 26.3 |
 | `tools/datagen.py` | Génère `network.json`, `blocks.json` et `worldgen.json` à partir du générateur de données officiel |
 | `tools/oracle.py` | Construit le datapack de l'oracle et exporte ses chunks en fixtures de test |
 | `tests-data/oracle-1a` | Relief vanilla de référence : 40 chunks, solide ou non solide bloc par bloc |
