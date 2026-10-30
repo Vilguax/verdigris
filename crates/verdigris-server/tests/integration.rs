@@ -1,8 +1,9 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, sleep, timeout};
 
 use verdigris_protocol::{
     BlockPos, MAX_STRING_LEN, MAX_USERNAME_LEN, WORLD_MIN_Y, decode_compressed_frame, decode_frame,
@@ -10,8 +11,9 @@ use verdigris_protocol::{
     read_var_int, write_f32, write_f64, write_i64, write_string, write_u16, write_var_int,
 };
 use verdigris_server::{
-    ChunkStore, KeepAliveConfig, LoadOutcome, REASON_CONFIG_NOT_VANILLA, REASON_KEEP_ALIVE_TIMEOUT,
-    REASON_LOGIN_INVALID_NAME, run, run_with_config, run_with_store,
+    ChunkStore, KeepAliveConfig, LoadOutcome, PlayerRegistry, REASON_CONFIG_NOT_VANILLA,
+    REASON_KEEP_ALIVE_TIMEOUT, REASON_LOGIN_INVALID_NAME, run, run_with_config, run_with_registry,
+    run_with_store,
 };
 
 async fn spawn_server() -> SocketAddr {
@@ -28,6 +30,21 @@ async fn spawn_server_with_keep_alive(config: KeepAliveConfig) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let _ = run_with_config(listener, config).await;
+    });
+    addr
+}
+
+async fn spawn_server_with_registry(registry: Arc<PlayerRegistry>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = run_with_registry(
+            listener,
+            KeepAliveConfig::default(),
+            registry,
+            std::future::pending::<()>(),
+        )
+        .await;
     });
     addr
 }
@@ -1300,4 +1317,67 @@ async fn placed_block_persists_across_restart() {
     }
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+fn compressed_move_player_rot_frame(yaw: f32, pitch: f32, flags: u8) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x20, &mut body);
+    write_f32(yaw, &mut body);
+    write_f32(pitch, &mut body);
+    body.push(flags);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_player_input_frame(flags: u8) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x2B, &mut body);
+    body.push(flags);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+async fn wait_for_orientation(registry: &PlayerRegistry, uuid: u128, expected: (f32, f32, bool)) {
+    for _ in 0..200 {
+        if registry.orientation(uuid) == Some(expected) {
+            return;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "orientation {expected:?} jamais observée, dernière valeur {:?}",
+        registry.orientation(uuid)
+    );
+}
+
+#[tokio::test]
+async fn rotation_and_sneak_are_tracked_server_side() {
+    let registry = Arc::new(PlayerRegistry::new("Verdigris", 20));
+    let addr = spawn_server_with_registry(Arc::clone(&registry)).await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    let uuid = offline_uuid("Verdi");
+    assert_eq!(
+        registry.orientation(uuid),
+        Some((0.0, 0.0, false)),
+        "orientation initiale au spawn"
+    );
+
+    client
+        .write_all(&compressed_move_player_rot_frame(90.0, 30.0, 0x01))
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_player_input_frame(0x20))
+        .await
+        .unwrap();
+    wait_for_orientation(&registry, uuid, (90.0, 30.0, true)).await;
+
+    client
+        .write_all(&compressed_player_input_frame(0x00))
+        .await
+        .unwrap();
+    wait_for_orientation(&registry, uuid, (90.0, 30.0, false)).await;
 }

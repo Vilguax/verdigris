@@ -50,6 +50,8 @@ pub mod packet_ids {
         pub const MOVE_PLAYER_STATUS_ONLY: i32 = 0x21;
         pub const PLAYER_ABILITIES: i32 = 0x28;
         pub const PLAYER_ACTION: i32 = 0x29;
+        pub const PLAYER_COMMAND: i32 = 0x2A;
+        pub const PLAYER_INPUT: i32 = 0x2B;
         pub const USE_ITEM_ON: i32 = 0x42;
         pub const SET_CARRIED_ITEM: i32 = 0x36;
         pub const SET_CREATIVE_MODE_SLOT: i32 = 0x39;
@@ -466,6 +468,52 @@ pub fn decode_move_player_status(body: &[u8]) -> Result<MovePlayerStatus, Protoc
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerInput {
+    pub flags: u8,
+}
+
+impl PlayerInput {
+    pub const FORWARD: u8 = 0x01;
+    pub const BACKWARD: u8 = 0x02;
+    pub const LEFT: u8 = 0x04;
+    pub const RIGHT: u8 = 0x08;
+    pub const JUMP: u8 = 0x10;
+    pub const SNEAK: u8 = 0x20;
+    pub const SPRINT: u8 = 0x40;
+
+    pub fn sneaking(&self) -> bool {
+        self.flags & PlayerInput::SNEAK != 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerCommand {
+    pub entity_id: i32,
+    pub action: i32,
+    pub data: i32,
+}
+
+pub fn decode_player_input(body: &[u8]) -> Result<PlayerInput, ProtocolError> {
+    let mut cursor = body;
+    let flags = take_u8(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(PlayerInput { flags })
+}
+
+pub fn decode_player_command(body: &[u8]) -> Result<PlayerCommand, ProtocolError> {
+    let mut cursor = body;
+    let entity_id = take_var_int(&mut cursor)?;
+    let action = take_var_int(&mut cursor)?;
+    let data = take_var_int(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(PlayerCommand {
+        entity_id,
+        action,
+        data,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockPos {
     pub x: i32,
     pub y: i32,
@@ -708,6 +756,8 @@ mod tests {
         assert_eq!(packet_ids::serverbound::PLAYER_LOADED, 0x2C);
         assert_eq!(packet_ids::serverbound::CHUNK_BATCH_RECEIVED, 0x0B);
         assert_eq!(packet_ids::serverbound::PLAYER_ACTION, 0x29);
+        assert_eq!(packet_ids::serverbound::PLAYER_COMMAND, 0x2A);
+        assert_eq!(packet_ids::serverbound::PLAYER_INPUT, 0x2B);
         assert_eq!(packet_ids::serverbound::USE_ITEM_ON, 0x42);
         assert_eq!(packet_ids::serverbound::SET_CARRIED_ITEM, 0x36);
         assert_eq!(packet_ids::serverbound::SET_CREATIVE_MODE_SLOT, 0x39);
@@ -826,6 +876,94 @@ mod tests {
         assert_eq!(count, 0);
         cursor = &cursor[c..];
         assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn decode_move_player_rot_round_trip() {
+        let mut body = Vec::new();
+        write_f32(90.0, &mut body);
+        write_f32(30.0, &mut body);
+        body.push(0x01);
+        assert_eq!(
+            decode_move_player_rot(&body).unwrap(),
+            MovePlayerRot {
+                yaw: 90.0,
+                pitch: 30.0,
+                flags: 0x01,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_move_player_rot_preserves_non_finite() {
+        let mut body = Vec::new();
+        write_f32(f32::NAN, &mut body);
+        write_f32(0.0, &mut body);
+        body.push(0x00);
+        let decoded = decode_move_player_rot(&body).unwrap();
+        assert!(decoded.yaw.is_nan());
+        assert_eq!(decoded.pitch, 0.0);
+    }
+
+    #[test]
+    fn decode_move_player_pos_rot_round_trip() {
+        let mut body = Vec::new();
+        for value in [48.5f64, -60.0, 0.5] {
+            write_f64(value, &mut body);
+        }
+        write_f32(-45.0, &mut body);
+        write_f32(12.5, &mut body);
+        body.push(0x00);
+        assert_eq!(
+            decode_move_player_pos_rot(&body).unwrap(),
+            MovePlayerPosRot {
+                x: 48.5,
+                y: -60.0,
+                z: 0.5,
+                yaw: -45.0,
+                pitch: 12.5,
+                flags: 0x00,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_player_input_round_trip_and_sneaking() {
+        let input = decode_player_input(&[PlayerInput::SNEAK | PlayerInput::FORWARD]).unwrap();
+        assert_eq!(input.flags, 0x21);
+        assert!(input.sneaking());
+
+        let no_sneak = decode_player_input(&[PlayerInput::SPRINT]).unwrap();
+        assert!(!no_sneak.sneaking());
+    }
+
+    #[test]
+    fn decode_player_input_truncated_is_eof() {
+        assert_eq!(decode_player_input(&[]), Err(ProtocolError::UnexpectedEof));
+    }
+
+    #[test]
+    fn decode_player_input_trailing_is_error() {
+        assert_eq!(
+            decode_player_input(&[0x20, 0x00]),
+            Err(ProtocolError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn decode_player_command_round_trip() {
+        let mut body = Vec::new();
+        write_var_int(1, &mut body);
+        write_var_int(0, &mut body);
+        write_var_int(0, &mut body);
+        assert_eq!(
+            decode_player_command(&body).unwrap(),
+            PlayerCommand {
+                entity_id: 1,
+                action: 0,
+                data: 0,
+            }
+        );
     }
 
     #[test]

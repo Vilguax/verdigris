@@ -214,6 +214,9 @@ pub struct PlayerState {
     pub mode: GameMode,
     pub flying: bool,
     pub pos: (f64, f64, f64),
+    pub yaw: f32,
+    pub pitch: f32,
+    pub sneaking: bool,
     pub inventory: Inventory,
     pub container_state_id: i32,
 }
@@ -230,9 +233,16 @@ impl PlayerState {
             mode,
             flying,
             pos: SPAWN,
+            yaw: 0.0,
+            pitch: 0.0,
+            sneaking: false,
             inventory: Inventory::new(),
             container_state_id: 0,
         }
+    }
+
+    pub fn orientation(&self) -> (f32, f32, bool) {
+        (self.yaw, self.pitch, self.sneaking)
     }
 
     pub fn eye_pos(&self) -> (f64, f64, f64) {
@@ -365,6 +375,9 @@ impl PlayerState {
             mode,
             flying: false,
             pos,
+            yaw: 0.0,
+            pitch: 0.0,
+            sneaking: false,
             inventory,
             container_state_id: 0,
         }

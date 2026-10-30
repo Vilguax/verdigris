@@ -10,6 +10,9 @@ struct Slot {
     name: String,
     game_mode: i32,
     latency_ms: i32,
+    yaw: f32,
+    pitch: f32,
+    sneaking: bool,
     sender: OutboundSender,
 }
 
@@ -59,6 +62,9 @@ impl PlayerRegistry {
                 name,
                 game_mode,
                 latency_ms,
+                yaw: 0.0,
+                pitch: 0.0,
+                sneaking: false,
                 sender,
             },
         );
@@ -79,6 +85,22 @@ impl PlayerRegistry {
         if let Some(slot) = slots.get_mut(&uuid) {
             slot.latency_ms = latency_ms;
         }
+    }
+
+    pub fn set_orientation(&self, uuid: u128, yaw: f32, pitch: f32, sneaking: bool) {
+        let mut slots = self.slots.lock().unwrap();
+        if let Some(slot) = slots.get_mut(&uuid) {
+            slot.yaw = yaw;
+            slot.pitch = pitch;
+            slot.sneaking = sneaking;
+        }
+    }
+
+    pub fn orientation(&self, uuid: u128) -> Option<(f32, f32, bool)> {
+        let slots = self.slots.lock().unwrap();
+        slots
+            .get(&uuid)
+            .map(|slot| (slot.yaw, slot.pitch, slot.sneaking))
     }
 
     pub fn set_gamemode(&self, uuid: u128, game_mode: i32) -> Vec<OutboundSender> {
