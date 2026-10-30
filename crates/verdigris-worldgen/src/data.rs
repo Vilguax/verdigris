@@ -8,7 +8,7 @@ use crate::df::build::{Assets, BuildError, Builder};
 use crate::df::node::Node;
 use crate::df::volume::{Volume, VolumeContext, eval_volume_with};
 use crate::registry::{NoiseRegistry, WorldgenError, worldgen_value};
-use crate::sources::positional_factory;
+use crate::sources::{PositionalFactory, aquifer_factory, positional_factory};
 
 #[derive(Debug)]
 pub enum DataError {
@@ -76,6 +76,15 @@ pub struct Aquifers {
     pub fluid_level_spread: Node,
     pub lava: Node,
     pub surface_level: Node,
+}
+
+pub struct WorldDensity {
+    pub final_density: Node,
+    pub aquifers: Option<Aquifers>,
+    pub factory: PositionalFactory,
+    pub min_y: i32,
+    pub height: i32,
+    pub sea_level: i32,
 }
 
 pub struct WorldgenData {
@@ -234,6 +243,70 @@ impl WorldgenData {
             fluid_level_spread: field("fluid_level_spread")?,
             lava: field("lava")?,
             surface_level: field("surface_level")?,
+        })
+    }
+
+    pub fn build_world_density(&self, seed: i64) -> Result<WorldDensity, DataError> {
+        let assets = self.assets(seed)?;
+        let functions = self.density_functions()?;
+        let overworld = self.overworld()?;
+
+        let noise = overworld
+            .get("noise")
+            .and_then(Value::as_object)
+            .ok_or_else(|| DataError::MissingSection("noise_settings/noise".to_string()))?;
+        let read_i32 = |name: &str| -> Result<i32, DataError> {
+            noise
+                .get(name)
+                .and_then(Value::as_i64)
+                .and_then(|v| i32::try_from(v).ok())
+                .ok_or_else(|| DataError::MissingSection(format!("noise_settings/noise/{name}")))
+        };
+        let min_y = read_i32("min_y")?;
+        let height = read_i32("height")?;
+        let sea_level = overworld
+            .get("sea_level")
+            .and_then(Value::as_i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or(63);
+
+        let final_value = overworld
+            .get("noise_router")
+            .and_then(|v| v.get("final_density"))
+            .ok_or_else(|| DataError::MissingSection("noise_router/final_density".to_string()))?;
+        let mut final_builder = Builder::new(functions, &assets);
+        let final_density = final_builder.build(final_value)?;
+
+        let aquifers = match overworld.get("aquifers").and_then(Value::as_object) {
+            None => None,
+            Some(aq) => {
+                let field = |name: &str| -> Result<Node, DataError> {
+                    let value = aq
+                        .get(name)
+                        .ok_or_else(|| DataError::MissingSection(format!("aquifers/{name}")))?;
+                    let mut builder = Builder::new(functions, &assets);
+                    Ok(builder.build(value)?)
+                };
+                Some(Aquifers {
+                    barrier: field("barrier")?,
+                    exclusion: field("exclusion")?,
+                    fluid_level_floodedness: field("fluid_level_floodedness")?,
+                    fluid_level_spread: field("fluid_level_spread")?,
+                    lava: field("lava")?,
+                    surface_level: field("surface_level")?,
+                })
+            }
+        };
+
+        let factory = aquifer_factory(&assets.factory);
+
+        Ok(WorldDensity {
+            final_density,
+            aquifers,
+            factory,
+            min_y,
+            height,
+            sea_level,
         })
     }
 
