@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::df::build::{Assets, BuildError, Builder};
 use crate::df::node::Node;
+use crate::df::volume::{Volume, VolumeContext, eval_volume_with};
 use crate::registry::{NoiseRegistry, WorldgenError, worldgen_value};
 use crate::sources::positional_factory;
 
@@ -51,6 +52,20 @@ pub struct Router {
     pub temperature: Node,
     pub vegetation: Node,
     pub minmax_eliminated: usize,
+    pub min_y: i32,
+    pub height: i32,
+}
+
+impl Router {
+    pub fn final_density_chunk(&self, cx: i32, cz: i32) -> Vec<f32> {
+        let origin = [16i32.wrapping_mul(cx), self.min_y, 16i32.wrapping_mul(cz)];
+        let vol = Volume::new(origin, [1, 1, 1], [16, self.height.max(0) as usize, 16]);
+        let mut ctx = VolumeContext::new();
+        match eval_volume_with(&mut ctx, &self.final_density, &vol) {
+            Ok(values) => Vec::from(values),
+            Err(_) => vec![0.0f32; vol.len()],
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -133,6 +148,20 @@ impl WorldgenData {
             .and_then(Value::as_object)
             .ok_or_else(|| DataError::MissingSection("noise_router".to_string()))?;
 
+        let noise = overworld
+            .get("noise")
+            .and_then(Value::as_object)
+            .ok_or_else(|| DataError::MissingSection("noise_settings/noise".to_string()))?;
+        let read_i32 = |name: &str| -> Result<i32, DataError> {
+            noise
+                .get(name)
+                .and_then(Value::as_i64)
+                .and_then(|v| i32::try_from(v).ok())
+                .ok_or_else(|| DataError::MissingSection(format!("noise_settings/noise/{name}")))
+        };
+        let min_y = read_i32("min_y")?;
+        let height = read_i32("height")?;
+
         let mut eliminated = 0usize;
         let field = |eliminated: &mut usize, name: &str| -> Result<Node, DataError> {
             let value = router
@@ -163,6 +192,8 @@ impl WorldgenData {
             temperature,
             vegetation,
             minmax_eliminated: eliminated,
+            min_y,
+            height,
         })
     }
 

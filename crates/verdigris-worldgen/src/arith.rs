@@ -142,6 +142,20 @@ pub fn floor_i32(v: f64) -> i32 {
     }
 }
 
+pub fn floor_div_i32(x: i32, y: i32) -> i32 {
+    let q = x.wrapping_div(y);
+    let r = x.wrapping_rem(y);
+    if r != 0 && (r < 0) != (y < 0) {
+        q - 1
+    } else {
+        q
+    }
+}
+
+pub fn floor_mod_i32(x: i32, y: i32) -> i32 {
+    x.wrapping_sub(floor_div_i32(x, y).wrapping_mul(y))
+}
+
 pub fn wrap(c: f64) -> f64 {
     c - (c / WRAP_PERIOD + 0.5).floor() * WRAP_PERIOD
 }

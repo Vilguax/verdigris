@@ -2,9 +2,7 @@ use serde_json::Value;
 use verdigris_worldgen::data::WorldgenData;
 use verdigris_worldgen::df::eval::{Mode, eval, eval_point};
 use verdigris_worldgen::df::node::Node;
-use verdigris_worldgen::df::volume::{
-    Volume, VolumeContext, VolumeError, contains_interpolated, eval_volume, eval_volume_with,
-};
+use verdigris_worldgen::df::volume::{Volume, VolumeContext, eval_volume, eval_volume_with};
 use verdigris_worldgen::registry::worldgen_value;
 
 const SEED: i64 = 20261029;
@@ -99,27 +97,31 @@ fn single_cell_volume_with_negative_origin() {
 }
 
 #[test]
-fn interpolated_in_volume_is_an_error_without_panic() {
+fn interpolated_in_volume_of_linear_input_equals_input() {
     let node = build(
-        r#"{"type":"minecraft:interpolated","input":"minecraft:y","cell_size_xz":4,"cell_size_y":4}"#,
+        r#"{"type":"minecraft:interpolated","input":"minecraft:y","cell_size_xz":4,"cell_size_y":8}"#,
     );
-    let vol = Volume::new([0, 0, 0], [1, 1, 1], [2, 2, 2]);
-    assert_eq!(
-        eval_volume(&node, &vol),
-        Err(VolumeError::InterpolatedUnsupported)
-    );
+    let y = named("minecraft:y", 0);
+    let vol = Volume::new([1, -2, 3], [1, 1, 1], [3, 5, 3]);
+    assert_bits_eq(&volume(&node, &vol), &pointwise_volume(&y, &vol));
 }
 
 #[test]
-fn interpolated_nested_deep_is_an_error() {
+fn interpolated_nested_deep_evaluates() {
     let node = build(
-        r#"{"type":"minecraft:add","left":1.0,"right":{"type":"minecraft:interpolated","input":"minecraft:y","cell_size_xz":4,"cell_size_y":4}}"#,
+        r#"{"type":"minecraft:add","left":1.0,"right":{"type":"minecraft:interpolated","input":"minecraft:y","cell_size_xz":4,"cell_size_y":8}}"#,
     );
-    let vol = Volume::new([0, 0, 0], [1, 1, 1], [2, 2, 2]);
-    assert_eq!(
-        eval_volume(&node, &vol),
-        Err(VolumeError::InterpolatedUnsupported)
-    );
+    let vol = Volume::new([0, -3, 0], [1, 1, 1], [2, 6, 2]);
+    let out = volume(&node, &vol);
+    for k in 0..vol.sizes[2] {
+        for i in 0..vol.sizes[0] {
+            for j in 0..vol.sizes[1] {
+                let [_, y, _] = vol.block_coord(i, j, k);
+                let idx = vol.linear_index(i, j, k);
+                assert_eq!(out[idx].to_bits(), (1.0 + y as f32).to_bits());
+            }
+        }
+    }
 }
 
 fn parity_vol() -> Volume {
@@ -419,6 +421,119 @@ fn find_top_surface_volume_equals_point() {
     assert_bits_eq(&volume(&node, &vol), &point_array(&node, &vol));
 }
 
+fn interpolated(input: &str, w: i32, h: i32) -> Node {
+    build(&format!(
+        r#"{{"type":"minecraft:interpolated","input":{input},"cell_size_xz":{w},"cell_size_y":{h}}}"#
+    ))
+}
+
+#[test]
+fn interpolated_volume_uses_vertical_accumulation_not_lerp() {
+    let grad = r#"{"type":"minecraft:gradient","axis":"y","from_coordinate":0,"from_value":0.1,"to_coordinate":8,"to_value":0.7}"#;
+    let node = interpolated(grad, 4, 8);
+    let g = build(grad);
+    let vol = Volume::new([0, 0, 0], [1, 1, 1], [1, 8, 1]);
+    let out = volume(&node, &vol);
+
+    let q0 = eval_point(&g, 0, 0, 0);
+    let q1 = eval_point(&g, 0, 8, 0);
+    let step = (q1 - q0) * (1.0 / 8.0_f32);
+    let mut acc = vec![0.0f32; 8];
+    let mut val = q0;
+    for slot in &mut acc {
+        *slot = val;
+        val += step;
+    }
+    let mut ldirect = [0.0f32; 8];
+    for (oy, slot) in ldirect.iter_mut().enumerate() {
+        let a = (oy as f32) / 8.0_f32;
+        *slot = q0 + a * (q1 - q0);
+    }
+
+    assert_bits_eq(&out, &acc);
+    let differs = (0..8).any(|oy| out[oy].to_bits() != ldirect[oy].to_bits());
+    assert!(
+        differs,
+        "accumulation must differ from direct lerp somewhere"
+    );
+}
+
+#[test]
+fn interpolated_case3_extracts_dense_without_moving_origin() {
+    let node = interpolated(
+        r#"{"type":"minecraft:noise","noise":"minecraft:continentalness","xz_scale":0.5,"y_scale":0.25}"#,
+        4,
+        8,
+    );
+    let sparse = Volume::new([-13, -70, 27], [4, 8, 4], [5, 49, 5]);
+    let dense = Volume::new(
+        sparse.origin,
+        [1, 1, 1],
+        [(5 - 1) * 4 + 1, (49 - 1) * 8 + 1, (5 - 1) * 4 + 1],
+    );
+    let sparse_out = volume(&node, &sparse);
+    let dense_out = volume(&node, &dense);
+    for k in 0..sparse.sizes[2] {
+        for i in 0..sparse.sizes[0] {
+            for j in 0..sparse.sizes[1] {
+                let s = sparse_out[sparse.linear_index(i, j, k)];
+                let d = dense_out[dense.linear_index(i * 4, j * 8, k * 4)];
+                assert_eq!(s.to_bits(), d.to_bits(), "mismatch at {i},{j},{k}");
+            }
+        }
+    }
+}
+
+#[test]
+fn interpolated_point_exact_corner_uses_point_mode() {
+    let mul = format!(
+        r#"{{"type":"minecraft:mul","left":{},"right":{}}}"#,
+        gradient_zero(),
+        gradient_neg_five()
+    );
+    let node = interpolated(&mul, 4, 8);
+    let inner = build(&mul);
+
+    let p = eval_point(&node, 0, 0, 0);
+    let p_inner = eval_point(&inner, 0, 0, 0);
+    let v_inner = eval(&inner, 0, 0, 0, Mode::Volume);
+    assert_eq!(p.to_bits(), p_inner.to_bits());
+    assert_eq!(p.to_bits(), 0.0_f32.to_bits());
+    assert_ne!(p.to_bits(), v_inner.to_bits());
+    assert_eq!(v_inner.to_bits(), (-0.0_f32).to_bits());
+}
+
+#[test]
+fn final_density_column_matches_chunk_volume() {
+    let router = data().build_router(SEED).expect("router");
+    let chunk = router.final_density_chunk(0, 0);
+    let h = router.height as usize;
+    let lx = 5usize;
+    let lz = 7usize;
+    let column = Volume::new([lx as i32, router.min_y, lz as i32], [1, 1, 1], [1, h, 1]);
+    let col = volume(&router.final_density, &column);
+    for (j, cv) in col.iter().enumerate().take(h) {
+        let chunk_idx = j + (lx + 16 * lz) * h;
+        assert_eq!(
+            cv.to_bits(),
+            chunk[chunk_idx].to_bits(),
+            "column mismatch at j={j}"
+        );
+    }
+}
+
+#[test]
+fn final_density_chunks_have_no_nan() {
+    let router = data().build_router(SEED).expect("router");
+    for (cx, cz) in [(0, 0), (-1, -1)] {
+        let chunk = router.final_density_chunk(cx, cz);
+        assert_eq!(chunk.len(), 16 * router.height as usize * 16);
+        for (i, v) in chunk.iter().enumerate() {
+            assert!(!v.is_nan(), "NaN at index {i} in chunk ({cx},{cz})");
+        }
+    }
+}
+
 #[test]
 fn every_density_function_evaluates_in_volume_without_panic() {
     let root = worldgen_value();
@@ -429,16 +544,8 @@ fn every_density_function_evaluates_in_volume_without_panic() {
     let vol = Volume::new([0, 0, 0], [1, 1, 1], [4, 8, 4]);
     for key in df.keys() {
         let node = named(key, SEED);
-        let result = eval_volume(&node, &vol);
-        if contains_interpolated(&node) {
-            assert_eq!(
-                result,
-                Err(VolumeError::InterpolatedUnsupported),
-                "{key} contains interpolated and must error"
-            );
-        } else {
-            let values = result.unwrap_or_else(|_| panic!("{key} should evaluate in volume"));
-            assert_eq!(values.len(), vol.len(), "{key} produced wrong length");
-        }
+        let values =
+            eval_volume(&node, &vol).unwrap_or_else(|_| panic!("{key} should evaluate in volume"));
+        assert_eq!(values.len(), vol.len(), "{key} produced wrong length");
     }
 }

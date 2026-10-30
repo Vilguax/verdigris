@@ -1,4 +1,6 @@
-use crate::arith::{floor_i32, jabs_f32, jclamp_f32, jmax_f32, jmin_f32, l, l3};
+use crate::arith::{
+    floor_div_i32, floor_i32, floor_mod_i32, jabs_f32, jclamp_f32, jmax_f32, jmin_f32, l, l3,
+};
 use crate::df::node::{
     Axis, Gradient, Node, Noise, Spline, SplinePoint, SplineValue, Tiling, extrapolate,
 };
@@ -214,20 +216,6 @@ pub fn eval(node: &Node, x: i32, y: i32, z: i32, mode: Mode) -> f32 {
     }
 }
 
-fn jfloor_div(x: i32, y: i32) -> i32 {
-    let q = x.wrapping_div(y);
-    let r = x.wrapping_rem(y);
-    if r != 0 && (r < 0) != (y < 0) {
-        q - 1
-    } else {
-        q
-    }
-}
-
-fn jfloor_mod(x: i32, y: i32) -> i32 {
-    x.wrapping_sub(jfloor_div(x, y).wrapping_mul(y))
-}
-
 fn eval_gradient(g: &Gradient, x: i32, y: i32, z: i32) -> f32 {
     let c = match g.axis {
         Axis::X => x,
@@ -240,10 +228,10 @@ fn eval_gradient(g: &Gradient, x: i32, y: i32, z: i32) -> f32 {
             let hi = g.from_coordinate.max(g.to_coordinate);
             c.clamp(lo, hi) - g.from_coordinate
         }
-        Tiling::Repeat => jfloor_mod(c - g.from_coordinate, g.span),
+        Tiling::Repeat => floor_mod_i32(c - g.from_coordinate, g.span),
         Tiling::MirroredRepeat => {
             let rr = c - g.from_coordinate;
-            let t = jfloor_div(rr, g.span);
+            let t = floor_div_i32(rr, g.span);
             let ll = rr - t.wrapping_mul(g.span);
             if t & 1 == 0 { ll } else { g.span - ll }
         }
@@ -347,11 +335,11 @@ fn eval_interpolated(input: &Node, w: i32, h: i32, x: i32, y: i32, z: i32, mode:
     if mode == Mode::Volume {
         return eval(input, x, y, z, Mode::Volume);
     }
-    let ox = jfloor_mod(x, w);
-    let oy = jfloor_mod(y, h);
-    let oz = jfloor_mod(z, w);
+    let ox = floor_mod_i32(x, w);
+    let oy = floor_mod_i32(y, h);
+    let oz = floor_mod_i32(z, w);
     if ox == 0 && oy == 0 && oz == 0 {
-        return eval(input, x, y, z, Mode::Volume);
+        return eval(input, x, y, z, Mode::Point);
     }
     let cx = x - ox;
     let cy = y - oy;
