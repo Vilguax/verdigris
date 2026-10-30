@@ -128,6 +128,7 @@ def worldgen_doc(worldgen, server_jar, reports):
             "noise_settings": {f"minecraft:{s}": settings[f"minecraft:{s}"] for s in WORLDGEN_SETTINGS},
             "density_function": folder("density_function"), "noise": folder("noise"),
             "material_rule": folder("material_rule"),
+            "material_condition": folder("material_condition"),
             "biome": {k: {f: v[f] for f in BIOME_CLIMATE if f in v} for k, v in folder("biome").items()},
             "biome_parameters": {"dimensions": CLIMATE_ORDER, "entries": {f"minecraft:{s}": [
                 [b["biome"]] + [b["parameters"][d] for d in CLIMATE_ORDER]
