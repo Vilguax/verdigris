@@ -37,8 +37,9 @@ pub enum State {
 }
 
 pub use blocks::{
-    Block, BlocksData, ItemState, block_item_of_state, blocks_data, default_state_of_name, is_air,
-    is_fluid, item_to_placed_state, state_to_block,
+    Block, BlocksData, ItemState, Property, block_has_property, block_item_of_state, blocks_data,
+    default_state_of_name, is_air, is_fluid, item_to_placed_state, property_of, state_to_block,
+    state_with, with_property,
 };
 pub use chunk::{
     BIOMES_PER_SECTION, BLOCKS_PER_SECTION, COLUMNS_PER_CHUNK, ChunkColumn, HEIGHTMAP_BITS, MIN_Y,
