@@ -53,6 +53,7 @@ pub mod packet_ids {
         pub const PLAYER_COMMAND: i32 = 0x2A;
         pub const PLAYER_INPUT: i32 = 0x2B;
         pub const USE_ITEM_ON: i32 = 0x42;
+        pub const USE_ITEM: i32 = 0x43;
         pub const SET_CARRIED_ITEM: i32 = 0x36;
         pub const SET_CREATIVE_MODE_SLOT: i32 = 0x39;
         pub const PICK_ITEM_FROM_BLOCK: i32 = 0x24;
@@ -569,6 +570,14 @@ pub struct UseItemOn {
     pub sequence: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UseItem {
+    pub hand: i32,
+    pub sequence: i32,
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetCarriedItem {
     pub slot: i16,
@@ -671,6 +680,21 @@ pub fn decode_use_item_on(body: &[u8]) -> Result<UseItemOn, ProtocolError> {
     })
 }
 
+pub fn decode_use_item(body: &[u8]) -> Result<UseItem, ProtocolError> {
+    let mut cursor = body;
+    let hand = take_var_int(&mut cursor)?;
+    let sequence = take_var_int(&mut cursor)?;
+    let yaw = take_f32(&mut cursor)?;
+    let pitch = take_f32(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(UseItem {
+        hand,
+        sequence,
+        yaw,
+        pitch,
+    })
+}
+
 pub fn decode_set_carried_item(body: &[u8]) -> Result<SetCarriedItem, ProtocolError> {
     let mut cursor = body;
     let slot = take_i16(&mut cursor)?;
@@ -759,6 +783,7 @@ mod tests {
         assert_eq!(packet_ids::serverbound::PLAYER_COMMAND, 0x2A);
         assert_eq!(packet_ids::serverbound::PLAYER_INPUT, 0x2B);
         assert_eq!(packet_ids::serverbound::USE_ITEM_ON, 0x42);
+        assert_eq!(packet_ids::serverbound::USE_ITEM, 0x43);
         assert_eq!(packet_ids::serverbound::SET_CARRIED_ITEM, 0x36);
         assert_eq!(packet_ids::serverbound::SET_CREATIVE_MODE_SLOT, 0x39);
         assert_eq!(packet_ids::clientbound::BLOCK_UPDATE, 0x08);
@@ -1078,6 +1103,56 @@ mod tests {
                 sequence: 12,
             }
         );
+    }
+
+    #[test]
+    fn decode_use_item_fields() {
+        let mut body = Vec::new();
+        write_var_int(0, &mut body);
+        write_var_int(9, &mut body);
+        write_f32(12.5, &mut body);
+        write_f32(-45.0, &mut body);
+        assert_eq!(
+            decode_use_item(&body).unwrap(),
+            UseItem {
+                hand: 0,
+                sequence: 9,
+                yaw: 12.5,
+                pitch: -45.0,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_use_item_preserves_non_finite() {
+        let mut body = Vec::new();
+        write_var_int(1, &mut body);
+        write_var_int(3, &mut body);
+        write_f32(f32::NAN, &mut body);
+        write_f32(0.0, &mut body);
+        let decoded = decode_use_item(&body).unwrap();
+        assert_eq!(decoded.hand, 1);
+        assert!(decoded.yaw.is_nan());
+    }
+
+    #[test]
+    fn decode_use_item_truncated_is_eof() {
+        let mut body = Vec::new();
+        write_var_int(0, &mut body);
+        write_var_int(1, &mut body);
+        write_f32(0.0, &mut body);
+        assert_eq!(decode_use_item(&body), Err(ProtocolError::UnexpectedEof));
+    }
+
+    #[test]
+    fn decode_use_item_trailing_is_error() {
+        let mut body = Vec::new();
+        write_var_int(0, &mut body);
+        write_var_int(1, &mut body);
+        write_f32(0.0, &mut body);
+        write_f32(0.0, &mut body);
+        body.push(0xFF);
+        assert_eq!(decode_use_item(&body), Err(ProtocolError::TrailingBytes));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod interaction;
 mod placement;
 mod player;
+mod raycast;
 mod registry;
 mod storage;
 
@@ -659,6 +660,7 @@ async fn dispatch(
         | Serverbound::PlayPlayerCommand(_)
         | Serverbound::PlayPlayerInput(_)
         | Serverbound::PlayUseItemOn(_)
+        | Serverbound::PlayUseItem(_)
         | Serverbound::PlaySetCarriedItem(_)
         | Serverbound::PlaySetCreativeModeSlot(_)
         | Serverbound::PlayPickItemFromBlock(_)
@@ -1471,6 +1473,10 @@ async fn handle_play_packet(
                 .handle_use_item_on(session.world, use_item_on);
             emit_interaction(stream, framing, state, result).await
         }
+        Serverbound::PlayUseItem(use_item) => {
+            let result = session.player.handle_use_item(session.world, use_item);
+            emit_use_item(stream, framing, state, &mut session.player, result).await
+        }
         Serverbound::PlaySetCarriedItem(set) => {
             session.player.inventory.set_carried(set.slot);
             debug!(slot = set.slot, "case active mise à jour");
@@ -1587,6 +1593,61 @@ async fn emit_pick(
                 state,
                 play_cb::SET_HELD_SLOT,
                 &set_held_slot_payload(selected as i32),
+            )
+            .await
+            .is_err()
+        }
+    }
+}
+
+async fn emit_use_item(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    player_state: &mut PlayerState,
+    result: player::UseItemResult,
+) -> bool {
+    match result {
+        player::UseItemResult::ProtocolError => {
+            disconnect(stream, framing, state, REASON_INVALID_SEQUENCE).await;
+            true
+        }
+        player::UseItemResult::Respond(response) => {
+            for (pos, block_state) in response.updates {
+                if write_packet(
+                    stream,
+                    framing,
+                    state,
+                    play_cb::BLOCK_UPDATE,
+                    &block_update_payload(pos, block_state),
+                )
+                .await
+                .is_err()
+                {
+                    return true;
+                }
+            }
+            for slot in response.slots {
+                let state_id = player_state.next_container_state_id();
+                if write_packet(
+                    stream,
+                    framing,
+                    state,
+                    play_cb::CONTAINER_SET_SLOT,
+                    &container_set_slot_payload(0, state_id, slot.menu_slot, slot.stack),
+                )
+                .await
+                .is_err()
+                {
+                    return true;
+                }
+            }
+            write_packet(
+                stream,
+                framing,
+                state,
+                play_cb::BLOCK_CHANGED_ACK,
+                &block_changed_ack_payload(response.ack),
             )
             .await
             .is_err()

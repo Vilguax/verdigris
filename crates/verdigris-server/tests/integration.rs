@@ -8,8 +8,8 @@ use tokio::time::{Duration, sleep, timeout};
 use verdigris_protocol::{
     BlockPos, MAX_STRING_LEN, MAX_USERNAME_LEN, WORLD_MIN_Y, block_item_of_state,
     decode_compressed_frame, decode_frame, default_state_of_name, encode_compressed_frame,
-    encode_frame, offline_uuid, property_of, read_f64, read_i64, read_string, read_var_int,
-    write_f32, write_f64, write_i64, write_string, write_u16, write_var_int,
+    encode_frame, item_id_of_name, offline_uuid, property_of, read_f64, read_i64, read_string,
+    read_var_int, write_f32, write_f64, write_i64, write_string, write_u16, write_var_int,
 };
 use verdigris_server::{
     ChunkStore, KeepAliveConfig, LoadOutcome, PlayerRegistry, REASON_CONFIG_NOT_VANILLA,
@@ -796,6 +796,16 @@ fn compressed_use_item_on_frame(pos: BlockPos, face: i32, sequence: i32) -> Vec<
     encode_compressed_frame(&body, CLIENT_THRESHOLD)
 }
 
+fn compressed_use_item_frame(hand: i32, sequence: i32, yaw: f32, pitch: f32) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x43, &mut body);
+    write_var_int(hand, &mut body);
+    write_var_int(sequence, &mut body);
+    write_f32(yaw, &mut body);
+    write_f32(pitch, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
 fn compressed_player_action_frame(action: i32, pos: BlockPos, face: u8, sequence: i32) -> Vec<u8> {
     let mut body = Vec::new();
     write_var_int(0x29, &mut body);
@@ -870,6 +880,98 @@ async fn place_then_break_dirt_over_tcp() {
     assert_eq!(ack_id, 0x04, "casse: Block Changed Ack");
     let (sequence, _) = read_var_int(&ack_body).unwrap().unwrap();
     assert_eq!(sequence, 2);
+}
+
+#[tokio::test]
+async fn bucket_place_and_pick_over_tcp() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    let water_bucket = item_id_of_name("minecraft:water_bucket").unwrap();
+    let empty_bucket = item_id_of_name("minecraft:bucket").unwrap();
+    let water = default_state_of_name("minecraft:water").unwrap();
+
+    client
+        .write_all(&compressed_set_creative_mode_slot_frame(
+            36,
+            water_bucket,
+            1,
+        ))
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_set_carried_item_frame(0))
+        .await
+        .unwrap();
+
+    let placed = BlockPos { x: 0, y: -60, z: 0 };
+    client
+        .write_all(&compressed_use_item_frame(0, 1, 0.0, 90.0))
+        .await
+        .unwrap();
+
+    let (update_id, update_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(update_id, 0x08, "pose d'eau: Block Update de la face visée");
+    let (pos, state) = read_block_update(&update_body);
+    assert_eq!(pos, placed);
+    assert_eq!(state, water, "une source d'eau est posée");
+
+    let (ack_id, ack_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(ack_id, 0x04, "pose: Block Changed Ack");
+    let (sequence, _) = read_var_int(&ack_body).unwrap().unwrap();
+    assert_eq!(sequence, 1);
+
+    client
+        .write_all(&compressed_set_creative_mode_slot_frame(
+            36,
+            empty_bucket,
+            1,
+        ))
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_set_carried_item_frame(0))
+        .await
+        .unwrap();
+
+    client
+        .write_all(&compressed_use_item_frame(0, 2, 0.0, 90.0))
+        .await
+        .unwrap();
+
+    let (update_id, update_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(update_id, 0x08, "prise d'eau: Block Update en air");
+    let (pos, state) = read_block_update(&update_body);
+    assert_eq!(pos, placed);
+    assert_eq!(state, 0, "la source est retirée");
+
+    let (slot_id, slot_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(slot_id, 0x14, "prise créative: Container Set Slot");
+    let (_state_id, slot, stack) = read_container_set_slot(&slot_body);
+    assert_eq!(
+        slot, 37,
+        "le seau plein rejoint la première case vide (menu 37)"
+    );
+    assert_eq!(stack, Some((water_bucket, 1)));
+
+    let (ack_id, ack_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(ack_id, 0x04, "prise: Block Changed Ack");
+    let (sequence, _) = read_var_int(&ack_body).unwrap().unwrap();
+    assert_eq!(sequence, 2);
+
+    client
+        .write_all(&compressed_use_item_frame(0, 3, 0.0, -90.0))
+        .await
+        .unwrap();
+
+    let (ack_id, ack_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(ack_id, 0x04, "usage vers le ciel: uniquement l'accusé");
+    let (sequence, _) = read_var_int(&ack_body).unwrap().unwrap();
+    assert_eq!(sequence, 3);
 }
 
 #[tokio::test]

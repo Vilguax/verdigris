@@ -1,4 +1,5 @@
 pub mod blocks;
+pub mod bucket_tables;
 pub mod chunk;
 pub mod chunkfile;
 pub mod clientbound;
@@ -43,6 +44,9 @@ pub use blocks::{
     Block, BlocksData, ItemState, Property, block_has_property, block_id_of_name,
     block_item_of_state, blocks_data, default_state_of_name, is_air, is_fluid, item_id_of_name,
     item_to_placed_state, property_of, state_to_block, state_with, with_property,
+};
+pub use bucket_tables::{
+    BucketIds, bucket_ids, is_liquid_block, is_source_fluid, is_waterloggable, lava_source_state,
 };
 pub use chunk::{
     BIOMES_PER_SECTION, BLOCKS_PER_SECTION, COLUMNS_PER_CHUNK, ChunkColumn, HEIGHTMAP_BITS, MIN_Y,
@@ -92,13 +96,13 @@ pub use play::{
     ChunkBatchReceived, GAME_EVENT_WAIT_FOR_CHUNKS, ItemStack, KeepAlive, MovePlayerPos,
     MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PickItemFromBlock, PlayError, PlayerAction,
     PlayerCommand, PlayerInput, START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, SetCarriedItem,
-    SetCreativeModeSlot, UseItemOn, block_changed_ack_payload, block_update_payload,
+    SetCreativeModeSlot, UseItem, UseItemOn, block_changed_ack_payload, block_update_payload,
     chunk_batch_finished_payload, chunk_batch_start_payload, container_set_slot_payload,
     decode_accept_teleportation, decode_chunk_batch_received, decode_keep_alive,
     decode_move_player_pos, decode_move_player_pos_rot, decode_move_player_rot,
     decode_move_player_status, decode_pick_item_from_block, decode_player_abilities,
     decode_player_action, decode_player_command, decode_player_input, decode_player_loaded,
-    decode_set_carried_item, decode_set_creative_mode_slot, decode_use_item_on,
+    decode_set_carried_item, decode_set_creative_mode_slot, decode_use_item, decode_use_item_on,
     ensure_play_registries, forget_level_chunk_payload, game_event_payload, keep_alive_payload,
     level_chunk_with_light_payload, login_play_payload, overworld_dimension_type_id,
     plains_biome_id, player_abilities_payload, player_position_payload,

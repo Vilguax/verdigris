@@ -2,12 +2,12 @@ use crate::error::ProtocolError;
 use crate::play::{
     AcceptTeleportation, ChunkBatchReceived, KeepAlive, MovePlayerPos, MovePlayerPosRot,
     MovePlayerRot, MovePlayerStatus, PickItemFromBlock, PlayerAction, PlayerCommand, PlayerInput,
-    SetCarriedItem, SetCreativeModeSlot, UseItemOn, decode_accept_teleportation,
+    SetCarriedItem, SetCreativeModeSlot, UseItem, UseItemOn, decode_accept_teleportation,
     decode_chunk_batch_received, decode_keep_alive, decode_move_player_pos,
     decode_move_player_pos_rot, decode_move_player_rot, decode_move_player_status,
     decode_pick_item_from_block, decode_player_abilities, decode_player_action,
     decode_player_command, decode_player_input, decode_player_loaded, decode_set_carried_item,
-    decode_set_creative_mode_slot, decode_use_item_on, packet_ids as play_ids,
+    decode_set_creative_mode_slot, decode_use_item, decode_use_item_on, packet_ids as play_ids,
 };
 use crate::primitives::{read_i64, read_string, read_u16};
 use crate::varint::read_var_int;
@@ -60,6 +60,7 @@ pub enum Serverbound {
     PlayPlayerCommand(PlayerCommand),
     PlayPlayerInput(PlayerInput),
     PlayUseItemOn(UseItemOn),
+    PlayUseItem(UseItem),
     PlaySetCarriedItem(SetCarriedItem),
     PlaySetCreativeModeSlot(SetCreativeModeSlot),
     PlayPickItemFromBlock(PickItemFromBlock),
@@ -196,6 +197,8 @@ fn decode_play(id: i32, body: &[u8]) -> Result<Serverbound, ProtocolError> {
         Ok(Serverbound::PlayPlayerInput(decode_player_input(body)?))
     } else if id == play_ids::serverbound::USE_ITEM_ON {
         Ok(Serverbound::PlayUseItemOn(decode_use_item_on(body)?))
+    } else if id == play_ids::serverbound::USE_ITEM {
+        Ok(Serverbound::PlayUseItem(decode_use_item(body)?))
     } else if id == play_ids::serverbound::SET_CARRIED_ITEM {
         Ok(Serverbound::PlaySetCarriedItem(decode_set_carried_item(
             body,
@@ -520,6 +523,25 @@ mod tests {
             Serverbound::PlayPickItemFromBlock(crate::play::PickItemFromBlock {
                 pos: BlockPos { x: 2, y: -60, z: 7 },
                 include_data: false,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_play_use_item() {
+        let mut body = Vec::new();
+        write_var_int(0x43, &mut body);
+        write_var_int(0, &mut body);
+        write_var_int(7, &mut body);
+        body.extend_from_slice(&12.5f32.to_be_bytes());
+        body.extend_from_slice(&(-45.0f32).to_be_bytes());
+        assert_eq!(
+            decode_serverbound(State::Play, &body).unwrap(),
+            Serverbound::PlayUseItem(crate::play::UseItem {
+                hand: 0,
+                sequence: 7,
+                yaw: 12.5,
+                pitch: -45.0,
             })
         );
     }

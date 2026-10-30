@@ -1,20 +1,26 @@
 use tracing::warn;
 use verdigris_protocol::{
-    AIR_STATE, BlockPos, Direction, GameMode, ItemStack, PickItemFromBlock, PlayerAction,
-    START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, UseItemOn, World, block_item_of_state,
-    horizontal_direction, property_of, state_to_block,
+    AIR_STATE, BlockPos, BucketIds, Direction, GameMode, ItemStack, PickItemFromBlock,
+    PlayerAction, START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, UseItem, UseItemOn, World,
+    block_item_of_state, bucket_ids, horizontal_direction, is_air, is_liquid_block,
+    is_source_fluid, is_waterloggable, lava_source_state, property_of, state_in_replaceable,
+    state_to_block, water_source_state, with_property,
 };
 
 use crate::interaction::resolve_interaction;
 use crate::placement::{
     PlaceContext, Placement, SmallPositions, offset, resolve_placement, twin_to_break,
 };
+use crate::raycast::{cast_ray, look_direction};
 
 pub const GAMEMODE_ENV: &str = "VERDIGRIS_GAMEMODE";
 
 pub const EYE_HEIGHT: f64 = 1.62;
+pub const SNEAKING_EYE_HEIGHT: f64 = 1.27;
 pub const REACH_SQUARED: f64 = 64.0;
 pub const PICK_REACH_SQUARED: f64 = 81.0;
+pub const SURVIVAL_REACH: f64 = 4.5;
+pub const CREATIVE_REACH: f64 = 5.0;
 pub const BEDROCK: &str = "minecraft:bedrock";
 
 pub const INVENTORY_SLOTS: usize = 36;
@@ -171,6 +177,71 @@ impl Inventory {
         changed.sort_unstable();
         changed
     }
+
+    fn first_empty(&self) -> Option<usize> {
+        (0..INVENTORY_SLOTS).find(|&i| self.slots[i].is_none())
+    }
+
+    pub fn fill_bucket(&mut self, mode: GameMode, filled_item: i32) -> Vec<usize> {
+        if mode == GameMode::Creative {
+            if self
+                .slots
+                .iter()
+                .any(|slot| slot_has_item(*slot, filled_item))
+            {
+                return Vec::new();
+            }
+            return match self.first_empty() {
+                Some(empty) => {
+                    self.slots[empty] = Some(ItemSlot {
+                        item: filled_item,
+                        count: 1,
+                    });
+                    vec![empty]
+                }
+                None => Vec::new(),
+            };
+        }
+
+        let sel = self.selected;
+        let count = self.slots[sel].map(|slot| slot.count).unwrap_or(1);
+        if count <= 1 {
+            self.slots[sel] = Some(ItemSlot {
+                item: filled_item,
+                count: 1,
+            });
+            return vec![sel];
+        }
+
+        if let Some(slot) = self.slots[sel].as_mut() {
+            slot.count -= 1;
+        }
+        match self.first_empty() {
+            Some(empty) => {
+                self.slots[empty] = Some(ItemSlot {
+                    item: filled_item,
+                    count: 1,
+                });
+                let mut changed = vec![sel, empty];
+                changed.sort_unstable();
+                changed
+            }
+            None => vec![sel],
+        }
+    }
+
+    pub fn empty_bucket(&mut self, mode: GameMode, empty_item: i32) -> Vec<usize> {
+        if mode == GameMode::Creative {
+            return Vec::new();
+        }
+        let sel = self.selected;
+        let count = self.slots[sel].map(|slot| slot.count).unwrap_or(1);
+        self.slots[sel] = Some(ItemSlot {
+            item: empty_item,
+            count,
+        });
+        vec![sel]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,8 +269,43 @@ pub enum ActionResult {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseItemResponse {
+    pub updates: Vec<(BlockPos, i32)>,
+    pub slots: Vec<SlotUpdate>,
+    pub ack: i32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UseItemResult {
+    ProtocolError,
+    Respond(UseItemResponse),
+}
+
 fn is_bedrock(state: u16) -> bool {
     state_to_block(state as i32).name == BEDROCK
+}
+
+fn ack_only(ack: i32) -> UseItemResult {
+    UseItemResult::Respond(UseItemResponse {
+        updates: Vec::new(),
+        slots: Vec::new(),
+        ack,
+    })
+}
+
+fn empty_bucket_stops(state: i32) -> bool {
+    if is_air(state) {
+        return false;
+    }
+    if is_liquid_block(state) && !is_source_fluid(state) {
+        return false;
+    }
+    true
+}
+
+fn full_bucket_stops(state: i32) -> bool {
+    !is_air(state) && !is_liquid_block(state)
 }
 
 pub struct PlayerState {
@@ -458,6 +564,147 @@ impl PlayerState {
         }
     }
 
+    fn bucket_eye(&self) -> [f64; 3] {
+        let height = if self.sneaking {
+            SNEAKING_EYE_HEIGHT
+        } else {
+            EYE_HEIGHT
+        };
+        [self.pos.0, self.pos.1 + height, self.pos.2]
+    }
+
+    fn slot_updates(&self, changed: Vec<usize>) -> Vec<SlotUpdate> {
+        changed
+            .into_iter()
+            .map(|index| SlotUpdate {
+                menu_slot: index_to_menu_slot(index),
+                stack: slot_to_stack(self.inventory.slots[index]),
+            })
+            .collect()
+    }
+
+    pub fn handle_use_item(&mut self, world: &World, packet: UseItem) -> UseItemResult {
+        if packet.sequence < 0 {
+            return UseItemResult::ProtocolError;
+        }
+        let ack = packet.sequence;
+        if packet.hand != 0 || !(packet.yaw.is_finite() && packet.pitch.is_finite()) {
+            return ack_only(ack);
+        }
+        let reach = match self.mode {
+            GameMode::Creative => CREATIVE_REACH,
+            GameMode::Survival => SURVIVAL_REACH,
+            GameMode::Adventure | GameMode::Spectator => return ack_only(ack),
+        };
+        let Some(held) = self.inventory.selected_item().map(|slot| slot.item) else {
+            return ack_only(ack);
+        };
+        let bids = bucket_ids();
+        if held == bids.empty {
+            self.fill_from_world(world, packet, reach, bids, ack)
+        } else if held == bids.water || held == bids.lava {
+            self.empty_into_world(world, packet, reach, held, bids, ack)
+        } else {
+            ack_only(ack)
+        }
+    }
+
+    fn fill_from_world(
+        &mut self,
+        world: &World,
+        packet: UseItem,
+        reach: f64,
+        bids: BucketIds,
+        ack: i32,
+    ) -> UseItemResult {
+        let origin = self.bucket_eye();
+        let dir = look_direction(packet.yaw, packet.pitch);
+        let read = |p: BlockPos| world.state_at(p.x, p.y, p.z) as i32;
+        let Some(hit) = cast_ray(origin, dir, reach, read, empty_bucket_stops) else {
+            return ack_only(ack);
+        };
+        let state = world.state_at(hit.pos.x, hit.pos.y, hit.pos.z) as i32;
+        let (new_state, filled) = if is_source_fluid(state) {
+            let filled = if state == lava_source_state() {
+                bids.lava
+            } else {
+                bids.water
+            };
+            (AIR_STATE as i32, filled)
+        } else if property_of(state, "waterlogged") == Some("true") {
+            (
+                with_property(state, "waterlogged", "false").unwrap_or(state),
+                bids.water,
+            )
+        } else {
+            return ack_only(ack);
+        };
+        world.set_state(hit.pos.x, hit.pos.y, hit.pos.z, new_state as u16);
+        let written = world.state_at(hit.pos.x, hit.pos.y, hit.pos.z) as i32;
+        let changed = self.inventory.fill_bucket(self.mode, filled);
+        UseItemResult::Respond(UseItemResponse {
+            updates: vec![(hit.pos, written)],
+            slots: self.slot_updates(changed),
+            ack,
+        })
+    }
+
+    fn empty_into_world(
+        &mut self,
+        world: &World,
+        packet: UseItem,
+        reach: f64,
+        held: i32,
+        bids: BucketIds,
+        ack: i32,
+    ) -> UseItemResult {
+        let origin = self.bucket_eye();
+        let dir = look_direction(packet.yaw, packet.pitch);
+        let read = |p: BlockPos| world.state_at(p.x, p.y, p.z) as i32;
+        let Some(hit) = cast_ray(origin, dir, reach, read, full_bucket_stops) else {
+            return ack_only(ack);
+        };
+        let hit_state = world.state_at(hit.pos.x, hit.pos.y, hit.pos.z) as i32;
+        let is_water = held == bids.water;
+        let source = if is_water {
+            water_source_state()
+        } else {
+            lava_source_state()
+        };
+
+        let target = if is_water
+            && is_waterloggable(hit_state)
+            && property_of(hit_state, "waterlogged") == Some("false")
+        {
+            match with_property(hit_state, "waterlogged", "true") {
+                Some(state) => (hit.pos, state),
+                None => return ack_only(ack),
+            }
+        } else {
+            let Some(face) = hit.face else {
+                return ack_only(ack);
+            };
+            let (dx, dy, dz) = face.delta();
+            let cell = hit.pos.offset(dx, dy, dz);
+            let cell_state = world.state_at(cell.x, cell.y, cell.z) as i32;
+            if is_air(cell_state) || state_in_replaceable(cell_state) {
+                (cell, source)
+            } else {
+                return ack_only(ack);
+            }
+        };
+
+        let (pos, new_state) = target;
+        world.set_state(pos.x, pos.y, pos.z, new_state as u16);
+        let written = world.state_at(pos.x, pos.y, pos.z) as i32;
+        let changed = self.inventory.empty_bucket(self.mode, bids.empty);
+        UseItemResult::Respond(UseItemResponse {
+            updates: vec![(pos, written)],
+            slots: self.slot_updates(changed),
+            ack,
+        })
+    }
+
     #[cfg(test)]
     pub fn with_inventory(mode: GameMode, pos: (f64, f64, f64), inventory: Inventory) -> Self {
         PlayerState {
@@ -477,7 +724,10 @@ impl PlayerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verdigris_protocol::{block_id_of_name, default_state_of_name, property_of, state_with};
+    use verdigris_protocol::{
+        block_id_of_name, default_state_of_name, item_id_of_name, property_of, state_with,
+        with_property,
+    };
 
     #[test]
     fn absent_env_is_creative() {
@@ -1344,5 +1594,535 @@ mod tests {
             "accroupi mais mains vides: interaction permise"
         );
         assert_eq!(door_open(&world), Some("true"));
+    }
+
+    const DOWN: f32 = 90.0;
+    const UP: f32 = -90.0;
+
+    fn water_src() -> i32 {
+        default_state_of_name("minecraft:water").unwrap()
+    }
+
+    fn lava_src() -> i32 {
+        default_state_of_name("minecraft:lava").unwrap()
+    }
+
+    fn bucket() -> i32 {
+        item_id_of_name("minecraft:bucket").unwrap()
+    }
+
+    fn water_bucket() -> i32 {
+        item_id_of_name("minecraft:water_bucket").unwrap()
+    }
+
+    fn lava_bucket() -> i32 {
+        item_id_of_name("minecraft:lava_bucket").unwrap()
+    }
+
+    fn stairs(waterlogged: &str) -> u16 {
+        state_with(
+            block_id_of_name("minecraft:oak_stairs").unwrap(),
+            &[("waterlogged", waterlogged)],
+        )
+        .unwrap() as u16
+    }
+
+    fn holding(mode: GameMode, item: i32, count: i32) -> PlayerState {
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = Some(ItemSlot { item, count });
+        PlayerState::with_inventory(mode, SPAWN, inventory)
+    }
+
+    fn ui(sequence: i32, yaw: f32, pitch: f32) -> UseItem {
+        UseItem {
+            hand: 0,
+            sequence,
+            yaw,
+            pitch,
+        }
+    }
+
+    fn use_respond(result: UseItemResult) -> UseItemResponse {
+        match result {
+            UseItemResult::Respond(response) => response,
+            other => panic!("attendu Respond, obtenu {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fill_bucket_survival_rules() {
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = Some(ItemSlot {
+            item: bucket(),
+            count: 1,
+        });
+        assert_eq!(
+            inventory.fill_bucket(GameMode::Survival, water_bucket()),
+            vec![0]
+        );
+        assert_eq!(
+            inventory.slots[0],
+            Some(ItemSlot {
+                item: water_bucket(),
+                count: 1
+            })
+        );
+
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = Some(ItemSlot {
+            item: bucket(),
+            count: 2,
+        });
+        assert_eq!(
+            inventory.fill_bucket(GameMode::Survival, water_bucket()),
+            vec![0, 1]
+        );
+        assert_eq!(
+            inventory.slots[0],
+            Some(ItemSlot {
+                item: bucket(),
+                count: 1
+            })
+        );
+        assert_eq!(
+            inventory.slots[1],
+            Some(ItemSlot {
+                item: water_bucket(),
+                count: 1
+            })
+        );
+
+        let mut inventory = Inventory::new();
+        for cell in inventory.slots.iter_mut() {
+            *cell = Some(ItemSlot { item: 55, count: 1 });
+        }
+        inventory.slots[0] = Some(ItemSlot {
+            item: bucket(),
+            count: 2,
+        });
+        assert_eq!(
+            inventory.fill_bucket(GameMode::Survival, water_bucket()),
+            vec![0]
+        );
+        assert_eq!(
+            inventory.slots[0],
+            Some(ItemSlot {
+                item: bucket(),
+                count: 1
+            })
+        );
+        assert!(
+            inventory
+                .slots
+                .iter()
+                .all(|slot| !matches!(slot, Some(s) if s.item == water_bucket())),
+            "inventaire plein: le seau plein est perdu"
+        );
+    }
+
+    #[test]
+    fn fill_bucket_creative_rules() {
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = Some(ItemSlot {
+            item: bucket(),
+            count: 1,
+        });
+        assert_eq!(
+            inventory.fill_bucket(GameMode::Creative, water_bucket()),
+            vec![1]
+        );
+        assert_eq!(
+            inventory.slots[0],
+            Some(ItemSlot {
+                item: bucket(),
+                count: 1
+            }),
+            "le seau tenu reste inchangé en créatif"
+        );
+        assert_eq!(
+            inventory.slots[1],
+            Some(ItemSlot {
+                item: water_bucket(),
+                count: 1
+            })
+        );
+        assert!(
+            inventory
+                .fill_bucket(GameMode::Creative, water_bucket())
+                .is_empty(),
+            "objet déjà présent: aucun ajout"
+        );
+
+        let mut inventory = Inventory::new();
+        for cell in inventory.slots.iter_mut() {
+            *cell = Some(ItemSlot { item: 55, count: 1 });
+        }
+        assert!(
+            inventory
+                .fill_bucket(GameMode::Creative, water_bucket())
+                .is_empty(),
+            "inventaire plein en créatif: aucun ajout"
+        );
+    }
+
+    #[test]
+    fn empty_bucket_inventory_rules() {
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = Some(ItemSlot {
+            item: water_bucket(),
+            count: 1,
+        });
+        assert_eq!(
+            inventory.empty_bucket(GameMode::Survival, bucket()),
+            vec![0]
+        );
+        assert_eq!(
+            inventory.slots[0],
+            Some(ItemSlot {
+                item: bucket(),
+                count: 1
+            })
+        );
+
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = Some(ItemSlot {
+            item: water_bucket(),
+            count: 1,
+        });
+        assert!(
+            inventory
+                .empty_bucket(GameMode::Creative, bucket())
+                .is_empty(),
+            "créatif: pas de mutation d'inventaire"
+        );
+        assert_eq!(
+            inventory.slots[0],
+            Some(ItemSlot {
+                item: water_bucket(),
+                count: 1
+            })
+        );
+    }
+
+    #[test]
+    fn empty_bucket_picks_water_source_survival() {
+        let world = World::flat().unwrap();
+        world.set_state(0, -61, 0, water_src() as u16);
+        let mut player = holding(GameMode::Survival, bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(1, 0.0, DOWN)));
+        assert_eq!(response.ack, 1);
+        assert_eq!(response.updates, vec![(BlockPos { x: 0, y: -61, z: 0 }, 0)]);
+        assert_eq!(world.state_at(0, -61, 0), 0);
+        assert_eq!(
+            player.inventory.slots[0],
+            Some(ItemSlot {
+                item: water_bucket(),
+                count: 1
+            })
+        );
+        assert_eq!(
+            response.slots,
+            vec![SlotUpdate {
+                menu_slot: 36,
+                stack: ItemStack::Item {
+                    item: water_bucket(),
+                    count: 1
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn empty_bucket_picks_lava_source_survival() {
+        let world = World::flat().unwrap();
+        world.set_state(0, -61, 0, lava_src() as u16);
+        let mut player = holding(GameMode::Survival, bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(1, 0.0, DOWN)));
+        assert_eq!(response.updates, vec![(BlockPos { x: 0, y: -61, z: 0 }, 0)]);
+        assert_eq!(world.state_at(0, -61, 0), 0);
+        assert_eq!(
+            player.inventory.slots[0],
+            Some(ItemSlot {
+                item: lava_bucket(),
+                count: 1
+            })
+        );
+    }
+
+    #[test]
+    fn empty_bucket_creative_adds_filled_without_consuming_held() {
+        let world = World::flat().unwrap();
+        world.set_state(0, -61, 0, water_src() as u16);
+        let mut player = holding(GameMode::Creative, bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(2, 0.0, DOWN)));
+        assert_eq!(world.state_at(0, -61, 0), 0);
+        assert_eq!(
+            player.inventory.slots[0],
+            Some(ItemSlot {
+                item: bucket(),
+                count: 1
+            })
+        );
+        assert_eq!(
+            player.inventory.slots[1],
+            Some(ItemSlot {
+                item: water_bucket(),
+                count: 1
+            })
+        );
+        assert_eq!(response.ack, 2);
+    }
+
+    #[test]
+    fn empty_bucket_drains_waterlogged_block() {
+        let world = World::flat().unwrap();
+        world.set_state(0, -60, 0, stairs("true"));
+        let mut player = holding(GameMode::Survival, bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(1, 0.0, DOWN)));
+        let (pos, state) = response.updates[0];
+        assert_eq!(pos, BlockPos { x: 0, y: -60, z: 0 });
+        assert_eq!(property_of(state, "waterlogged"), Some("false"));
+        assert_eq!(
+            player.inventory.slots[0],
+            Some(ItemSlot {
+                item: water_bucket(),
+                count: 1
+            })
+        );
+    }
+
+    #[test]
+    fn empty_bucket_traverses_flowing_fluid_to_source() {
+        let world = World::flat().unwrap();
+        let flowing = with_property(water_src(), "level", "1").unwrap();
+        world.set_state(0, -60, 0, flowing as u16);
+        world.set_state(0, -61, 0, water_src() as u16);
+        let mut player = holding(GameMode::Survival, bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(1, 0.0, DOWN)));
+        assert_eq!(
+            response.updates,
+            vec![(BlockPos { x: 0, y: -61, z: 0 }, 0)],
+            "la source sous l'eau courante est prise"
+        );
+        assert_eq!(
+            world.state_at(0, -60, 0),
+            flowing as u16,
+            "l'eau courante n'est pas touchée"
+        );
+    }
+
+    #[test]
+    fn empty_bucket_without_source_only_acks() {
+        let world = World::flat().unwrap();
+        let mut player = holding(GameMode::Creative, bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(7, 0.0, UP)));
+        assert!(response.updates.is_empty() && response.slots.is_empty());
+        assert_eq!(response.ack, 7);
+        assert_eq!(
+            player.inventory.slots[0],
+            Some(ItemSlot {
+                item: bucket(),
+                count: 1
+            })
+        );
+    }
+
+    #[test]
+    fn water_bucket_waterlogs_targeted_block() {
+        let world = World::flat().unwrap();
+        world.set_state(0, -60, 0, stairs("false"));
+        let mut player = holding(GameMode::Creative, water_bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(1, 0.0, DOWN)));
+        assert_eq!(response.updates.len(), 1);
+        let (pos, state) = response.updates[0];
+        assert_eq!(pos, BlockPos { x: 0, y: -60, z: 0 });
+        assert_eq!(property_of(state, "waterlogged"), Some("true"));
+        assert_eq!(
+            property_of(world.state_at(0, -60, 0) as i32, "waterlogged"),
+            Some("true")
+        );
+        assert!(
+            response.slots.is_empty(),
+            "créatif ne change pas l'inventaire"
+        );
+    }
+
+    #[test]
+    fn water_bucket_on_waterlogged_block_places_on_face() {
+        let world = World::flat().unwrap();
+        world.set_state(0, -60, 0, stairs("true"));
+        let mut player = holding(GameMode::Creative, water_bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(1, 0.0, DOWN)));
+        let (pos, state) = response.updates[0];
+        assert_eq!(
+            pos,
+            BlockPos { x: 0, y: -59, z: 0 },
+            "déjà waterlogged: source posée sur la face (au-dessus)"
+        );
+        assert_eq!(state, water_src());
+    }
+
+    #[test]
+    fn lava_bucket_never_waterlogs() {
+        let world = World::flat().unwrap();
+        world.set_state(0, -60, 0, stairs("false"));
+        let mut player = holding(GameMode::Creative, lava_bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(1, 0.0, DOWN)));
+        let (pos, state) = response.updates[0];
+        assert_eq!(pos, BlockPos { x: 0, y: -59, z: 0 });
+        assert_eq!(state, lava_src());
+        assert_eq!(
+            property_of(world.state_at(0, -60, 0) as i32, "waterlogged"),
+            Some("false"),
+            "le bloc visé reste non waterlogged"
+        );
+    }
+
+    #[test]
+    fn full_bucket_survival_success_empties_bucket() {
+        let world = World::flat().unwrap();
+        let mut player = holding(GameMode::Survival, water_bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(1, 0.0, DOWN)));
+        let (pos, state) = response.updates[0];
+        assert_eq!(pos, BlockPos { x: 0, y: -60, z: 0 });
+        assert_eq!(state, water_src());
+        assert_eq!(
+            player.inventory.slots[0],
+            Some(ItemSlot {
+                item: bucket(),
+                count: 1
+            })
+        );
+        assert_eq!(
+            response.slots,
+            vec![SlotUpdate {
+                menu_slot: 36,
+                stack: ItemStack::Item {
+                    item: bucket(),
+                    count: 1
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn full_bucket_without_hit_only_acks() {
+        let world = World::flat().unwrap();
+        let mut player = holding(GameMode::Survival, water_bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(1, 0.0, UP)));
+        assert!(response.updates.is_empty() && response.slots.is_empty());
+        assert_eq!(
+            player.inventory.slots[0],
+            Some(ItemSlot {
+                item: water_bucket(),
+                count: 1
+            }),
+            "échec: le seau reste plein"
+        );
+    }
+
+    #[test]
+    fn full_bucket_without_valid_target_keeps_world_and_inventory() {
+        let world = World::flat().unwrap();
+        world.set_state(
+            0,
+            -59,
+            0,
+            default_state_of_name("minecraft:stone").unwrap() as u16,
+        );
+        let mut player = holding(GameMode::Survival, water_bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(1, 0.0, DOWN)));
+        assert!(response.updates.is_empty() && response.slots.is_empty());
+        assert_eq!(
+            player.inventory.slots[0],
+            Some(ItemSlot {
+                item: water_bucket(),
+                count: 1
+            })
+        );
+        assert_eq!(
+            world.state_at(0, -59, 0),
+            default_state_of_name("minecraft:stone").unwrap() as u16
+        );
+    }
+
+    #[test]
+    fn non_bucket_item_only_acks() {
+        let world = World::flat().unwrap();
+        world.set_state(0, -61, 0, water_src() as u16);
+        let mut player = holding(GameMode::Creative, 55, 1);
+        let response = use_respond(player.handle_use_item(&world, ui(3, 0.0, DOWN)));
+        assert!(response.updates.is_empty() && response.slots.is_empty());
+        assert_eq!(response.ack, 3);
+        assert_eq!(world.state_at(0, -61, 0), water_src() as u16);
+    }
+
+    #[test]
+    fn off_hand_bucket_only_acks() {
+        let world = World::flat().unwrap();
+        world.set_state(0, -61, 0, water_src() as u16);
+        let mut player = holding(GameMode::Creative, bucket(), 1);
+        let mut packet = ui(4, 0.0, DOWN);
+        packet.hand = 1;
+        let response = use_respond(player.handle_use_item(&world, packet));
+        assert!(response.updates.is_empty() && response.slots.is_empty());
+        assert_eq!(response.ack, 4);
+        assert_eq!(world.state_at(0, -61, 0), water_src() as u16);
+    }
+
+    #[test]
+    fn non_finite_orientation_acks_without_changes() {
+        let world = World::flat().unwrap();
+        world.set_state(0, -61, 0, water_src() as u16);
+        let mut player = holding(GameMode::Creative, bucket(), 1);
+        let response = use_respond(player.handle_use_item(&world, ui(5, f32::NAN, 0.0)));
+        assert_eq!(response.ack, 5);
+        assert!(response.updates.is_empty() && response.slots.is_empty());
+        assert_eq!(world.state_at(0, -61, 0), water_src() as u16);
+    }
+
+    #[test]
+    fn negative_sequence_use_item_is_protocol_error() {
+        let world = World::flat().unwrap();
+        let mut player = holding(GameMode::Creative, bucket(), 1);
+        assert_eq!(
+            player.handle_use_item(&world, ui(-1, 0.0, DOWN)),
+            UseItemResult::ProtocolError
+        );
+    }
+
+    #[test]
+    fn reach_differs_between_survival_and_creative() {
+        let origin = (0.0, -60.0, 0.0);
+
+        let world = World::flat().unwrap();
+        world.set_state(5, -59, 0, water_src() as u16);
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = Some(ItemSlot {
+            item: bucket(),
+            count: 1,
+        });
+        let mut survival = PlayerState::with_inventory(GameMode::Survival, origin, inventory);
+        let response = use_respond(survival.handle_use_item(&world, ui(1, -90.0, 0.0)));
+        assert!(
+            response.updates.is_empty(),
+            "survie 4.5: cible à 5.0 hors portée"
+        );
+        assert_eq!(world.state_at(5, -59, 0), water_src() as u16);
+
+        let world = World::flat().unwrap();
+        world.set_state(5, -59, 0, water_src() as u16);
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = Some(ItemSlot {
+            item: bucket(),
+            count: 1,
+        });
+        let mut creative = PlayerState::with_inventory(GameMode::Creative, origin, inventory);
+        let response = use_respond(creative.handle_use_item(&world, ui(1, -90.0, 0.0)));
+        assert_eq!(
+            response.updates,
+            vec![(BlockPos { x: 5, y: -59, z: 0 }, 0)],
+            "créatif 5.0: cible à 5.0 atteinte"
+        );
     }
 }
