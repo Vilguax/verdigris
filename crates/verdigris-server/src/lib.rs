@@ -20,8 +20,8 @@ pub use generator::{
 };
 pub use level::{LEVEL_FILE, LevelConfig, LevelError, ensure as ensure_level, level_path};
 pub use player::{GAMEMODE_ENV, PlayerState, read_gamemode, resolve_gamemode};
-use registry::OutboundSender;
 pub use registry::PlayerRegistry;
+use registry::{EntitySpawn, OutboundSender, allocate_entity_id};
 pub use storage::{
     CHUNKS_SUBDIR, ChunkStore, DEFAULT_WORLD_DIR, DiskLoader, LoadOutcome, REJECTED_SUFFIX,
     WORLD_ENV, world_dir,
@@ -36,20 +36,21 @@ use tracing_subscriber::EnvFilter;
 
 use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
-    COMPRESSION_THRESHOLD, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, Intent,
+    Angle, COMPRESSION_THRESHOLD, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, Intent,
     ListedPlayer, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus,
-    PROTOCOL_VERSION, SET_COMPRESSION_ID, Serverbound, State, StatusInfo, World,
-    block_changed_ack_payload, block_update_payload, build_compressed_packet, build_packet,
-    chunk_batch_finished_payload, chunk_batch_start_payload, chunk_coord, chunks_to_forget,
-    chunks_to_load, client_has_core, config_disconnect_payload, container_set_slot_payload,
-    decode_compressed_frame, decode_frame, decode_known_packs, decode_serverbound,
-    forget_level_chunk_payload, game_event_payload, keep_alive_payload, known_packs_payload,
-    login_disconnect_payload, login_play_payload, login_success_payload, network_data,
-    offline_uuid, packet_ids, player_abilities_payload, player_info_remove_payload,
-    player_info_update_gamemode_payload, player_info_update_init_payload,
-    player_info_update_latency_payload, player_position_payload, pong_payload, random_session_id,
-    read_var_int, registry_data_payload, server_known_pack, set_chunk_cache_center_payload,
-    set_compression_payload, set_held_slot_payload, status_json, status_response_payload,
+    PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID, Serverbound, State, StatusInfo,
+    World, add_entity_payload, block_changed_ack_payload, block_update_payload,
+    build_compressed_packet, build_packet, bundle_delimiter_payload, chunk_batch_finished_payload,
+    chunk_batch_start_payload, chunk_coord, chunks_to_forget, chunks_to_load, client_has_core,
+    config_disconnect_payload, container_set_slot_payload, decode_compressed_frame, decode_frame,
+    decode_known_packs, decode_serverbound, forget_level_chunk_payload, game_event_payload,
+    keep_alive_payload, known_packs_payload, login_disconnect_payload, login_play_payload,
+    login_success_payload, network_data, offline_uuid, packet_ids, player_abilities_payload,
+    player_info_remove_payload, player_info_update_gamemode_payload,
+    player_info_update_init_payload, player_info_update_latency_payload, player_position_payload,
+    pong_payload, random_session_id, read_var_int, registry_data_payload, remove_entities_payload,
+    server_known_pack, set_chunk_cache_center_payload, set_compression_payload,
+    set_entity_data_health_payload, set_held_slot_payload, status_json, status_response_payload,
     tab_list_payload, update_tags_payload, validate_name, write_chunk_payload,
 };
 use verdigris_protocol::{GAME_VERSION, WORLD_MAX_Y, WORLD_MIN_Y, is_air, is_fluid};
@@ -69,7 +70,6 @@ pub const REASON_CONFIG_NOT_VANILLA: &str = "un client vanilla 26.3 est requis";
 pub const REASON_CONFIG_TIMEOUT: &str = "délai de configuration dépassé";
 const LOGIN_SUCCESS_ID: i32 = 0x02;
 
-const PLAY_PLAYER_ID: i32 = 1;
 const PLAY_CHUNK_RADIUS: i32 = 8;
 const PLAY_SIMULATION_DISTANCE: i32 = 8;
 const PLAY_MAX_PLAYERS: i32 = 20;
@@ -208,6 +208,44 @@ fn push_frame(senders: &[OutboundSender], frame: &Arc<[u8]>) {
     }
 }
 
+fn spawn_bundle(spawn: &EntitySpawn) -> Vec<Arc<[u8]>> {
+    let mut frames = Vec::with_capacity(4);
+    if let Some(frame) = frame_arc(play_cb::BUNDLE_DELIMITER, &bundle_delimiter_payload()) {
+        frames.push(frame);
+    }
+    let add_entity = add_entity_payload(
+        spawn.entity_id,
+        spawn.uuid,
+        PLAYER_ENTITY_TYPE,
+        spawn.x,
+        spawn.y,
+        spawn.z,
+        Angle::from_degrees(spawn.pitch as f64),
+        Angle::from_degrees(spawn.yaw as f64),
+        Angle::from_degrees(spawn.yaw as f64),
+        0,
+    );
+    if let Some(frame) = frame_arc(play_cb::ADD_ENTITY, &add_entity) {
+        frames.push(frame);
+    }
+    if let Some(frame) = frame_arc(
+        play_cb::SET_ENTITY_DATA,
+        &set_entity_data_health_payload(spawn.entity_id),
+    ) {
+        frames.push(frame);
+    }
+    if let Some(frame) = frame_arc(play_cb::BUNDLE_DELIMITER, &bundle_delimiter_payload()) {
+        frames.push(frame);
+    }
+    frames
+}
+
+fn push_bundle(sender: &OutboundSender, frames: &[Arc<[u8]>]) {
+    for frame in frames {
+        let _ = sender.send(Arc::clone(frame));
+    }
+}
+
 pub fn broadcast_gamemode_change(registry: &Arc<PlayerRegistry>, uuid: u128, mode: i32) {
     let senders = registry.set_gamemode(uuid, mode);
     if senders.is_empty() {
@@ -246,8 +284,16 @@ struct PlayGuard {
 
 impl Drop for PlayGuard {
     fn drop(&mut self) {
-        let remaining = self.registry.remove(self.uuid);
-        if remaining.is_empty() {
+        let departure = self.registry.depart(self.uuid);
+        if !departure.observers.is_empty()
+            && let Some(frame) = frame_arc(
+                play_cb::REMOVE_ENTITIES,
+                &remove_entities_payload(&[departure.entity_id]),
+            )
+        {
+            push_frame(&departure.observers, &frame);
+        }
+        if departure.remaining.is_empty() {
             return;
         }
         let remove_frame = frame_arc(
@@ -257,10 +303,10 @@ impl Drop for PlayGuard {
         let (header, footer) = self.registry.tab_strings();
         let tab_frame = frame_arc(play_cb::TAB_LIST, &tab_list_payload(&header, &footer));
         if let Some(frame) = &remove_frame {
-            push_frame(&remaining, frame);
+            push_frame(&departure.remaining, frame);
         }
         if let Some(frame) = &tab_frame {
-            push_frame(&remaining, frame);
+            push_frame(&departure.remaining, frame);
         }
     }
 }
@@ -1084,10 +1130,11 @@ async fn enter_play(
             .unwrap_or(PLAY_SPAWN_FALLBACK)
     };
     player.pos = (spawn[0], spawn[1], spawn[2]);
-    info!(player = %player.name, mode = %player.mode, "entrée en jeu du joueur");
+    let entity_id = allocate_entity_id();
+    info!(player = %player.name, entity_id, mode = %player.mode, "entrée en jeu du joueur");
 
     let login = match login_play_payload(
-        PLAY_PLAYER_ID,
+        entity_id,
         PLAY_CHUNK_RADIUS,
         PLAY_SIMULATION_DISTANCE,
         player.mode.game_type(),
@@ -1151,7 +1198,16 @@ async fn enter_play(
 
     let uuid = offline_uuid(&player.name);
     let (tx, rx) = unbounded_channel::<Arc<[u8]>>();
-    let snapshot = registry.register(uuid, player.name.clone(), player.mode.game_type(), 0, tx);
+    let self_sender = tx.clone();
+    let snapshot = registry.register(
+        uuid,
+        entity_id,
+        (spawn[0], spawn[1], spawn[2]),
+        player.name.clone(),
+        player.mode.game_type(),
+        0,
+        tx,
+    );
     let _guard = PlayGuard {
         registry: Arc::clone(registry),
         uuid,
@@ -1211,6 +1267,14 @@ async fn enter_play(
         }
         if let Some(frame) = frame_arc(play_cb::TAB_LIST, &tab) {
             push_frame(&snapshot.other_senders, &frame);
+        }
+    }
+
+    if let Some(exchange) = registry.activate(uuid) {
+        let own_bundle = spawn_bundle(&exchange.own);
+        for (observer, other) in &exchange.observers {
+            push_bundle(observer, &own_bundle);
+            push_bundle(&self_sender, &spawn_bundle(other));
         }
     }
 
@@ -1916,8 +1980,8 @@ mod tests {
         let registry = Arc::new(PlayerRegistry::new("Verdigris", 20));
         let (tx_a, mut rx_a) = unbounded_channel::<Arc<[u8]>>();
         let (tx_b, mut rx_b) = unbounded_channel::<Arc<[u8]>>();
-        registry.register(1, "Alice".to_owned(), 1, 0, tx_a);
-        registry.register(2, "Bob".to_owned(), 0, 0, tx_b);
+        registry.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
+        registry.register(2, 11, (1.5, -60.0, 2.5), "Bob".to_owned(), 0, 0, tx_b);
 
         broadcast_gamemode_change(&registry, 2, 3);
 
@@ -1931,7 +1995,7 @@ mod tests {
     fn latency_broadcast_uses_the_latency_action() {
         let registry = Arc::new(PlayerRegistry::new("Verdigris", 20));
         let (tx_a, mut rx_a) = unbounded_channel::<Arc<[u8]>>();
-        registry.register(1, "Alice".to_owned(), 1, 0, tx_a);
+        registry.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
         registry.set_latency(1, 42);
 
         broadcast_latency(&registry);

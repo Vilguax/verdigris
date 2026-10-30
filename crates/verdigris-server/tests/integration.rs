@@ -1576,6 +1576,106 @@ fn parse_player_info_remove(body: &[u8]) -> Vec<u128> {
     uuids
 }
 
+#[derive(Debug, PartialEq)]
+struct AddedEntity {
+    entity_id: i32,
+    uuid: u128,
+    entity_type: i32,
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+fn parse_add_entity(body: &[u8]) -> AddedEntity {
+    let (entity_id, used) = read_var_int(body).unwrap().unwrap();
+    let mut cursor = &body[used..];
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&cursor[..16]);
+    let uuid = u128::from_be_bytes(bytes);
+    cursor = &cursor[16..];
+    let (entity_type, used) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[used..];
+    let (x, used) = read_f64(cursor).unwrap().unwrap();
+    cursor = &cursor[used..];
+    let (y, used) = read_f64(cursor).unwrap().unwrap();
+    cursor = &cursor[used..];
+    let (z, used) = read_f64(cursor).unwrap().unwrap();
+    cursor = &cursor[used..];
+    assert_eq!(cursor[0], 0x00, "vitesse LpVec3 nulle encodée sur un octet");
+    cursor = &cursor[4..];
+    let (data, used) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[used..];
+    assert_eq!(data, 0, "add_entity data vaut 0");
+    assert!(cursor.is_empty(), "add_entity entièrement consommé");
+    AddedEntity {
+        entity_id,
+        uuid,
+        entity_type,
+        x,
+        y,
+        z,
+    }
+}
+
+fn login_entity_id(body: &[u8]) -> i32 {
+    i32::from_be_bytes([body[0], body[1], body[2], body[3]])
+}
+
+fn parse_remove_entities(body: &[u8]) -> Vec<i32> {
+    let (count, used) = read_var_int(body).unwrap().unwrap();
+    let mut cursor = &body[used..];
+    let mut ids = Vec::new();
+    for _ in 0..count {
+        let (id, used) = read_var_int(cursor).unwrap().unwrap();
+        ids.push(id);
+        cursor = &cursor[used..];
+    }
+    ids
+}
+
+async fn read_spawn_bundle(client: &mut TcpStream, buf: &mut Vec<u8>) -> AddedEntity {
+    let (open_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(
+        open_id, 0x00,
+        "le bundle d'apparition ouvre par un délimiteur"
+    );
+    let (add_id, add_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(add_id, 0x01, "puis add_entity 0x01");
+    let added = parse_add_entity(&add_body);
+    let (data_id, data_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(data_id, 0x65, "puis set_entity_data 0x65");
+    let mut expected = Vec::new();
+    write_var_int(added.entity_id, &mut expected);
+    expected.extend_from_slice(&[0x09, 0x03, 0x41, 0xA0, 0x00, 0x00, 0xFF]);
+    assert_eq!(data_body, expected, "santé 20.0 minimale");
+    let (close_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(close_id, 0x00, "le bundle se referme par un délimiteur");
+    added
+}
+
+async fn consume_world_capturing_entity_id(client: &mut TcpStream, buf: &mut Vec<u8>) -> i32 {
+    let (login_id, login_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(login_id, 0x32);
+    let entity_id = login_entity_id(&login_body);
+    let (abilities_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(abilities_id, 0x41);
+    let (position_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(position_id, 0x49);
+    let (game_event_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(game_event_id, 0x27);
+    let (center_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(center_id, 0x60);
+    let (batch_start_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(batch_start_id, 0x0C);
+    for _ in 0..289 {
+        let (chunk_id, _) = read_one_compressed_frame(client, buf).await;
+        assert_eq!(chunk_id, 0x2E);
+    }
+    let (batch_finished_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(batch_finished_id, 0x0B);
+    entity_id
+}
+
 #[tokio::test]
 async fn two_clients_share_the_tab_list() {
     let addr = spawn_server().await;
@@ -1623,7 +1723,25 @@ async fn two_clients_share_the_tab_list() {
     let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
     assert_eq!(tab_id, 0x7D, "le pied de liste d'Alice est réactualisé");
 
+    let bob_spawn = read_spawn_bundle(&mut alice, &mut buf_a).await;
+    assert_eq!(
+        bob_spawn.uuid,
+        offline_uuid("Bob"),
+        "l'apparition suit l'ajout de Bob"
+    );
+
     drop(bob);
+
+    let (remove_id, remove_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(
+        remove_id, 0x4E,
+        "départ de Bob: Remove Entities avant la liste"
+    );
+    assert_eq!(
+        parse_remove_entities(&remove_body),
+        vec![bob_spawn.entity_id],
+        "la disparition cible l'entité de Bob"
+    );
 
     let (remove_id, remove_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
     assert_eq!(remove_id, 0x46, "départ de Bob: Player Info Remove");
@@ -1634,6 +1752,79 @@ async fn two_clients_share_the_tab_list() {
     );
     let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
     assert_eq!(tab_id, 0x7D, "le pied de liste repasse à un seul joueur");
+}
+
+#[tokio::test]
+async fn two_players_spawn_and_despawn_as_entities() {
+    let addr = spawn_server().await;
+
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    let alice_local_id = consume_world_capturing_entity_id(&mut alice, &mut buf_a).await;
+    let (info_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(info_id, 0x47);
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_named(&mut bob, &mut buf_b, "Bob").await;
+    let bob_local_id = consume_world_capturing_entity_id(&mut bob, &mut buf_b).await;
+    let (info_id, _) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
+    assert_eq!(info_id, 0x47, "Bob reçoit d'abord sa liste de joueurs");
+    let (tab_id, _) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let alice_seen = read_spawn_bundle(&mut bob, &mut buf_b).await;
+    assert_eq!(
+        alice_seen.uuid,
+        offline_uuid("Alice"),
+        "l'apparition d'Alice arrive après l'init de Bob"
+    );
+    assert_eq!(alice_seen.entity_type, 159, "type joueur 159");
+    assert_eq!(alice_seen.entity_id, alice_local_id, "même entité qu'Alice");
+    assert_ne!(
+        alice_seen.entity_id, bob_local_id,
+        "l'entité diffère de l'identifiant local de Bob"
+    );
+    assert_eq!(
+        (alice_seen.x, alice_seen.y, alice_seen.z),
+        (0.5, -60.0, 0.5),
+        "position de spawn d'Alice"
+    );
+
+    let (add_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(add_id, 0x47, "Alice reçoit l'ADD_PLAYER de Bob");
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let bob_seen = read_spawn_bundle(&mut alice, &mut buf_a).await;
+    assert_eq!(bob_seen.uuid, offline_uuid("Bob"));
+    assert_eq!(bob_seen.entity_type, 159);
+    assert_eq!(bob_seen.entity_id, bob_local_id);
+    assert_ne!(
+        bob_seen.entity_id, alice_local_id,
+        "l'entité de Bob diffère de l'identifiant local d'Alice"
+    );
+    assert_eq!((bob_seen.x, bob_seen.y, bob_seen.z), (0.5, -60.0, 0.5));
+
+    drop(bob);
+
+    let (remove_id, remove_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(remove_id, 0x4E, "disparition: Remove Entities d'abord");
+    assert_eq!(
+        parse_remove_entities(&remove_body),
+        vec![bob_seen.entity_id]
+    );
+
+    let (info_remove_id, info_remove_body) =
+        read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(info_remove_id, 0x46, "puis Player Info Remove");
+    assert_eq!(
+        parse_player_info_remove(&info_remove_body),
+        vec![offline_uuid("Bob")]
+    );
 }
 
 #[tokio::test]

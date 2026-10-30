@@ -37,6 +37,10 @@ pub mod packet_ids {
         pub const PLAYER_INFO_UPDATE: i32 = 0x47;
         pub const PLAYER_INFO_REMOVE: i32 = 0x46;
         pub const TAB_LIST: i32 = 0x7D;
+        pub const BUNDLE_DELIMITER: i32 = 0x00;
+        pub const ADD_ENTITY: i32 = 0x01;
+        pub const REMOVE_ENTITIES: i32 = 0x4E;
+        pub const SET_ENTITY_DATA: i32 = 0x65;
     }
 
     pub mod serverbound {
@@ -794,6 +798,10 @@ mod tests {
         assert_eq!(packet_ids::clientbound::PLAYER_INFO_UPDATE, 0x47);
         assert_eq!(packet_ids::clientbound::PLAYER_INFO_REMOVE, 0x46);
         assert_eq!(packet_ids::clientbound::TAB_LIST, 0x7D);
+        assert_eq!(packet_ids::clientbound::BUNDLE_DELIMITER, 0x00);
+        assert_eq!(packet_ids::clientbound::ADD_ENTITY, 0x01);
+        assert_eq!(packet_ids::clientbound::REMOVE_ENTITIES, 0x4E);
+        assert_eq!(packet_ids::clientbound::SET_ENTITY_DATA, 0x65);
     }
 
     #[test]

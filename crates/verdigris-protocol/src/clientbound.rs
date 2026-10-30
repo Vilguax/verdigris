@@ -1,5 +1,5 @@
 use crate::framing::{encode_compressed_frame, encode_frame};
-use crate::primitives::{write_string, write_u16};
+use crate::primitives::{write_f64, write_string, write_u16};
 use crate::varint::write_var_int;
 use crate::{MAX_PACKET_LEN, MAX_STRING_LEN};
 
@@ -8,6 +8,64 @@ pub const NBT_TAG_STRING: u8 = 0x08;
 pub const MAX_NBT_STRING_BYTES: usize = u16::MAX as usize;
 pub const SET_COMPRESSION_ID: i32 = 0x03;
 pub const COMPRESSION_THRESHOLD: i32 = 256;
+
+pub const PLAYER_ENTITY_TYPE: i32 = 159;
+
+const ENTITY_DATA_HEALTH_INDEX: u8 = 0x09;
+const ENTITY_DATA_FLOAT_SERIALIZER: u8 = 0x03;
+const ENTITY_DATA_TERMINATOR: u8 = 0xFF;
+const FULL_HEALTH: f32 = 20.0;
+
+pub fn bundle_delimiter_payload() -> Vec<u8> {
+    Vec::new()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn add_entity_payload(
+    entity_id: i32,
+    uuid: u128,
+    entity_type: i32,
+    x: f64,
+    y: f64,
+    z: f64,
+    x_rot: u8,
+    y_rot: u8,
+    y_head_rot: u8,
+    data: i32,
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_var_int(entity_id, &mut payload);
+    payload.extend_from_slice(&uuid.to_be_bytes());
+    write_var_int(entity_type, &mut payload);
+    write_f64(x, &mut payload);
+    write_f64(y, &mut payload);
+    write_f64(z, &mut payload);
+    payload.push(0x00);
+    payload.push(x_rot);
+    payload.push(y_rot);
+    payload.push(y_head_rot);
+    write_var_int(data, &mut payload);
+    payload
+}
+
+pub fn remove_entities_payload(entity_ids: &[i32]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_var_int(entity_ids.len() as i32, &mut payload);
+    for &entity_id in entity_ids {
+        write_var_int(entity_id, &mut payload);
+    }
+    payload
+}
+
+pub fn set_entity_data_health_payload(entity_id: i32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_var_int(entity_id, &mut payload);
+    payload.push(ENTITY_DATA_HEALTH_INDEX);
+    payload.push(ENTITY_DATA_FLOAT_SERIALIZER);
+    payload.extend_from_slice(&FULL_HEALTH.to_be_bytes());
+    payload.push(ENTITY_DATA_TERMINATOR);
+    payload
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodeError {
@@ -168,6 +226,65 @@ fn push_three_byte(code: u32, out: &mut Vec<u8>) {
 mod tests {
     use super::*;
     use crate::primitives::read_string;
+
+    #[test]
+    fn bundle_delimiter_payload_is_empty() {
+        assert!(bundle_delimiter_payload().is_empty());
+        let framed = build_packet(0x00, &bundle_delimiter_payload()).unwrap();
+        assert_eq!(framed, vec![1, 0x00]);
+    }
+
+    #[test]
+    fn add_entity_payload_exact_bytes() {
+        let uuid = u128::from_be_bytes([
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+            0x0E, 0x0F,
+        ]);
+        let payload = add_entity_payload(
+            1,
+            uuid,
+            PLAYER_ENTITY_TYPE,
+            0.5,
+            -60.0,
+            0.5,
+            0x10,
+            0x40,
+            0x40,
+            0,
+        );
+
+        let mut expected = Vec::new();
+        expected.push(0x01);
+        expected.extend_from_slice(&uuid.to_be_bytes());
+        expected.extend_from_slice(&[0x9F, 0x01]);
+        expected.extend_from_slice(&0.5f64.to_be_bytes());
+        expected.extend_from_slice(&(-60.0f64).to_be_bytes());
+        expected.extend_from_slice(&0.5f64.to_be_bytes());
+        expected.push(0x00);
+        expected.push(0x10);
+        expected.push(0x40);
+        expected.push(0x40);
+        expected.push(0x00);
+
+        assert_eq!(payload, expected);
+    }
+
+    #[test]
+    fn remove_entities_payload_single_and_triple() {
+        assert_eq!(remove_entities_payload(&[7]), vec![0x01, 0x07]);
+        assert_eq!(
+            remove_entities_payload(&[1, 2, 3]),
+            vec![0x03, 0x01, 0x02, 0x03]
+        );
+    }
+
+    #[test]
+    fn set_entity_data_payload_encodes_full_health() {
+        assert_eq!(
+            set_entity_data_health_payload(5),
+            vec![0x05, 0x09, 0x03, 0x41, 0xA0, 0x00, 0x00, 0xFF]
+        );
+    }
 
     #[test]
     fn build_packet_frames_id_and_payload() {
