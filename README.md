@@ -11,7 +11,7 @@ Un client 26.3 vanilla :
 - voit le serveur dans sa liste multijoueur (MOTD, version, joueurs, ping) ;
 - se connecte en mode offline, avec compression zlib ;
 - reçoit les 32 registres synchronisés et les tags, puis entre en play ;
-- apparaît sur un monde plat, reçoit ses chunks autour de lui et les voit se charger ou s'oublier quand il se déplace ;
+- apparaît sur un monde au relief vanilla (ou plat selon la configuration), reçoit ses chunks autour de lui et les voit se charger ou s'oublier quand il se déplace ;
 - casse et pose des blocs à portée, avec resynchronisation si le geste est refusé ;
 - utilise la molette (`pick_item_from_block`, 0x24) : l'objet correspondant à l'état du bloc visé est recherché dans l'inventaire principal suivi (36 cases, index 0 à 8 pour la barre, 9 à 35 pour la réserve) ; selon le cas la case choisie change, une occurrence en réserve est échangée, ou l'objet est ajouté en créatif, puis le serveur émet les `container_set_slot` (0x14) utiles dans l'ordre croissant des index avec un compteur d'état par joueur, suivis d'un `set_held_slot` (0x6B) ;
 - met à jour son inventaire en créatif via `set_creative_mode_slot` pour les cases menu 9 à 44 ;
@@ -37,6 +37,21 @@ VERDIGRIS_LOG=debug cargo run --release
 
 Le niveau par défaut est `info`. `debug` liste chaque paquet reçu et émis.
 
+## Génération du monde
+
+Deux générateurs sont disponibles, choisis au démarrage par variables d'environnement :
+
+- `VERDIGRIS_GENERATOR` : `noise` (défaut) pour le relief vanilla 26.3, ou `flat` pour l'ancien monde plat historique. Toute autre valeur refuse le démarrage.
+- `VERDIGRIS_SEED` : graine entière i64 (défaut `20261029`). Une valeur non entière refuse le démarrage.
+
+```sh
+VERDIGRIS_GENERATOR=noise VERDIGRIS_SEED=20261029 cargo run --release
+```
+
+En mode `noise`, un générateur est construit une seule fois par graine et partagé entre toutes les tâches ; `final_density` est évaluée une seule fois en mode volume sur 16 × 384 × 16 blocs par chunk. Un bloc est pierre si la densité finale est strictement positive, sinon lave sous `y = −54`, eau sous `y = 63`, air au-dessus. Le serveur ajoute uniquement la bedrock à `y = −64`, puis dérive heightmaps et lumière du ciel. Le point d'apparition se place au-dessus du plus haut bloc solide de la colonne `(0, 0)`. La génération d'un chunk s'exécute hors des tâches réseau (`spawn_blocking`) et le temps moyen de génération par chunk est journalisé toutes les 30 secondes.
+
+Au premier démarrage d'un dossier de monde, un fichier `level.json` (`{ generator, seed, game_version }`) est écrit à la racine du monde. Aux démarrages suivants, le générateur et la graine demandés doivent correspondre à ceux stockés, sinon le serveur refuse de démarrer avec un message indiquant la valeur stockée et la valeur demandée. `game_version` est informatif et ne bloque pas.
+
 ## Persistance des chunks
 
 Les chunks modifiés (blocs posés ou cassés) sont sauvegardés sur disque dans un format maison versionné, puis rechargés à l'identique au redémarrage.
@@ -54,8 +69,9 @@ Hors périmètre : le format région vanilla `.mca`, les joueurs, les inventaire
 | Chemin | Rôle |
 |---|---|
 | `crates/verdigris-protocol` | Codec et paquets, sans aucune entrée/sortie : VarInt, chaînes, trames compressées, login, configuration |
-| `crates/verdigris-server` | Binaire `verdigris` : réseau tokio, une tâche par connexion, machine à états du protocole |
+| `crates/verdigris-server` | Binaire `verdigris` : réseau tokio, une tâche par connexion, machine à états du protocole, sélection du générateur et `level.json` |
 | `crates/verdigris-bots` | Binaire `verdigris-bots` : générateur de charge, un faux client 26.3 par bot |
+| `crates/verdigris-worldgen` | Génération de relief pure (sans E/S ni tokio) : bruits, fonctions de densité, remplissage de chunk en catégories pierre/eau/lave/air |
 | `crates/verdigris-protocol/data/26.3/network.json` | Registres synchronisés et tags de la 26.3 |
 | `crates/verdigris-protocol/data/26.3/worldgen.json` | Réglages de bruit de l'overworld, fonctions de densité et bruits de la 26.3 |
 | `tools/datagen.py` | Génère `network.json`, `blocks.json` et `worldgen.json` à partir du générateur de données officiel |
@@ -90,6 +106,12 @@ python tools/oracle.py export <monde>/dimensions/minecraft/overworld/region test
 ```
 
 `tests-data/oracle-1a/index.json` décrit le format et liste les chunks.
+
+La porte oracle est le test d'intégration `final_fill_matches_oracle_on_all_chunks` du crate `verdigris-worldgen`. Elle construit le générateur une fois, remplit les 40 chunks et exige l'égalité exacte (solide ⇔ pierre) sur toutes les cases non exclues, avec diagnostic de chunk, position et densité en cas d'écart :
+
+```sh
+cargo test -p verdigris-worldgen --test oracle
+```
 
 ## Mesure de charge
 

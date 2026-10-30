@@ -149,8 +149,9 @@ impl GradientNoise {
         let rx = xx - gx as f64;
         let ry = yy - gy as f64;
         let rz = zz - gz as f64;
+        let lambda = if y >= 0.0 && y < ry { y } else { ry };
         let kappa = if e != 0.0 {
-            (floor_i32(ry / e + C7) as f64) * e
+            (floor_i32(lambda / e + C7) as f64) * e
         } else {
             0.0
         };

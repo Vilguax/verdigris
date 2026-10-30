@@ -8,6 +8,31 @@ l'ordre de produit scalaire déjà présent côté point (§1.4). §1.5 est déc
 bit-identique sauf signe d'un zéro, sans effet sur les vecteurs validés. À
 confronter à l'oracle si un écart apparaît.
 
+## Coins de `interpolated` échantillonnés en mode point (écart oracle)
+La porte oracle 1a a révélé un décalage vertical systématique de la surface
+(~1 à 2 blocs trop bas, écarts de densité jusqu'à ~0,05 près du passage à zéro) :
+l'échantillonnage des coins de cellule en mode volume divergeait de vanilla.
+Vanilla évalue les fonctions de densité aux coins de cellule **point par point**
+(`compute` sur un contexte à point unique), puis interpole. La grille de coins de
+`interpolated` en mode volume (`df::volume::interpolated_unit_volume`) est donc
+désormais remplie via `eval(..., Mode::Point)` à chaque coin, et non plus via une
+passe volume de l'entrée. L'interpolation horizontale (Z puis X) et l'accumulation
+verticale sont inchangées. Ceci confirme que la divergence anticipée en H1 n'était
+pas limitée au signe d'un zéro pour les coordonnées volume à grand `b`.
+
+## Étalement vertical du bruit de gradient (écart oracle)
+La porte oracle 1a a imposé une correction du pas d'étalement `kappa` dans
+`GradientNoise::sample_smeared`. La coordonnée verticale repliée utilisée pour
+quantifier l'étalement est `lambda = if y >= 0.0 && y < ry { y } else { ry }`, et
+non `ry` seul. Vanilla n'applique l'étalement qu'au-dessus de `y = 0` : sous le
+niveau zéro l'étalement doit retomber sur la fraction locale `ry`, et dans la
+bande `0 <= y < ry` c'est `y` lui-même qui pilote la quantification. Sans ce
+garde, la surface divergeait près de `y = 0`. L'argument `fade_y` passé à
+`sample_and_lerp` reste `ry` (interpolation inchangée) ; seul `dyc = ry - kappa`
+est affecté. Comme les coins de `interpolated` (voir section dédiée), c'est une
+divergence tranchée par l'oracle, pas une refonte du moteur : le reste de
+`sample`/`sample_smeared` est identique.
+
 ## Sémantique min / max en mode volume (correction T5)
 Le mode volume sélectionne par comparaison IEEE stricte, pas via `jmin`/`jmax` :
 - `min` non constant : `r = a`, remplacé par `b` seulement si `b < a`.
@@ -55,6 +80,26 @@ pas de `Vec`), donc aucune allocation par appel point.
 `noise_settings/overworld.noise`. Les invariants monde neuf sont figés dans la
 construction des nœuds, sans champ configurable : `beardifier = 0`,
 `blend_alpha = 1`, `blend_offset = 0`, `blend_density(input) = input`.
+
+## Remplissage de chunk en catégories (phase 1a)
+`chunk_fill::WorldGenerator` construit l'arbre `final_density` une fois par graine
+(immuable, partageable derrière `Arc`) et `fill_chunk` évalue `final_density` une
+seule fois en mode volume sur `(16, H, 16)`, origine `(16·cx, min_y, 16·cz)`, pas
+`(1,1,1)`, puis dérive une catégorie par bloc dans un `ChunkTerrain` réutilisable
+(tampon densité et `VolumeContext` réutilisés, aucune allocation par bloc).
+
+Décisions figées, tranchées par l'oracle 1a (`tests/oracle.rs`, 40 chunks,
+graine 20261029) :
+
+- Solide ssi la densité `f32` élargie en `f64` est strictement `> 0`. `+0`, `−0`
+  et `NaN` sont non solides.
+- Règle sans aquifère (`min(−54, sea_level=63) = −54`) : lave si `y < −54`, eau si
+  `y < 63`, air sinon ; appliquée uniquement aux blocs non solides.
+- Catégories exposées : `Stone`, `Water`, `Lava`, `Air`. La conversion en états de
+  bloc et la bedrock à `y = −64` vivent côté serveur, pas dans ce crate pur.
+- Index de `ChunkTerrain` identique à `final_density_chunk` (`j + (lx + 16·lz)·H`,
+  `j = y − min_y`). L'oracle indexe `(y − min_y)·256 + z·16 + x` ; la comparaison
+  fait la correspondance.
 
 ## Vecteurs §5.2 INCERTAINS
 Le test `shift_a_equals_shift_b_5_2_vectors` est conservé en

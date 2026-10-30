@@ -485,7 +485,7 @@ fn eval_interpolated_volume(
         return ev(ctx, input, vol);
     }
     if vol.steps == [1, 1, 1] {
-        return interpolated_unit_volume(ctx, input, w, h, iw, ih, vol);
+        return interpolated_unit_volume(input, w, h, iw, ih, vol);
     }
     let [nx, ny, nz] = vol.sizes;
     let [sx, sy, sz] = vol.steps;
@@ -494,7 +494,7 @@ fn eval_interpolated_volume(
         [1, 1, 1],
         [full_size(nx, sx), full_size(ny, sy), full_size(nz, sz)],
     );
-    let dense = interpolated_unit_volume(ctx, input, w, h, iw, ih, &full)?;
+    let dense = interpolated_unit_volume(input, w, h, iw, ih, &full)?;
     let mut out = vec![0.0f32; vol.len()];
     for k in 0..nz {
         let fk = k.saturating_mul(sz.max(0) as usize);
@@ -511,7 +511,6 @@ fn eval_interpolated_volume(
 
 #[allow(clippy::too_many_arguments)]
 fn interpolated_unit_volume(
-    ctx: &mut VolumeContext,
     input: &Node,
     w: i32,
     h: i32,
@@ -544,7 +543,16 @@ fn interpolated_unit_volume(
         [w, h, w],
         [gx, gy, gz],
     );
-    let corners = ev(ctx, input, &corner_vol)?;
+    let mut corners = vec![0.0f32; corner_vol.len()];
+    for gk in 0..gz {
+        for gi in 0..gx {
+            for gj in 0..gy {
+                let [cxp, cyp, czp] = corner_vol.block_coord(gi, gj, gk);
+                let idx = corner_vol.linear_index(gi, gj, gk);
+                corners[idx] = eval(input, cxp, cyp, czp, Mode::Point);
+            }
+        }
+    }
     let corner = |gi: usize, gj: usize, gk: usize| corners[corner_vol.linear_index(gi, gj, gk)];
 
     let mut out = vec![0.0f32; vol.len()];

@@ -1,4 +1,6 @@
+mod generator;
 mod interaction;
+mod level;
 mod placement;
 mod player;
 mod portal;
@@ -11,6 +13,12 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub use generator::{
+    DEFAULT_SEED, GENERATOR_ENV, GENERATOR_FLAT, GENERATOR_NOISE, GenMetrics, GeneratorKind,
+    GeneratorSetup, NoiseGenerator, SEED_ENV, parse_generator_kind, parse_seed,
+    read_generator_kind, read_seed,
+};
+pub use level::{LEVEL_FILE, LevelConfig, LevelError, ensure as ensure_level, level_path};
 pub use player::{GAMEMODE_ENV, PlayerState, read_gamemode, resolve_gamemode};
 use registry::OutboundSender;
 pub use registry::PlayerRegistry;
@@ -44,6 +52,7 @@ use verdigris_protocol::{
     set_compression_payload, set_held_slot_payload, status_json, status_response_payload,
     tab_list_payload, update_tags_payload, validate_name, write_chunk_payload,
 };
+use verdigris_protocol::{GAME_VERSION, WORLD_MAX_Y, WORLD_MIN_Y, is_air, is_fluid};
 
 pub const DEFAULT_BIND: &str = "0.0.0.0:25565";
 pub const DEFAULT_MOTD: &str = "Verdigris";
@@ -65,7 +74,8 @@ const PLAY_CHUNK_RADIUS: i32 = 8;
 const PLAY_SIMULATION_DISTANCE: i32 = 8;
 const PLAY_MAX_PLAYERS: i32 = 20;
 const PLAY_TELEPORT_ID: i32 = 1;
-const PLAY_SPAWN: [f64; 3] = [0.5, -60.0, 0.5];
+const PLAY_SPAWN_XZ: f64 = 0.5;
+const PLAY_SPAWN_FALLBACK: [f64; 3] = [PLAY_SPAWN_XZ, 0.0, PLAY_SPAWN_XZ];
 const CHUNK_SEND_YIELD_STRIDE: usize = 8;
 pub const REASON_PROTOCOL_ERROR_PREFIX: &str = "Paquet invalide: ";
 pub const REASON_CONNECTION_LOST: &str = "Connexion interrompue";
@@ -77,6 +87,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 const LATENCY_BROADCAST_INTERVAL: Duration = Duration::from_secs(30);
+const GEN_METRICS_INTERVAL: Duration = Duration::from_secs(30);
 const PLAY_THRESHOLD: usize = COMPRESSION_THRESHOLD as usize;
 const READ_CHUNK: usize = 4096;
 const CLOSE_BUDGET: Duration = Duration::from_secs(1);
@@ -318,7 +329,41 @@ fn set_state(state: &mut State, next: State) {
 
 pub async fn serve(bind: &str) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
-    run_with_config(listener, PRODUCTION_KEEP_ALIVE).await
+    let store = Arc::new(ChunkStore::from_env());
+    let kind = read_generator_kind().map_err(std::io::Error::other)?;
+    let seed = read_seed().map_err(std::io::Error::other)?;
+
+    let requested = LevelConfig {
+        generator: kind.as_str().to_owned(),
+        seed,
+        game_version: GAME_VERSION.to_owned(),
+    };
+    ensure_level(store.base(), &requested).map_err(std::io::Error::other)?;
+
+    let setup = GeneratorSetup::build(kind, seed).map_err(std::io::Error::other)?;
+    let metrics = setup.metrics();
+    let generator = setup.into_generator().map_err(std::io::Error::other)?;
+    let loader = DiskLoader::new(Arc::clone(&store));
+    let world = Arc::new(World::with_loader(generator, Box::new(loader)));
+    info!(
+        monde = %store.base().display(),
+        generateur = kind.as_str(),
+        seed,
+        "monde partagé prêt"
+    );
+
+    run_core(
+        listener,
+        PRODUCTION_KEEP_ALIVE,
+        world,
+        store,
+        Arc::new(PlayerRegistry::new(DEFAULT_MOTD, DEFAULT_MAX_PLAYERS)),
+        metrics,
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        },
+    )
+    .await
 }
 
 pub async fn run(listener: TcpListener) -> std::io::Result<()> {
@@ -366,7 +411,7 @@ where
     let loader = DiskLoader::new(Arc::clone(&store));
     let world = Arc::new(World::with_loader(Box::new(generator), Box::new(loader)));
     info!(monde = %store.base().display(), "monde plat partagé prêt");
-    run_core(listener, keep_alive, world, store, players, shutdown).await
+    run_core(listener, keep_alive, world, store, players, None, shutdown).await
 }
 
 pub async fn run_with_registry<F>(
@@ -383,7 +428,7 @@ where
     let loader = DiskLoader::new(Arc::clone(&store));
     let world = Arc::new(World::with_loader(Box::new(generator), Box::new(loader)));
     info!(monde = %store.base().display(), "monde plat partagé prêt");
-    run_core(listener, keep_alive, world, store, players, shutdown).await
+    run_core(listener, keep_alive, world, store, players, None, shutdown).await
 }
 
 pub fn flush_dirty(world: &World, store: &ChunkStore) -> usize {
@@ -408,6 +453,7 @@ async fn run_core<F>(
     world: Arc<World>,
     store: Arc<ChunkStore>,
     players: Arc<PlayerRegistry>,
+    gen_metrics: Option<Arc<GenMetrics>>,
     shutdown: F,
 ) -> std::io::Result<()>
 where
@@ -420,6 +466,9 @@ where
     let mut latency_ticker = interval(LATENCY_BROADCAST_INTERVAL);
     latency_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     latency_ticker.tick().await;
+    let mut gen_ticker = interval(GEN_METRICS_INTERVAL);
+    gen_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    gen_ticker.tick().await;
     tokio::pin!(shutdown);
 
     loop {
@@ -450,6 +499,9 @@ where
             _ = latency_ticker.tick() => {
                 broadcast_latency(&players);
             }
+            _ = gen_ticker.tick() => {
+                log_gen_metrics(gen_metrics.as_deref());
+            }
             _ = &mut shutdown => break,
         }
     }
@@ -457,6 +509,27 @@ where
     info!("arrêt demandé, flush final");
     flush_dirty(&world, &store);
     Ok(())
+}
+
+fn log_gen_metrics(metrics: Option<&GenMetrics>) {
+    let Some(metrics) = metrics else {
+        return;
+    };
+    let (count, nanos) = metrics.take();
+    if count == 0 {
+        info!(
+            fenetre_s = GEN_METRICS_INTERVAL.as_secs(),
+            "génération: aucun chunk sur l'intervalle"
+        );
+        return;
+    }
+    let avg_us = (nanos / count) as f64 / 1000.0;
+    info!(
+        chunks = count,
+        moyenne_ms = avg_us / 1000.0,
+        fenetre_s = GEN_METRICS_INTERVAL.as_secs(),
+        "génération de chunks"
+    );
 }
 
 async fn handle_connection(
@@ -1004,7 +1077,13 @@ async fn enter_play(
         mut player,
         registry,
     } = handoff;
-    player.pos = (PLAY_SPAWN[0], PLAY_SPAWN[1], PLAY_SPAWN[2]);
+    let spawn = {
+        let world = Arc::clone(world);
+        tokio::task::spawn_blocking(move || spawn_position(&world))
+            .await
+            .unwrap_or(PLAY_SPAWN_FALLBACK)
+    };
+    player.pos = (spawn[0], spawn[1], spawn[2]);
     info!(player = %player.name, mode = %player.mode, "entrée en jeu du joueur");
 
     let login = match login_play_payload(
@@ -1042,7 +1121,7 @@ async fn enter_play(
         return;
     }
 
-    let position = player_position_payload(PLAY_TELEPORT_ID, PLAY_SPAWN, [0.0; 3], 0.0, 0.0, 0);
+    let position = player_position_payload(PLAY_TELEPORT_ID, spawn, [0.0; 3], 0.0, 0.0, 0);
     if write_packet(stream, framing, *state, play_cb::PLAYER_POSITION, &position)
         .await
         .is_err()
@@ -1050,9 +1129,9 @@ async fn enter_play(
         return;
     }
     info!(
-        x = PLAY_SPAWN[0],
-        y = PLAY_SPAWN[1],
-        z = PLAY_SPAWN[2],
+        x = spawn[0],
+        y = spawn[1],
+        z = spawn[2],
         teleport_id = PLAY_TELEPORT_ID,
         "position de spawn"
     );
@@ -1065,7 +1144,7 @@ async fn enter_play(
         return;
     }
 
-    let mut view = PlayerView::new(PLAY_SPAWN);
+    let mut view = PlayerView::new(spawn);
     if update_chunks(stream, framing, *state, &mut view, world).await {
         return;
     }
@@ -1145,6 +1224,18 @@ async fn enter_play(
     run_play(stream, framing, state, buf, chunk, keep_alive, rx, session).await;
 }
 
+fn spawn_position(world: &World) -> [f64; 3] {
+    let mut top = WORLD_MIN_Y - 1;
+    for y in (WORLD_MIN_Y..=WORLD_MAX_Y).rev() {
+        let state = world.state_at(0, y, 0) as i32;
+        if !is_air(state) && !is_fluid(state) {
+            top = y;
+            break;
+        }
+    }
+    [PLAY_SPAWN_XZ, f64::from(top + 1), PLAY_SPAWN_XZ]
+}
+
 async fn update_chunks(
     stream: &mut TcpStream,
     framing: &Framing,
@@ -1200,12 +1291,22 @@ async fn update_chunks(
     }
 
     for (sent_count, &(x, z)) in load.iter().enumerate() {
-        let column = world.chunk(x, z);
-        let mut payload = Vec::new();
-        {
+        let world = Arc::clone(world);
+        let payload = match tokio::task::spawn_blocking(move || {
+            let column = world.chunk(x, z);
+            let mut payload = Vec::new();
             let column = column.lock().unwrap();
             write_chunk_payload(x, z, &column, &mut payload);
-        }
+            payload
+        })
+        .await
+        {
+            Ok(payload) => payload,
+            Err(err) => {
+                error!(x, z, erreur = %err, "génération de chunk interrompue");
+                return true;
+            }
+        };
         if write_packet(
             stream,
             framing,
@@ -1748,8 +1849,8 @@ async fn drain(stream: &mut TcpStream, deadline: Instant) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Arc, PLAY_SPAWN, PLAY_THRESHOLD, PlayerRegistry, broadcast_gamemode_change,
-        broadcast_latency, build_env_filter,
+        Arc, PLAY_THRESHOLD, PlayerRegistry, World, broadcast_gamemode_change, broadcast_latency,
+        build_env_filter, spawn_position,
     };
     use tokio::sync::mpsc::unbounded_channel;
     use verdigris_protocol::{
@@ -1766,7 +1867,48 @@ mod tests {
 
     #[test]
     fn spawn_sits_on_the_flat_ground() {
-        assert_eq!(PLAY_SPAWN, [0.5, -60.0, 0.5]);
+        let world = World::flat().unwrap();
+        assert_eq!(spawn_position(&world), [0.5, -60.0, 0.5]);
+    }
+
+    #[test]
+    fn spawn_sits_on_solid_not_on_fluid() {
+        use verdigris_protocol::{
+            ChunkColumn, ChunkGenerator, block_index, default_state_of_name, plains_biome_id,
+        };
+
+        struct OceanGenerator {
+            stone: u16,
+            water: u16,
+            biome: u16,
+        }
+
+        impl ChunkGenerator for OceanGenerator {
+            fn generate(&self, _chunk_x: i32, _chunk_z: i32) -> ChunkColumn {
+                let mut column = ChunkColumn::empty(self.biome);
+                for lz in 0..16usize {
+                    for lx in 0..16usize {
+                        for j in 0..=24usize {
+                            column.sections[j / 16].states[block_index(lx, j % 16, lz)] =
+                                self.stone;
+                        }
+                        for j in 25..=126usize {
+                            column.sections[j / 16].states[block_index(lx, j % 16, lz)] =
+                                self.water;
+                        }
+                    }
+                }
+                column
+            }
+        }
+
+        let generator = OceanGenerator {
+            stone: default_state_of_name("minecraft:stone").unwrap() as u16,
+            water: default_state_of_name("minecraft:water").unwrap() as u16,
+            biome: plains_biome_id().unwrap() as u16,
+        };
+        let world = World::new(Box::new(generator));
+        assert_eq!(spawn_position(&world), [0.5, -39.0, 0.5]);
     }
 
     #[test]
