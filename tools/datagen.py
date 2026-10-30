@@ -100,16 +100,22 @@ def main(generated, server_jar, out):
           f"{len(blocks['fluid_states'])} etats avec fluide, {len(blocks['items'])} objets qui posent un bloc")
 
     worldgen_out = Path(out).parent / "worldgen.json"
-    worldgen = worldgen_doc(data / "worldgen", server_jar)
+    worldgen = worldgen_doc(data / "worldgen", server_jar, generated / "reports")
     worldgen_out.write_text(json.dumps(worldgen, separators=(",", ":"), ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"{worldgen_out}: {len(worldgen['density_function'])} fonctions de densite, "
-          f"{len(worldgen['noise'])} bruits, reglages {sorted(worldgen['noise_settings'])}")
+          f"{len(worldgen['noise'])} bruits, reglages {sorted(worldgen['noise_settings'])}, "
+          f"{len(worldgen['biome_parameters']['entries']['minecraft:overworld'])} points de biomes, "
+          f"{len(worldgen['material_rule'])} regles de materiaux, {len(worldgen['biome'])} biomes")
 
 
 WORLDGEN_SETTINGS = ["overworld"]
 
 
-def worldgen_doc(worldgen, server_jar):
+CLIMATE_ORDER = ["temperature", "humidity", "continentalness", "erosion", "depth", "weirdness", "offset"]
+BIOME_CLIMATE = ["has_precipitation", "temperature", "temperature_modifier", "downfall"]
+
+
+def worldgen_doc(worldgen, server_jar, reports):
     def folder(sub):
         root = worldgen / sub
         return {"minecraft:" + p.relative_to(root).with_suffix("").as_posix(): json.loads(p.read_text(encoding="utf-8"))
@@ -120,7 +126,14 @@ def worldgen_doc(worldgen, server_jar):
         raise SystemExit(f"reglages de bruit absents: {missing}")
     return {"game_version": GAME_VERSION, "server_jar_sha1": hashlib.sha1(Path(server_jar).read_bytes()).hexdigest(),
             "noise_settings": {f"minecraft:{s}": settings[f"minecraft:{s}"] for s in WORLDGEN_SETTINGS},
-            "density_function": folder("density_function"), "noise": folder("noise")}
+            "density_function": folder("density_function"), "noise": folder("noise"),
+            "material_rule": folder("material_rule"),
+            "biome": {k: {f: v[f] for f in BIOME_CLIMATE if f in v} for k, v in folder("biome").items()},
+            "biome_parameters": {"dimensions": CLIMATE_ORDER, "entries": {f"minecraft:{s}": [
+                [b["biome"]] + [b["parameters"][d] for d in CLIMATE_ORDER]
+                for b in json.loads((reports / "biome_parameters" / "minecraft" / f"{s}.json")
+                                    .read_text(encoding="utf-8"))["biomes"]]
+                for s in WORLDGEN_SETTINGS}}}
 
 
 ALWAYS_FLUID = {"minecraft:water", "minecraft:lava", "minecraft:bubble_column", "minecraft:kelp",
