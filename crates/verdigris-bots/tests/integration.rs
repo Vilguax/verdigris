@@ -5,18 +5,26 @@ use tokio::time::timeout;
 
 use verdigris_bots::orchestrator::{Config, run};
 
-async fn spawn_verdigris() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        let _ = verdigris_server::run(listener).await;
+fn spawn_verdigris() -> u16 {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            tx.send(listener.local_addr().unwrap().port()).unwrap();
+            let _ = verdigris_server::run(listener).await;
+        });
     });
-    port
+    rx.recv().unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn twenty_bots_all_reach_play_against_verdigris() {
-    let port = spawn_verdigris().await;
+    let port = spawn_verdigris();
 
     let config = Config {
         host: "127.0.0.1".to_owned(),
