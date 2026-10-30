@@ -124,9 +124,14 @@ pub fn finish_configuration_payload() -> Vec<u8> {
     Vec::new()
 }
 
-pub fn accept_teleportation_payload(teleport_id: i32) -> Vec<u8> {
+pub fn accept_teleportation_payload(position: &PlayerPosition) -> Vec<u8> {
     let mut payload = Vec::new();
-    write_var_int(teleport_id, &mut payload);
+    write_var_int(position.teleport_id, &mut payload);
+    write_f64(position.x, &mut payload);
+    write_f64(position.y, &mut payload);
+    write_f64(position.z, &mut payload);
+    payload.extend_from_slice(&position.yaw.to_be_bytes());
+    payload.extend_from_slice(&position.pitch.to_be_bytes());
     payload
 }
 
@@ -385,13 +390,20 @@ mod tests {
     }
 
     #[test]
-    fn accept_teleportation_is_only_teleport_id() {
-        let payload = accept_teleportation_payload(3);
-        assert_eq!(payload, vec![0x03]);
-        let big = accept_teleportation_payload(300);
-        let mut expected = Vec::new();
-        write_var_int(300, &mut expected);
-        assert_eq!(big, expected);
+    fn accept_teleportation_echoes_position_and_rotation() {
+        let position = PlayerPosition {
+            teleport_id: 300,
+            x: 0.5,
+            y: -60.0,
+            z: 0.5,
+            yaw: 90.0,
+            pitch: -12.5,
+        };
+        let payload = accept_teleportation_payload(&position);
+        let decoded = verdigris_protocol::decode_accept_teleportation(&payload).unwrap();
+        assert_eq!(decoded.teleport_id, 300);
+        assert_eq!((decoded.x, decoded.y, decoded.z), (0.5, -60.0, 0.5));
+        assert_eq!((decoded.yaw, decoded.pitch), (90.0, -12.5));
     }
 
     #[test]

@@ -212,8 +212,12 @@ async fn vanilla_offline_sequence_drives_state_machine() {
 
     let (accept_id, accept_body) = srv.recv_skipping(&[codec::play_sb::CLIENT_TICK_END]).await;
     assert_eq!(accept_id, codec::play_sb::ACCEPT_TELEPORTATION);
-    let (teleport_id, _) = read_var_int(&accept_body).unwrap().unwrap();
-    assert_eq!(teleport_id, 7, "le bot confirme la téléportation reçue");
+    let accept = verdigris_protocol::decode_accept_teleportation(&accept_body)
+        .expect("confirmation au format 26.3");
+    assert_eq!(
+        accept.teleport_id, 7,
+        "le bot confirme la téléportation reçue"
+    );
 
     let (loaded_id, _) = srv.recv_skipping(&[codec::play_sb::CLIENT_TICK_END]).await;
     assert_eq!(loaded_id, codec::play_sb::PLAYER_LOADED);

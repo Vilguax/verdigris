@@ -561,7 +561,7 @@ where
                 if conn
                     .send(
                         codec::play_sb::ACCEPT_TELEPORTATION,
-                        &codec::accept_teleportation_payload(position.teleport_id),
+                        &codec::accept_teleportation_payload(&position),
                         token,
                     )
                     .await
