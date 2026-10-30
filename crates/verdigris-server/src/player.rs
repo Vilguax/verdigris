@@ -1,9 +1,11 @@
 use tracing::warn;
 use verdigris_protocol::{
     AIR_STATE, BlockPos, Direction, GameMode, ItemStack, PickItemFromBlock, PlayerAction,
-    START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, UseItemOn, World, block_item_of_state, state_to_block,
+    START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, UseItemOn, World, block_item_of_state,
+    horizontal_direction, property_of, state_to_block,
 };
 
+use crate::interaction::resolve_interaction;
 use crate::placement::{
     PlaceContext, Placement, SmallPositions, offset, resolve_placement, twin_to_break,
 };
@@ -302,6 +304,52 @@ impl PlayerState {
         }
     }
 
+    fn try_interact(
+        &mut self,
+        world: &World,
+        packet: &UseItemOn,
+        p: BlockPos,
+    ) -> Option<ActionResult> {
+        if packet.hand != 0 || self.mode == GameMode::Spectator || !self.within_reach(p) {
+            return None;
+        }
+        let held = self.inventory.selected_item().map(|slot| slot.item);
+        if self.sneaking && held.is_some() {
+            return None;
+        }
+
+        let state_p = world.state_at(p.x, p.y, p.z) as i32;
+        let other_half = match property_of(state_p, "half") {
+            Some("lower") => Some(world.state_at(p.x, p.y + 1, p.z) as i32),
+            Some("upper") => Some(world.state_at(p.x, p.y - 1, p.z) as i32),
+            _ => None,
+        };
+
+        let outcome = resolve_interaction(
+            state_p,
+            other_half,
+            horizontal_direction(self.yaw),
+            self.mode,
+            held,
+        )?;
+
+        let mut updates = Vec::with_capacity(outcome.changes().len());
+        for &(delta, new_state) in outcome.changes() {
+            let pos = p.offset(delta.x, delta.y, delta.z);
+            world.set_state(pos.x, pos.y, pos.z, new_state as u16);
+            let written = world.state_at(pos.x, pos.y, pos.z) as i32;
+            updates.push((pos, written));
+        }
+        if outcome.consume_eye() && self.mode == GameMode::Survival {
+            self.inventory.consume_one(self.inventory.selected);
+        }
+
+        Some(ActionResult::Respond {
+            updates,
+            ack: packet.sequence,
+        })
+    }
+
     pub fn handle_use_item_on(&mut self, world: &World, packet: UseItemOn) -> ActionResult {
         if packet.sequence < 0 {
             return ActionResult::ProtocolError;
@@ -309,6 +357,10 @@ impl PlayerState {
 
         let p = packet.pos;
         let face = Direction::from_face(packet.face);
+
+        if let Some(result) = self.try_interact(world, &packet, p) {
+            return result;
+        }
 
         let placement = if packet.hand == 0
             && matches!(self.mode, GameMode::Creative | GameMode::Survival)
@@ -1206,5 +1258,91 @@ mod tests {
             property_of(world.state_at(0, -59, 0) as i32, "half"),
             Some("upper")
         );
+    }
+
+    fn closed_door(world: &World) -> (BlockPos, BlockPos) {
+        let door = block_id_of_name("minecraft:oak_door").unwrap();
+        let lower = state_with(door, &[("half", "lower"), ("open", "false")]).unwrap();
+        let upper = state_with(door, &[("half", "upper"), ("open", "false")]).unwrap();
+        world.set_state(0, -60, 0, lower as u16);
+        world.set_state(0, -59, 0, upper as u16);
+        (
+            BlockPos { x: 0, y: -60, z: 0 },
+            BlockPos { x: 0, y: -59, z: 0 },
+        )
+    }
+
+    fn door_open(world: &World) -> Option<&'static str> {
+        property_of(world.state_at(0, -60, 0) as i32, "open")
+    }
+
+    #[test]
+    fn creative_right_click_opens_then_closes_wooden_door() {
+        let world = World::flat().unwrap();
+        let (lower_pos, upper_pos) = closed_door(&world);
+        let mut player = PlayerState::with_inventory(GameMode::Creative, SPAWN, Inventory::new());
+
+        let (updates, ack) = respond(player.handle_use_item_on(&world, use_item(lower_pos, 1, 1)));
+        assert_eq!(updates.len(), 2, "une porte modifie ses deux moities");
+        assert_eq!(ack, 1);
+        let positions: Vec<BlockPos> = updates.iter().map(|(pos, _)| *pos).collect();
+        assert!(positions.contains(&lower_pos) && positions.contains(&upper_pos));
+        assert_eq!(door_open(&world), Some("true"));
+        assert_eq!(
+            property_of(world.state_at(0, -59, 0) as i32, "open"),
+            Some("true"),
+            "les deux moities s'ouvrent"
+        );
+
+        let (updates, _) = respond(player.handle_use_item_on(&world, use_item(upper_pos, 1, 2)));
+        assert_eq!(updates.len(), 2);
+        assert_eq!(door_open(&world), Some("false"));
+        assert_eq!(
+            property_of(world.state_at(0, -59, 0) as i32, "open"),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn sneaking_with_item_skips_interaction() {
+        let world = World::flat().unwrap();
+        let (lower_pos, _) = closed_door(&world);
+        let mut player = player(GameMode::Creative);
+        player.sneaking = true;
+        let _ = respond(player.handle_use_item_on(&world, use_item(lower_pos, 1, 1)));
+        assert_eq!(
+            door_open(&world),
+            Some("false"),
+            "accroupi avec objet: aucune interaction"
+        );
+    }
+
+    #[test]
+    fn spectator_never_interacts() {
+        let world = World::flat().unwrap();
+        let (lower_pos, _) = closed_door(&world);
+        let mut player = PlayerState::with_inventory(GameMode::Spectator, SPAWN, Inventory::new());
+        let _ = respond(player.handle_use_item_on(&world, use_item(lower_pos, 1, 1)));
+        assert_eq!(
+            door_open(&world),
+            Some("false"),
+            "spectateur: aucune interaction"
+        );
+    }
+
+    #[test]
+    fn empty_hand_opens_wooden_door_without_sneak_guard() {
+        let world = World::flat().unwrap();
+        let (lower_pos, _) = closed_door(&world);
+        let mut player = player(GameMode::Creative);
+        player.sneaking = true;
+        player.inventory = Inventory::new();
+        let (updates, _) = respond(player.handle_use_item_on(&world, use_item(lower_pos, 1, 1)));
+        assert_eq!(
+            updates.len(),
+            2,
+            "accroupi mais mains vides: interaction permise"
+        );
+        assert_eq!(door_open(&world), Some("true"));
     }
 }

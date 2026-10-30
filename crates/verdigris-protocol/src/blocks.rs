@@ -35,6 +35,8 @@ pub struct BlocksData {
     pub blocks: Vec<Block>,
     pub fluid_states: Vec<i32>,
     pub items: Vec<ItemState>,
+    #[serde(default)]
+    pub item_ids: HashMap<String, i32>,
 }
 
 pub struct Blocks {
@@ -206,6 +208,10 @@ pub fn block_id_of_name(name: &str) -> Option<i32> {
         .map(|&index| handle.data.blocks[index].id)
 }
 
+pub fn item_id_of_name(name: &str) -> Option<i32> {
+    blocks().data.item_ids.get(name).copied()
+}
+
 pub fn is_air(state: i32) -> bool {
     if state == 0 {
         return true;
@@ -276,6 +282,12 @@ mod tests {
         assert_eq!(block_id_of_name("minecraft:stone"), Some(1));
         assert_eq!(block_id_of_name("minecraft:oak_door"), Some(265));
         assert_eq!(block_id_of_name("minecraft:not_a_block"), None);
+    }
+
+    #[test]
+    fn item_ids_resolve_from_name() {
+        assert_eq!(item_id_of_name("minecraft:ender_eye"), Some(1278));
+        assert_eq!(item_id_of_name("minecraft:not_an_item"), None);
     }
 
     #[test]

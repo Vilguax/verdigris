@@ -1,3 +1,4 @@
+mod interaction;
 mod placement;
 mod player;
 mod registry;
