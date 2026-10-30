@@ -71,8 +71,26 @@ pub fn eval(node: &Node, x: i32, y: i32, z: i32, mode: Mode) -> f32 {
                 if b > a { b } else { a }
             }
         }
-        Node::MinConst { input, constant } => jmin_f32(eval(input, x, y, z, mode), *constant),
-        Node::MaxConst { input, constant } => jmax_f32(eval(input, x, y, z, mode), *constant),
+        Node::MinConst { input, constant } => {
+            let a = eval(input, x, y, z, mode);
+            if mode == Mode::Point {
+                jmin_f32(a, *constant)
+            } else if *constant < a {
+                *constant
+            } else {
+                a
+            }
+        }
+        Node::MaxConst { input, constant } => {
+            let a = eval(input, x, y, z, mode);
+            if mode == Mode::Point {
+                jmax_f32(a, *constant)
+            } else if *constant > a {
+                *constant
+            } else {
+                a
+            }
+        }
         Node::Abs(a) => jabs_f32(eval(a, x, y, z, mode)),
         Node::Square(a) => {
             let v = eval(a, x, y, z, mode);
