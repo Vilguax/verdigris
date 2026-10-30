@@ -1,12 +1,21 @@
 use std::sync::OnceLock;
 
 use crate::blocks::{
-    blocks_data, default_state_of_name, is_air, is_fluid, item_to_placed_state, property_of,
-    state_to_block,
+    block_id_of_name, blocks_data, default_state_of_name, is_air, is_fluid, item_to_placed_state,
+    property_of, state_to_block,
 };
 use crate::network::network_data;
 
 pub const BLOCK_REGISTRY: &str = "minecraft:block";
+
+pub const TALL_PLANTS: [&str; 6] = [
+    "minecraft:tall_grass",
+    "minecraft:large_fern",
+    "minecraft:sunflower",
+    "minecraft:lilac",
+    "minecraft:rose_bush",
+    "minecraft:peony",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SixFacingKind {
@@ -30,6 +39,14 @@ pub enum SlabType {
     Double,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementKind {
+    Door,
+    Bed,
+    TallPlant,
+    Simple,
+}
+
 struct Tables {
     stair_block: Box<[bool]>,
     slab_block: Box<[bool]>,
@@ -37,6 +54,10 @@ struct Tables {
     horiz_facing: Box<[Option<HorizFacingKind>]>,
     full_block: Box<[bool]>,
     replaceable_state: Box<[bool]>,
+    door_block: Box<[bool]>,
+    bed_block: Box<[bool]>,
+    tall_plant_block: Box<[bool]>,
+    item_kind: Box<[PlacementKind]>,
     water_source: i32,
 }
 
@@ -181,6 +202,40 @@ fn build_tables() -> Tables {
         }
     }
 
+    let door_block = tag_block_table("minecraft:doors", id_len);
+    let bed_block = tag_block_table("minecraft:beds", id_len);
+    let mut tall_plant_block = vec![false; id_len].into_boxed_slice();
+    for name in TALL_PLANTS {
+        if let Some(block_id) = block_id_of_name(name)
+            && let Ok(index) = usize::try_from(block_id)
+            && index < id_len
+        {
+            tall_plant_block[index] = true;
+        }
+    }
+
+    let item_len = data
+        .items
+        .iter()
+        .map(|entry| entry.item)
+        .max()
+        .unwrap_or(-1) as usize
+        + 1;
+    let mut item_kind = vec![PlacementKind::Simple; item_len].into_boxed_slice();
+    for entry in &data.items {
+        let kind = classify_placement(
+            state_to_block(entry.state).id,
+            &door_block,
+            &bed_block,
+            &tall_plant_block,
+        );
+        if let Ok(index) = usize::try_from(entry.item)
+            && index < item_len
+        {
+            item_kind[index] = kind;
+        }
+    }
+
     let water_source = default_state_of_name("minecraft:water").unwrap_or(-1);
 
     Tables {
@@ -190,7 +245,28 @@ fn build_tables() -> Tables {
         horiz_facing,
         full_block,
         replaceable_state,
+        door_block,
+        bed_block,
+        tall_plant_block,
+        item_kind,
         water_source,
+    }
+}
+
+fn classify_placement(
+    block_id: i32,
+    door_block: &[bool],
+    bed_block: &[bool],
+    tall_plant_block: &[bool],
+) -> PlacementKind {
+    if by_block_id(door_block, block_id, false) {
+        PlacementKind::Door
+    } else if by_block_id(bed_block, block_id, false) {
+        PlacementKind::Bed
+    } else if by_block_id(tall_plant_block, block_id, false) {
+        PlacementKind::TallPlant
+    } else {
+        PlacementKind::Simple
     }
 }
 
@@ -249,6 +325,23 @@ pub fn slab_block_of_item(item: i32) -> Option<i32> {
     let state = item_to_placed_state(item)?;
     let id = state_to_block(state).id;
     if is_slab_block(id) { Some(id) } else { None }
+}
+
+pub fn placement_kind_of_item(item: i32) -> PlacementKind {
+    usize::try_from(item)
+        .ok()
+        .and_then(|index| tables().item_kind.get(index).copied())
+        .unwrap_or(PlacementKind::Simple)
+}
+
+pub fn placement_kind_of_block(block_id: i32) -> PlacementKind {
+    let tables = tables();
+    classify_placement(
+        block_id,
+        &tables.door_block,
+        &tables.bed_block,
+        &tables.tall_plant_block,
+    )
 }
 
 #[cfg(test)]
@@ -373,5 +466,55 @@ mod tests {
             water_source_state(),
             default_state_of_name("minecraft:water").unwrap()
         );
+    }
+
+    fn item_of(name: &str) -> i32 {
+        let state = default_state_of_name(name).unwrap();
+        crate::blocks::block_item_of_state(state).unwrap()
+    }
+
+    #[test]
+    fn placement_kind_classifies_families() {
+        assert_eq!(
+            placement_kind_of_item(item_of("minecraft:oak_door")),
+            PlacementKind::Door
+        );
+        assert_eq!(
+            placement_kind_of_item(item_of("minecraft:white_bed")),
+            PlacementKind::Bed
+        );
+        assert_eq!(
+            placement_kind_of_item(item_of("minecraft:sunflower")),
+            PlacementKind::TallPlant
+        );
+        assert_eq!(
+            placement_kind_of_item(item_of("minecraft:tall_grass")),
+            PlacementKind::TallPlant
+        );
+        assert_eq!(
+            placement_kind_of_item(item_of("minecraft:dirt")),
+            PlacementKind::Simple
+        );
+    }
+
+    #[test]
+    fn placement_kind_from_block_matches_families() {
+        assert_eq!(
+            placement_kind_of_block(block_id("minecraft:oak_door")),
+            PlacementKind::Door
+        );
+        assert_eq!(
+            placement_kind_of_block(block_id("minecraft:white_bed")),
+            PlacementKind::Bed
+        );
+        assert_eq!(
+            placement_kind_of_block(block_id("minecraft:peony")),
+            PlacementKind::TallPlant
+        );
+        assert_eq!(
+            placement_kind_of_block(block_id("minecraft:stone")),
+            PlacementKind::Simple
+        );
+        assert_eq!(placement_kind_of_block(-1), PlacementKind::Simple);
     }
 }

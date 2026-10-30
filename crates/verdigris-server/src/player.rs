@@ -4,7 +4,9 @@ use verdigris_protocol::{
     START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, UseItemOn, World, block_item_of_state, state_to_block,
 };
 
-use crate::placement::{PlaceContext, Placement, SmallPositions, offset, resolve_placement};
+use crate::placement::{
+    PlaceContext, Placement, SmallPositions, offset, resolve_placement, twin_to_break,
+};
 
 pub const GAMEMODE_ENV: &str = "VERDIGRIS_GAMEMODE";
 
@@ -278,11 +280,20 @@ impl PlayerState {
             let in_reach = self.within_reach(action.pos);
             let state = world.state_at(action.pos.x, action.pos.y, action.pos.z);
             let breakable = in_reach && (self.mode == GameMode::Creative || !is_bedrock(state));
+            let mut twin = None;
             if breakable {
                 world.set_state(action.pos.x, action.pos.y, action.pos.z, AIR_STATE);
+                if let Some(twin_pos) = twin_to_break(world, action.pos, state) {
+                    world.set_state(twin_pos.x, twin_pos.y, twin_pos.z, AIR_STATE);
+                    twin = Some(twin_pos);
+                }
             }
             let resync = world.state_at(action.pos.x, action.pos.y, action.pos.z);
             updates.push((action.pos, resync as i32));
+            if let Some(twin_pos) = twin {
+                let twin_state = world.state_at(twin_pos.x, twin_pos.y, twin_pos.z);
+                updates.push((twin_pos, twin_state as i32));
+            }
         }
 
         ActionResult::Respond {
@@ -329,6 +340,15 @@ impl PlayerState {
                 resync,
             } => {
                 world.set_state(write.x, write.y, write.z, state as u16);
+                if self.mode == GameMode::Survival {
+                    self.inventory.consume_one(self.inventory.selected);
+                }
+                resync
+            }
+            Placement::PlacePair { writes, resync } => {
+                for (pos, state) in writes {
+                    world.set_state(pos.x, pos.y, pos.z, state as u16);
+                }
                 if self.mode == GameMode::Survival {
                     self.inventory.consume_one(self.inventory.selected);
                 }
@@ -405,6 +425,7 @@ impl PlayerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verdigris_protocol::{block_id_of_name, default_state_of_name, property_of, state_with};
 
     #[test]
     fn absent_env_is_creative() {
@@ -1072,5 +1093,118 @@ mod tests {
         assert_eq!(player.next_container_state_id(), 1);
         assert_eq!(player.next_container_state_id(), 2);
         assert_eq!(player.next_container_state_id(), 3);
+    }
+
+    fn door_halves() -> (i32, i32, i32) {
+        let door = block_id_of_name("minecraft:oak_door").unwrap();
+        let lower = state_with(door, &[("half", "lower")]).unwrap();
+        let upper = state_with(door, &[("half", "upper")]).unwrap();
+        (door, lower, upper)
+    }
+
+    #[test]
+    fn breaking_door_removes_both_halves_from_below() {
+        let world = World::flat().unwrap();
+        let (_, lower, upper) = door_halves();
+        world.set_state(0, -60, 0, lower as u16);
+        world.set_state(0, -59, 0, upper as u16);
+        let mut player = player(GameMode::Creative);
+        let lower_pos = BlockPos { x: 0, y: -60, z: 0 };
+        let upper_pos = BlockPos { x: 0, y: -59, z: 0 };
+        let (updates, ack) = respond(player.handle_player_action(&world, action(0, lower_pos, 4)));
+        assert_eq!(updates, vec![(lower_pos, 0), (upper_pos, 0)]);
+        assert_eq!(ack, 4);
+        assert_eq!(world.state_at(0, -60, 0), 0);
+        assert_eq!(world.state_at(0, -59, 0), 0);
+    }
+
+    #[test]
+    fn breaking_door_removes_both_halves_from_above() {
+        let world = World::flat().unwrap();
+        let (_, lower, upper) = door_halves();
+        world.set_state(0, -60, 0, lower as u16);
+        world.set_state(0, -59, 0, upper as u16);
+        let mut player = player(GameMode::Creative);
+        let lower_pos = BlockPos { x: 0, y: -60, z: 0 };
+        let upper_pos = BlockPos { x: 0, y: -59, z: 0 };
+        let (updates, _) = respond(player.handle_player_action(&world, action(0, upper_pos, 1)));
+        assert_eq!(updates, vec![(upper_pos, 0), (lower_pos, 0)]);
+        assert_eq!(world.state_at(0, -60, 0), 0);
+        assert_eq!(world.state_at(0, -59, 0), 0);
+    }
+
+    #[test]
+    fn breaking_bed_removes_both_parts() {
+        let world = World::flat().unwrap();
+        let bed = block_id_of_name("minecraft:white_bed").unwrap();
+        let foot = state_with(bed, &[("facing", "south"), ("part", "foot")]).unwrap();
+        let head = state_with(bed, &[("facing", "south"), ("part", "head")]).unwrap();
+        world.set_state(0, -60, 0, foot as u16);
+        world.set_state(0, -60, 1, head as u16);
+        let mut player = player(GameMode::Creative);
+        let foot_pos = BlockPos { x: 0, y: -60, z: 0 };
+        let head_pos = BlockPos { x: 0, y: -60, z: 1 };
+        let (updates, _) = respond(player.handle_player_action(&world, action(0, head_pos, 1)));
+        assert_eq!(updates, vec![(head_pos, 0), (foot_pos, 0)]);
+        assert_eq!(world.state_at(0, -60, 0), 0);
+        assert_eq!(world.state_at(0, -60, 1), 0);
+    }
+
+    #[test]
+    fn breaking_tall_plant_removes_both_halves() {
+        let world = World::flat().unwrap();
+        let plant = block_id_of_name("minecraft:tall_grass").unwrap();
+        let lower = state_with(plant, &[("half", "lower")]).unwrap();
+        let upper = state_with(plant, &[("half", "upper")]).unwrap();
+        world.set_state(0, -60, 0, lower as u16);
+        world.set_state(0, -59, 0, upper as u16);
+        let mut player = player(GameMode::Creative);
+        let lower_pos = BlockPos { x: 0, y: -60, z: 0 };
+        let upper_pos = BlockPos { x: 0, y: -59, z: 0 };
+        let (updates, _) = respond(player.handle_player_action(&world, action(0, lower_pos, 1)));
+        assert_eq!(updates, vec![(lower_pos, 0), (upper_pos, 0)]);
+    }
+
+    #[test]
+    fn breaking_lonely_half_leaves_twin_untouched() {
+        let world = World::flat().unwrap();
+        let (_, lower, _) = door_halves();
+        world.set_state(0, -60, 0, lower as u16);
+        world.set_state(0, -59, 0, lower as u16);
+        let mut player = player(GameMode::Creative);
+        let lower_pos = BlockPos { x: 0, y: -60, z: 0 };
+        let (updates, _) = respond(player.handle_player_action(&world, action(0, lower_pos, 1)));
+        assert_eq!(updates, vec![(lower_pos, 0)], "jumeau incoherent non casse");
+        assert_eq!(world.state_at(0, -59, 0), lower as u16);
+    }
+
+    #[test]
+    fn survival_door_consumes_a_single_item() {
+        let world = World::flat().unwrap();
+        let (door, _, _) = door_halves();
+        let door_item = block_item_of_state(default_state_of_name("minecraft:oak_door").unwrap())
+            .expect("objet porte");
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = Some(ItemSlot {
+            item: door_item,
+            count: 2,
+        });
+        let mut player = PlayerState::with_inventory(GameMode::Survival, SPAWN, inventory);
+        let ground = BlockPos { x: 0, y: -61, z: 0 };
+        let (updates, _) = respond(player.handle_use_item_on(&world, use_item(ground, 1, 1)));
+        assert_eq!(updates.len(), 2, "deux block_update pour les deux moities");
+        assert_eq!(
+            player.inventory.selected_item(),
+            Some(ItemSlot {
+                item: door_item,
+                count: 1
+            }),
+            "une paire consomme exactement un objet"
+        );
+        assert_eq!(state_to_block(world.state_at(0, -60, 0) as i32).id, door);
+        assert_eq!(
+            property_of(world.state_at(0, -59, 0) as i32, "half"),
+            Some("upper")
+        );
     }
 }

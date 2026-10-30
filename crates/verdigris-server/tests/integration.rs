@@ -873,6 +873,79 @@ async fn place_then_break_dirt_over_tcp() {
 }
 
 #[tokio::test]
+async fn place_then_break_door_by_top_over_tcp() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    let door_item =
+        block_item_of_state(default_state_of_name("minecraft:oak_door").unwrap()).unwrap();
+    client
+        .write_all(&compressed_set_creative_mode_slot_frame(36, door_item, 1))
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_set_carried_item_frame(0))
+        .await
+        .unwrap();
+
+    let ground = BlockPos { x: 0, y: -61, z: 0 };
+    let lower = BlockPos { x: 0, y: -60, z: 0 };
+    let upper = BlockPos { x: 0, y: -59, z: 0 };
+
+    client
+        .write_all(&compressed_use_item_on_frame(ground, 1, 1))
+        .await
+        .unwrap();
+
+    let (update_id, update_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(update_id, 0x08, "pose porte: moitie basse");
+    let (pos, state) = read_block_update(&update_body);
+    assert_eq!(pos, lower);
+    assert_eq!(property_of(state, "half"), Some("lower"));
+    assert_eq!(property_of(state, "facing"), Some("south"));
+    assert_eq!(property_of(state, "open"), Some("false"));
+    assert_eq!(property_of(state, "powered"), Some("false"));
+
+    let (update_id, update_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(update_id, 0x08, "pose porte: moitie haute");
+    let (pos, state) = read_block_update(&update_body);
+    assert_eq!(pos, upper);
+    assert_eq!(property_of(state, "half"), Some("upper"));
+    assert_eq!(property_of(state, "facing"), Some("south"));
+
+    let (ack_id, ack_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(ack_id, 0x04, "pose porte: Block Changed Ack");
+    let (sequence, _) = read_var_int(&ack_body).unwrap().unwrap();
+    assert_eq!(sequence, 1);
+
+    client
+        .write_all(&compressed_player_action_frame(0, upper, 1, 2))
+        .await
+        .unwrap();
+
+    let (update_id, update_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(update_id, 0x08, "casse par le haut: moitie haute en air");
+    let (pos, state) = read_block_update(&update_body);
+    assert_eq!(pos, upper);
+    assert_eq!(state, 0);
+
+    let (update_id, update_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(update_id, 0x08, "casse par le haut: moitie basse en air");
+    let (pos, state) = read_block_update(&update_body);
+    assert_eq!(pos, lower);
+    assert_eq!(state, 0);
+
+    let (ack_id, ack_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(ack_id, 0x04, "casse porte: Block Changed Ack");
+    let (sequence, _) = read_var_int(&ack_body).unwrap().unwrap();
+    assert_eq!(sequence, 2);
+}
+
+#[tokio::test]
 async fn place_oriented_stairs_over_tcp() {
     let addr = spawn_server().await;
     let mut client = TcpStream::connect(addr).await.unwrap();
