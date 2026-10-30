@@ -1,5 +1,5 @@
 use crate::framing::{encode_compressed_frame, encode_frame};
-use crate::primitives::{write_f64, write_string, write_u16};
+use crate::primitives::{write_f32, write_f64, write_i16, write_string, write_u16};
 use crate::varint::write_var_int;
 use crate::{MAX_PACKET_LEN, MAX_STRING_LEN};
 
@@ -46,6 +46,89 @@ pub fn add_entity_payload(
     payload.push(y_head_rot);
     write_var_int(data, &mut payload);
     payload
+}
+
+pub const MOVE_ENTITY_POS_ID: i32 = 0x36;
+pub const MOVE_ENTITY_POS_ROT_ID: i32 = 0x37;
+pub const MOVE_ENTITY_ROT_ID: i32 = 0x39;
+pub const ENTITY_POSITION_SYNC_ID: i32 = 0x23;
+pub const ROTATE_HEAD_ID: i32 = 0x55;
+
+pub fn move_entity_pos(
+    entity_id: i32,
+    dx: i16,
+    dy: i16,
+    dz: i16,
+    on_ground: bool,
+    out: &mut Vec<u8>,
+) {
+    write_var_int(MOVE_ENTITY_POS_ID, out);
+    write_var_int(entity_id, out);
+    write_var_int(movement_props(on_ground), out);
+    write_i16(dx, out);
+    write_i16(dy, out);
+    write_i16(dz, out);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn move_entity_pos_rot(
+    entity_id: i32,
+    dx: i16,
+    dy: i16,
+    dz: i16,
+    y_rot: u8,
+    x_rot: u8,
+    on_ground: bool,
+    out: &mut Vec<u8>,
+) {
+    write_var_int(MOVE_ENTITY_POS_ROT_ID, out);
+    write_var_int(entity_id, out);
+    write_var_int(movement_props(on_ground), out);
+    write_i16(dx, out);
+    write_i16(dy, out);
+    write_i16(dz, out);
+    out.push(y_rot);
+    out.push(x_rot);
+}
+
+pub fn move_entity_rot(entity_id: i32, on_ground: bool, y_rot: u8, x_rot: u8, out: &mut Vec<u8>) {
+    write_var_int(MOVE_ENTITY_ROT_ID, out);
+    write_var_int(entity_id, out);
+    out.push(u8::from(on_ground));
+    out.push(y_rot);
+    out.push(x_rot);
+}
+
+pub fn rotate_head(entity_id: i32, y_head_rot: u8, out: &mut Vec<u8>) {
+    write_var_int(ROTATE_HEAD_ID, out);
+    write_var_int(entity_id, out);
+    out.push(y_head_rot);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn entity_position_sync(
+    entity_id: i32,
+    x: f64,
+    y: f64,
+    z: f64,
+    y_rot: f32,
+    x_rot: f32,
+    on_ground: bool,
+    out: &mut Vec<u8>,
+) {
+    write_var_int(ENTITY_POSITION_SYNC_ID, out);
+    write_var_int(entity_id, out);
+    write_var_int(0, out);
+    write_f64(x, out);
+    write_f64(y, out);
+    write_f64(z, out);
+    write_f32(y_rot, out);
+    write_f32(x_rot, out);
+    out.push(u8::from(on_ground));
+}
+
+fn movement_props(on_ground: bool) -> i32 {
+    i32::from(on_ground)
 }
 
 pub fn remove_entities_payload(entity_ids: &[i32]) -> Vec<u8> {
@@ -267,6 +350,58 @@ mod tests {
         expected.push(0x00);
 
         assert_eq!(payload, expected);
+    }
+
+    #[test]
+    fn move_entity_pos_exact_bytes() {
+        let mut out = Vec::new();
+        move_entity_pos(42, 4096, 0, 0, true, &mut out);
+        assert_eq!(
+            out,
+            vec![0x36, 0x2A, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn move_entity_pos_rot_order_yrot_then_xrot() {
+        let mut out = Vec::new();
+        move_entity_pos_rot(42, 4096, 0, 0, 0x40, 0xC0, false, &mut out);
+        assert_eq!(
+            out,
+            vec![
+                0x37, 0x2A, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0xC0
+            ]
+        );
+    }
+
+    #[test]
+    fn move_entity_rot_on_ground_then_angles() {
+        let mut out = Vec::new();
+        move_entity_rot(42, true, 0x40, 0xC0, &mut out);
+        assert_eq!(out, vec![0x39, 0x2A, 0x01, 0x40, 0xC0]);
+    }
+
+    #[test]
+    fn rotate_head_exact_bytes() {
+        let mut out = Vec::new();
+        rotate_head(42, 0x80, &mut out);
+        assert_eq!(out, vec![0x55, 0x2A, 0x80]);
+    }
+
+    #[test]
+    fn entity_position_sync_exact_bytes() {
+        let mut out = Vec::new();
+        entity_position_sync(42, 0.5, -60.0, 0.5, 90.0, -45.0, true, &mut out);
+
+        let mut expected = vec![0x23, 0x2A, 0x00];
+        expected.extend_from_slice(&0.5f64.to_be_bytes());
+        expected.extend_from_slice(&(-60.0f64).to_be_bytes());
+        expected.extend_from_slice(&0.5f64.to_be_bytes());
+        expected.extend_from_slice(&90.0f32.to_be_bytes());
+        expected.extend_from_slice(&(-45.0f32).to_be_bytes());
+        expected.push(0x01);
+
+        assert_eq!(out, expected);
     }
 
     #[test]

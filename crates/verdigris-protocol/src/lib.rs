@@ -19,6 +19,7 @@ pub mod playerlist;
 pub mod portal_tables;
 pub mod primitives;
 pub mod status;
+pub mod tracking;
 pub mod varint;
 pub mod view;
 pub mod world;
@@ -58,10 +59,12 @@ pub use chunk::{
 };
 pub use chunkfile::{ChunkFileError, decode_chunk, encode_chunk};
 pub use clientbound::{
-    COMPRESSION_THRESHOLD, EncodeError, MAX_NBT_STRING_BYTES, MAX_OUTBOUND_PACKET_LEN,
-    NBT_TAG_STRING, PLAYER_ENTITY_TYPE, SET_COMPRESSION_ID, add_entity_payload,
+    COMPRESSION_THRESHOLD, ENTITY_POSITION_SYNC_ID, EncodeError, MAX_NBT_STRING_BYTES,
+    MAX_OUTBOUND_PACKET_LEN, MOVE_ENTITY_POS_ID, MOVE_ENTITY_POS_ROT_ID, MOVE_ENTITY_ROT_ID,
+    NBT_TAG_STRING, PLAYER_ENTITY_TYPE, ROTATE_HEAD_ID, SET_COMPRESSION_ID, add_entity_payload,
     build_compressed_packet, build_packet, bundle_delimiter_payload, config_disconnect_payload,
-    login_disconnect_payload, remove_entities_payload, set_compression_payload,
+    entity_position_sync, login_disconnect_payload, move_entity_pos, move_entity_pos_rot,
+    move_entity_rot, remove_entities_payload, rotate_head, set_compression_payload,
     set_entity_data_health_payload, text_component_nbt,
 };
 pub use config::{
@@ -119,12 +122,16 @@ pub use portal_tables::{
     frame_block_id, is_filled_frame, is_frame_facing,
 };
 pub use primitives::{
-    read_f32, read_f64, read_i32, read_i64, read_string, read_u16, write_f32, write_f64, write_i32,
-    write_i64, write_string, write_u16,
+    fits_i16, pack_degrees, quantize, read_f32, read_f64, read_i16, read_i32, read_i64,
+    read_string, read_u16, write_f32, write_f64, write_i16, write_i32, write_i64, write_string,
+    write_u16,
 };
 pub use status::{
     StatusInfo, encode_pong, encode_status_response, pong_payload, status_json,
     status_response_payload,
+};
+pub use tracking::{
+    EntitySnapshot, FORCE_SYNC_TICKS, MAX_TELEPORT_DELAY, POSITION_EPSILON_SQ, TrackedState,
 };
 pub use varint::{read_var_int, read_var_long, write_var_int, write_var_long};
 pub use view::{
