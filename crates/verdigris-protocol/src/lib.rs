@@ -59,9 +59,10 @@ pub use chunk::{
 pub use chunkfile::{ChunkFileError, decode_chunk, encode_chunk};
 pub use clientbound::{
     COMPRESSION_THRESHOLD, EncodeError, MAX_NBT_STRING_BYTES, MAX_OUTBOUND_PACKET_LEN,
-    NBT_TAG_STRING, SET_COMPRESSION_ID, build_compressed_packet, build_packet,
-    config_disconnect_payload, login_disconnect_payload, set_compression_payload,
-    text_component_nbt,
+    NBT_TAG_STRING, PLAYER_ENTITY_TYPE, SET_COMPRESSION_ID, add_entity_payload,
+    build_compressed_packet, build_packet, bundle_delimiter_payload, config_disconnect_payload,
+    login_disconnect_payload, remove_entities_payload, set_compression_payload,
+    set_entity_data_health_payload, text_component_nbt,
 };
 pub use config::{
     MAX_KNOWN_PACKS, client_has_core, decode_known_packs, known_packs_payload, packet_ids,
@@ -82,8 +83,8 @@ pub use login::{
     InvalidName, login_success_payload, offline_uuid, random_session_id, validate_name,
 };
 pub use mth::{
-    Direction, cos, horizontal_direction, nearest_looking_direction, nearest_looking_directions,
-    sin,
+    Angle, Direction, cos, horizontal_direction, nearest_looking_direction,
+    nearest_looking_directions, sin, wrap_degrees,
 };
 pub use network::{KnownPack, NetworkData, Registry, Source, TagEntry, TagRegistry, network_data};
 pub use packets::{Handshake, Intent, Serverbound, decode_serverbound};

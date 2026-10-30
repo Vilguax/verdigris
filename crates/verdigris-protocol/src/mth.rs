@@ -79,6 +79,26 @@ impl Direction {
     }
 }
 
+pub fn wrap_degrees(degrees: f64) -> f64 {
+    let mut value = degrees % 360.0;
+    if value >= 180.0 {
+        value -= 360.0;
+    }
+    if value < -180.0 {
+        value += 360.0;
+    }
+    value
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Angle;
+
+impl Angle {
+    pub fn from_degrees(degrees: f64) -> u8 {
+        ((wrap_degrees(degrees) * 256.0 / 360.0).floor() as i32) as u8
+    }
+}
+
 const SIN_SCALE: f32 = 10430.378;
 
 fn sin_table() -> &'static [f32; 65536] {
@@ -173,6 +193,29 @@ pub fn nearest_looking_direction(yaw: f32, pitch: f32) -> Direction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn angle_from_cardinal_degrees() {
+        assert_eq!(Angle::from_degrees(0.0), 0);
+        assert_eq!(Angle::from_degrees(90.0), 64);
+        assert_eq!(Angle::from_degrees(-90.0), 192);
+        assert_eq!(Angle::from_degrees(180.0), 128);
+    }
+
+    #[test]
+    fn angle_wraps_before_encoding() {
+        assert_eq!(Angle::from_degrees(360.0), Angle::from_degrees(0.0));
+        assert_eq!(Angle::from_degrees(450.0), Angle::from_degrees(90.0));
+        assert_eq!(Angle::from_degrees(-270.0), Angle::from_degrees(90.0));
+    }
+
+    #[test]
+    fn wrap_degrees_normalises_to_half_open_range() {
+        assert_eq!(wrap_degrees(0.0), 0.0);
+        assert_eq!(wrap_degrees(180.0), -180.0);
+        assert_eq!(wrap_degrees(-180.0), -180.0);
+        assert_eq!(wrap_degrees(540.0), -180.0);
+    }
 
     #[test]
     fn sin_table_anchors() {
