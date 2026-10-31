@@ -46,10 +46,16 @@ pub mod packet_ids {
         pub const SET_EQUIPMENT: i32 = 0x68;
         pub const SWING_ANIMATION: i32 = 0x7B;
         pub const SYSTEM_CHAT: i32 = 0x7C;
+        pub const PLAYER_CHAT: i32 = 0x42;
     }
 
     pub mod serverbound {
         pub const ACCEPT_TELEPORTATION: i32 = 0x00;
+        pub const CHAT_ACK: i32 = 0x06;
+        pub const CHAT_COMMAND: i32 = 0x07;
+        pub const CHAT_COMMAND_SIGNED: i32 = 0x08;
+        pub const CHAT: i32 = 0x09;
+        pub const CHAT_SESSION_UPDATE: i32 = 0x0A;
         pub const KEEP_ALIVE: i32 = 0x1C;
         pub const PLAYER_LOADED: i32 = 0x2C;
         pub const CHUNK_BATCH_RECEIVED: i32 = 0x0B;
@@ -861,6 +867,261 @@ pub fn block_changed_ack_payload(sequence: i32) -> Vec<u8> {
     let mut payload = Vec::new();
     write_var_int(sequence, &mut payload);
     payload
+}
+
+pub const MAX_CHAT_MESSAGE_LEN: usize = 256;
+pub const MAX_CHAT_COMMAND_LEN: usize = 32767;
+pub const MAX_SIGNED_ARGS: i32 = 8;
+pub const MAX_SIGNED_ARG_NAME_LEN: usize = 16;
+pub const SIGNATURE_LEN: usize = 256;
+pub const MAX_CHAT_PUBLIC_KEY: usize = 512;
+pub const MAX_CHAT_KEY_SIGNATURE: usize = 4096;
+
+pub const CHAT_TYPE_CHAT_HOLDER: i32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Update {
+    pub offset: i32,
+    pub acknowledged: [u8; 3],
+    pub checksum: i8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chat {
+    pub message: String,
+    pub timestamp: i64,
+    pub salt: i64,
+    pub signature: Option<[u8; SIGNATURE_LEN]>,
+    pub update: Update,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatCommandSigned {
+    pub command: String,
+    pub timestamp: i64,
+    pub salt: i64,
+}
+
+pub fn decode_bounded_string(
+    body: &[u8],
+    max_utf16: usize,
+) -> Result<(String, usize), ProtocolError> {
+    let (len, header) = match read_var_int(body)? {
+        Some(value) => value,
+        None => return Err(ProtocolError::UnexpectedEof),
+    };
+    if len < 0 {
+        return Err(ProtocolError::StringLengthNegative);
+    }
+    let len = len as usize;
+    if len > max_utf16.saturating_mul(3) {
+        return Err(ProtocolError::StringTooLong);
+    }
+    let total = header + len;
+    if body.len() < total {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+    let text =
+        core::str::from_utf8(&body[header..total]).map_err(|_| ProtocolError::InvalidUtf8)?;
+    if text.chars().map(char::len_utf16).sum::<usize>() > max_utf16 {
+        return Err(ProtocolError::StringTooLong);
+    }
+    Ok((text.to_owned(), total))
+}
+
+fn take_bounded_string(cursor: &mut &[u8], max_utf16: usize) -> Result<String, ProtocolError> {
+    let (text, consumed) = decode_bounded_string(cursor, max_utf16)?;
+    *cursor = &cursor[consumed..];
+    Ok(text)
+}
+
+fn take_signature(cursor: &mut &[u8]) -> Result<[u8; SIGNATURE_LEN], ProtocolError> {
+    if cursor.len() < SIGNATURE_LEN {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+    let mut signature = [0u8; SIGNATURE_LEN];
+    signature.copy_from_slice(&cursor[..SIGNATURE_LEN]);
+    *cursor = &cursor[SIGNATURE_LEN..];
+    Ok(signature)
+}
+
+fn take_optional_signature(
+    cursor: &mut &[u8],
+) -> Result<Option<[u8; SIGNATURE_LEN]>, ProtocolError> {
+    if take_bool(cursor)? {
+        Ok(Some(take_signature(cursor)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn decode_update(cursor: &mut &[u8]) -> Result<Update, ProtocolError> {
+    let offset = take_var_int(cursor)?;
+    if cursor.len() < 3 {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+    let mut acknowledged = [0u8; 3];
+    acknowledged.copy_from_slice(&cursor[..3]);
+    *cursor = &cursor[3..];
+    let checksum = take_u8(cursor)? as i8;
+    Ok(Update {
+        offset,
+        acknowledged,
+        checksum,
+    })
+}
+
+pub fn decode_chat(body: &[u8]) -> Result<Chat, ProtocolError> {
+    let mut cursor = body;
+    let message = take_bounded_string(&mut cursor, MAX_CHAT_MESSAGE_LEN)?;
+    let timestamp = take_i64(&mut cursor)?;
+    let salt = take_i64(&mut cursor)?;
+    let signature = take_optional_signature(&mut cursor)?;
+    let update = decode_update(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(Chat {
+        message,
+        timestamp,
+        salt,
+        signature,
+        update,
+    })
+}
+
+pub fn decode_chat_command(body: &[u8]) -> Result<String, ProtocolError> {
+    let mut cursor = body;
+    let command = take_bounded_string(&mut cursor, MAX_CHAT_COMMAND_LEN)?;
+    ensure_consumed(cursor)?;
+    Ok(command)
+}
+
+pub fn decode_chat_command_signed(body: &[u8]) -> Result<ChatCommandSigned, ProtocolError> {
+    let mut cursor = body;
+    let command = take_bounded_string(&mut cursor, MAX_CHAT_COMMAND_LEN)?;
+    let timestamp = take_i64(&mut cursor)?;
+    let salt = take_i64(&mut cursor)?;
+    let count = take_var_int(&mut cursor)?;
+    if count < 0 {
+        return Err(ProtocolError::PrefixedArrayLengthNegative);
+    }
+    if count > MAX_SIGNED_ARGS {
+        return Err(ProtocolError::PrefixedArrayTooLong);
+    }
+    for _ in 0..count {
+        let _name = take_bounded_string(&mut cursor, MAX_SIGNED_ARG_NAME_LEN)?;
+        let _signature = take_signature(&mut cursor)?;
+    }
+    let _update = decode_update(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(ChatCommandSigned {
+        command,
+        timestamp,
+        salt,
+    })
+}
+
+pub fn decode_chat_ack(body: &[u8]) -> Result<i32, ProtocolError> {
+    let mut cursor = body;
+    let offset = take_var_int(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(offset)
+}
+
+pub fn decode_chat_session_update(body: &[u8]) -> Result<(), ProtocolError> {
+    let mut cursor = body;
+    skip_bytes(&mut cursor, 16)?;
+    let _expires_at = take_i64(&mut cursor)?;
+    take_bounded_bytes(&mut cursor, MAX_CHAT_PUBLIC_KEY)?;
+    take_bounded_bytes(&mut cursor, MAX_CHAT_KEY_SIGNATURE)?;
+    ensure_consumed(cursor)?;
+    Ok(())
+}
+
+fn take_bounded_bytes(cursor: &mut &[u8], max_len: usize) -> Result<(), ProtocolError> {
+    let len = take_var_int(cursor)?;
+    if len < 0 {
+        return Err(ProtocolError::PrefixedArrayLengthNegative);
+    }
+    if len as usize > max_len {
+        return Err(ProtocolError::PrefixedArrayTooLong);
+    }
+    skip_bytes(cursor, len as usize)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatError {
+    IllegalCharacters,
+}
+
+pub fn validate_chat_content(s: &str) -> Result<(), ChatError> {
+    for ch in s.chars() {
+        if ch == '\u{a7}' || ch == '\u{7f}' || (ch as u32) < 0x20 {
+            return Err(ChatError::IllegalCharacters);
+        }
+    }
+    Ok(())
+}
+
+pub fn normalize_chat(s: &str) -> &str {
+    s.trim()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TickThrottler {
+    count: u32,
+}
+
+impl TickThrottler {
+    pub const STEP: u32 = 20;
+    pub const THRESHOLD: u32 = 200;
+
+    pub fn new() -> Self {
+        TickThrottler { count: 0 }
+    }
+
+    pub fn increment(&mut self) -> bool {
+        self.count += TickThrottler::STEP;
+        self.count >= TickThrottler::THRESHOLD
+    }
+
+    pub fn tick(&mut self) {
+        self.count = self.count.saturating_sub(1);
+    }
+
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn player_chat_tail(
+    out: &mut Vec<u8>,
+    sender: u128,
+    content: &str,
+    timestamp: i64,
+    salt: i64,
+    chat_type_holder: i32,
+    name: &crate::text::Component,
+    target: Option<&crate::text::Component>,
+) {
+    out.extend_from_slice(&sender.to_be_bytes());
+    write_var_int(0, out);
+    write_bool(false, out);
+    write_string(content, out);
+    write_i64(timestamp, out);
+    write_i64(salt, out);
+    write_var_int(0, out);
+    write_bool(false, out);
+    write_var_int(0, out);
+    write_var_int(chat_type_holder, out);
+    crate::text::write_nbt(out, name);
+    match target {
+        Some(component) => {
+            write_bool(true, out);
+            crate::text::write_nbt(out, component);
+        }
+        None => write_bool(false, out),
+    }
 }
 
 #[cfg(test)]
@@ -2041,6 +2302,289 @@ mod tests {
         assert_eq!(
             decode_move_player_status(&[0x00, 0x00]),
             Err(ProtocolError::TrailingBytes)
+        );
+    }
+
+    fn chat_hi_body() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x02, 0x68, 0x69]);
+        body.extend_from_slice(&[0x00, 0x00, 0x01, 0x9a, 0x2b, 0x3c, 0x4d, 0x5e]);
+        body.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+        body.push(0x00);
+        body.push(0x00);
+        body.extend_from_slice(&[0x00, 0x00, 0x00]);
+        body.push(0x01);
+        body
+    }
+
+    #[test]
+    fn decode_chat_hi_vector() {
+        let chat = decode_chat(&chat_hi_body()).unwrap();
+        assert_eq!(chat.message, "hi");
+        assert_eq!(chat.timestamp, 0x0000_019a_2b3c_4d5e);
+        assert_eq!(chat.salt, 0x1122_3344_5566_7788u64 as i64);
+        assert_eq!(chat.signature, None);
+        assert_eq!(
+            chat.update,
+            Update {
+                offset: 0,
+                acknowledged: [0, 0, 0],
+                checksum: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_chat_rejects_trailing_bytes() {
+        let mut body = chat_hi_body();
+        body.push(0xFF);
+        assert_eq!(decode_chat(&body), Err(ProtocolError::TrailingBytes));
+    }
+
+    #[test]
+    fn decode_chat_rejects_message_over_256_utf16() {
+        let message = "a".repeat(257);
+        let mut body = Vec::new();
+        write_var_int(message.len() as i32, &mut body);
+        body.extend_from_slice(message.as_bytes());
+        body.extend_from_slice(&[0u8; 16]);
+        body.push(0x00);
+        body.push(0x00);
+        body.extend_from_slice(&[0x00, 0x00, 0x00]);
+        body.push(0x01);
+        assert_eq!(decode_chat(&body), Err(ProtocolError::StringTooLong));
+    }
+
+    #[test]
+    fn decode_chat_reads_present_signature() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x02, 0x68, 0x69]);
+        body.extend_from_slice(&[0u8; 8]);
+        body.extend_from_slice(&[0u8; 8]);
+        body.push(0x01);
+        body.extend_from_slice(&[0x7Au8; SIGNATURE_LEN]);
+        body.push(0x00);
+        body.extend_from_slice(&[0x00, 0x00, 0x00]);
+        body.push(0x01);
+        let chat = decode_chat(&body).unwrap();
+        assert_eq!(chat.signature, Some([0x7Au8; SIGNATURE_LEN]));
+    }
+
+    #[test]
+    fn decode_chat_command_signed_zero_signatures() {
+        let mut body = Vec::new();
+        write_string("say coucou", &mut body);
+        write_i64(0x0102_0304_0506_0708, &mut body);
+        write_i64(0x1122_3344_5566_7788u64 as i64, &mut body);
+        write_var_int(0, &mut body);
+        body.push(0x00);
+        body.extend_from_slice(&[0x00, 0x00, 0x00]);
+        body.push(0x01);
+        assert_eq!(
+            decode_chat_command_signed(&body).unwrap(),
+            ChatCommandSigned {
+                command: "say coucou".to_owned(),
+                timestamp: 0x0102_0304_0506_0708,
+                salt: 0x1122_3344_5566_7788u64 as i64,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_chat_command_signed_rejects_more_than_eight() {
+        let mut body = Vec::new();
+        write_string("msg", &mut body);
+        write_i64(0, &mut body);
+        write_i64(0, &mut body);
+        write_var_int(9, &mut body);
+        assert_eq!(
+            decode_chat_command_signed(&body),
+            Err(ProtocolError::PrefixedArrayTooLong)
+        );
+    }
+
+    #[test]
+    fn decode_chat_ack_reads_offset() {
+        let mut body = Vec::new();
+        write_var_int(7, &mut body);
+        assert_eq!(decode_chat_ack(&body), Ok(7));
+        body.push(0x00);
+        assert_eq!(decode_chat_ack(&body), Err(ProtocolError::TrailingBytes));
+    }
+
+    #[test]
+    fn decode_chat_session_update_valid_and_bounds() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0u8; 16]);
+        write_i64(0, &mut body);
+        write_var_int(4, &mut body);
+        body.extend_from_slice(&[0xAA; 4]);
+        write_var_int(5, &mut body);
+        body.extend_from_slice(&[0xBB; 5]);
+        assert_eq!(decode_chat_session_update(&body), Ok(()));
+
+        let mut too_long = Vec::new();
+        too_long.extend_from_slice(&[0u8; 16]);
+        write_i64(0, &mut too_long);
+        write_var_int((MAX_CHAT_PUBLIC_KEY + 1) as i32, &mut too_long);
+        assert_eq!(
+            decode_chat_session_update(&too_long),
+            Err(ProtocolError::PrefixedArrayTooLong)
+        );
+    }
+
+    #[test]
+    fn bounded_string_counts_utf16_units() {
+        let mut accented = Vec::new();
+        write_string("é", &mut accented);
+        assert_eq!(decode_bounded_string(&accented, 256).unwrap().0, "é");
+
+        let mut emoji = Vec::new();
+        write_string("😀", &mut emoji);
+        assert_eq!(decode_bounded_string(&emoji, 256).unwrap().0, "😀");
+
+        let mut exact = Vec::new();
+        write_string(&"a".repeat(256), &mut exact);
+        assert!(decode_bounded_string(&exact, 256).is_ok());
+
+        let mut over = Vec::new();
+        write_string(&"a".repeat(257), &mut over);
+        assert_eq!(
+            decode_bounded_string(&over, 256),
+            Err(ProtocolError::StringTooLong)
+        );
+
+        let mut emoji_128 = Vec::new();
+        write_string(&"😀".repeat(128), &mut emoji_128);
+        assert!(decode_bounded_string(&emoji_128, 256).is_ok());
+
+        let mut emoji_129 = Vec::new();
+        write_string(&"😀".repeat(129), &mut emoji_129);
+        assert_eq!(
+            decode_bounded_string(&emoji_129, 256),
+            Err(ProtocolError::StringTooLong)
+        );
+    }
+
+    #[test]
+    fn validate_chat_content_rejects_forbidden_allows_unicode() {
+        assert_eq!(validate_chat_content("é"), Ok(()));
+        assert_eq!(validate_chat_content("😀 salut"), Ok(()));
+        assert_eq!(
+            validate_chat_content("a\u{a7}b"),
+            Err(ChatError::IllegalCharacters)
+        );
+        assert_eq!(
+            validate_chat_content("a\u{7}b"),
+            Err(ChatError::IllegalCharacters)
+        );
+        assert_eq!(
+            validate_chat_content("a\u{7f}b"),
+            Err(ChatError::IllegalCharacters)
+        );
+    }
+
+    #[test]
+    fn tick_throttler_thresholds() {
+        let mut chat = TickThrottler::new();
+        let mut over = false;
+        for i in 0..10 {
+            over = chat.increment();
+            if i < 9 {
+                chat.tick();
+            }
+        }
+        assert!(!over, "10 incréments en 9 ticks restent sous le seuil");
+
+        let mut spam = TickThrottler::new();
+        let mut over = false;
+        for i in 0..11 {
+            over = spam.increment();
+            if i < 10 {
+                spam.tick();
+            }
+        }
+        assert!(over, "11 incréments en 10 ticks dépassent au 11e");
+    }
+
+    #[test]
+    fn tick_throttler_never_underflows() {
+        let mut throttler = TickThrottler::new();
+        for _ in 0..100 {
+            throttler.tick();
+        }
+        assert_eq!(throttler.count(), 0);
+    }
+
+    const ALICE_UUID: u128 = u128::from_be_bytes([
+        0x10, 0x92, 0x05, 0x08, 0xd5, 0xd8, 0x3e, 0xed, 0x93, 0xd2, 0x92, 0xf1, 0x93, 0xaf, 0xe7,
+        0xd7,
+    ]);
+
+    fn hello_world_tail() -> Vec<u8> {
+        let name = crate::text::Component::text("Alice");
+        let mut tail = Vec::new();
+        player_chat_tail(
+            &mut tail,
+            ALICE_UUID,
+            "hello world",
+            0x0000_01a1_8ee9_c390,
+            0,
+            CHAT_TYPE_CHAT_HOLDER,
+            &name,
+            None,
+        );
+        tail
+    }
+
+    #[test]
+    fn player_chat_tail_matches_vanilla_simple_name() {
+        let expected: Vec<u8> = vec![
+            0x00, 0x10, 0x92, 0x05, 0x08, 0xd5, 0xd8, 0x3e, 0xed, 0x93, 0xd2, 0x92, 0xf1, 0x93,
+            0xaf, 0xe7, 0xd7, 0x00, 0x00, 0x0b, b'h', b'e', b'l', b'l', b'o', b' ', b'w', b'o',
+            b'r', b'l', b'd', 0x00, 0x00, 0x01, 0xa1, 0x8e, 0xe9, 0xc3, 0x90, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x05, b'A', b'l',
+            b'i', b'c', b'e', 0x00,
+        ];
+        assert_eq!(expected.len(), 60);
+
+        let tail = hello_world_tail();
+        let mut prefix0 = Vec::new();
+        write_var_int(0, &mut prefix0);
+        prefix0.extend_from_slice(&tail);
+        assert_eq!(prefix0, expected);
+
+        let mut prefix1 = Vec::new();
+        write_var_int(1, &mut prefix1);
+        prefix1.extend_from_slice(&tail);
+        assert_eq!(prefix1[0], 0x01);
+        assert_eq!(&prefix1[1..], &tail[..]);
+
+        let mut prefix200 = Vec::new();
+        write_var_int(200, &mut prefix200);
+        prefix200.extend_from_slice(&tail);
+        assert_eq!(&prefix200[..2], &[0xc8, 0x01]);
+        assert_eq!(&prefix200[2..], &tail[..]);
+    }
+
+    #[test]
+    fn player_chat_tail_transports_timestamp_and_salt() {
+        let name = crate::text::Component::text("x");
+        let mut tail = Vec::new();
+        player_chat_tail(
+            &mut tail,
+            0,
+            "x",
+            0x0102_0304_0506_0708,
+            0x1122_3344_5566_7788u64 as i64,
+            CHAT_TYPE_CHAT_HOLDER,
+            &name,
+            None,
+        );
+        assert_eq!(&tail[20..28], &0x0102_0304_0506_0708i64.to_be_bytes());
+        assert_eq!(
+            &tail[28..36],
+            &(0x1122_3344_5566_7788u64 as i64).to_be_bytes()
         );
     }
 }

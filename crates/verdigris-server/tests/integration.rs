@@ -2984,3 +2984,305 @@ async fn completing_end_portal_ring_over_tcp() {
         );
     }
 }
+
+fn compressed_chat_frame(message: &str, timestamp: i64, salt: i64) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x09, &mut body);
+    write_string(message, &mut body);
+    write_i64(timestamp, &mut body);
+    write_i64(salt, &mut body);
+    body.push(0x00);
+    body.push(0x00);
+    body.extend_from_slice(&[0x00, 0x00, 0x00]);
+    body.push(0x01);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_chat_ack_frame(offset: i32) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x06, &mut body);
+    write_var_int(offset, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_chat_session_update_frame() -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x0A, &mut body);
+    body.extend_from_slice(&[0u8; 16]);
+    write_i64(0, &mut body);
+    write_var_int(4, &mut body);
+    body.extend_from_slice(&[0xAB; 4]);
+    write_var_int(5, &mut body);
+    body.extend_from_slice(&[0xCD; 5]);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+#[derive(Debug)]
+struct PlayerChatFrame {
+    global_index: i32,
+    sender: u128,
+    content: String,
+    chat_type: i32,
+}
+
+fn parse_player_chat(body: &[u8]) -> PlayerChatFrame {
+    let (global_index, c) = read_var_int(body).unwrap().unwrap();
+    let mut cursor = &body[c..];
+    let mut uuid = [0u8; 16];
+    uuid.copy_from_slice(&cursor[..16]);
+    let sender = u128::from_be_bytes(uuid);
+    cursor = &cursor[16..];
+    let (_index, c) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[c..];
+    assert_eq!(cursor[0], 0x00, "player_chat non signé");
+    cursor = &cursor[1..];
+    let (content, c) = read_string(cursor, MAX_STRING_LEN).unwrap().unwrap();
+    cursor = &cursor[c..];
+    cursor = &cursor[16..];
+    let (_last_seen, c) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[c..];
+    cursor = &cursor[1..];
+    let (_filter, c) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[c..];
+    let (chat_type, _c) = read_var_int(cursor).unwrap().unwrap();
+    PlayerChatFrame {
+        global_index,
+        sender,
+        content,
+        chat_type,
+    }
+}
+
+async fn read_skipping_until_id(stream: &mut TcpStream, buf: &mut Vec<u8>, want: i32) -> Vec<u8> {
+    loop {
+        let (id, body) = read_one_compressed_frame(stream, buf).await;
+        if id == want {
+            return body;
+        }
+    }
+}
+
+async fn two_players_in_play() -> (SocketAddr, TcpStream, Vec<u8>, TcpStream, Vec<u8>) {
+    let addr = spawn_server().await;
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    consume_empty_world(&mut alice, &mut buf_a).await;
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_named(&mut bob, &mut buf_b, "Bob").await;
+    consume_empty_world(&mut bob, &mut buf_b).await;
+
+    (addr, alice, buf_a, bob, buf_b)
+}
+
+#[tokio::test]
+async fn chat_global_index_is_per_connection() {
+    let (addr, mut alice, mut buf_a, mut bob, mut buf_b) = two_players_in_play().await;
+    let alice_uuid = offline_uuid("Alice");
+    let bob_uuid = offline_uuid("Bob");
+
+    alice
+        .write_all(&compressed_chat_frame("hello world", 0x1111, 0x2222))
+        .await
+        .unwrap();
+    let a0 = parse_player_chat(&read_skipping_until_id(&mut alice, &mut buf_a, 0x42).await);
+    let b0 = parse_player_chat(&read_skipping_until_id(&mut bob, &mut buf_b, 0x42).await);
+    assert_eq!(
+        a0.global_index, 0,
+        "le premier player_chat d'Alice porte l'index 0"
+    );
+    assert_eq!(
+        b0.global_index, 0,
+        "le premier player_chat de Bob porte l'index 0"
+    );
+    assert_eq!(a0.sender, alice_uuid);
+    assert_eq!(b0.sender, alice_uuid);
+    assert_eq!(a0.content, "hello world");
+    assert_eq!(b0.content, "hello world");
+    assert_eq!(a0.chat_type, 1, "type de chat minecraft:chat (holder 1)");
+    assert_eq!(b0.chat_type, 1);
+
+    bob.write_all(&compressed_chat_frame("salut", 0, 0))
+        .await
+        .unwrap();
+    let a1 = parse_player_chat(&read_skipping_until_id(&mut alice, &mut buf_a, 0x42).await);
+    let b1 = parse_player_chat(&read_skipping_until_id(&mut bob, &mut buf_b, 0x42).await);
+    assert_eq!(a1.global_index, 1, "deuxième player_chat reçu par Alice");
+    assert_eq!(b1.global_index, 1, "deuxième player_chat reçu par Bob");
+    assert_eq!(a1.sender, bob_uuid);
+    assert_eq!(a1.content, "salut");
+
+    let mut carol = TcpStream::connect(addr).await.unwrap();
+    let mut buf_c = Vec::new();
+    drive_to_play_named(&mut carol, &mut buf_c, "Carol").await;
+    consume_empty_world(&mut carol, &mut buf_c).await;
+
+    alice
+        .write_all(&compressed_chat_frame("encore", 0, 0))
+        .await
+        .unwrap();
+    let c0 = parse_player_chat(&read_skipping_until_id(&mut carol, &mut buf_c, 0x42).await);
+    assert_eq!(
+        c0.global_index, 0,
+        "le premier player_chat reçu par Carol porte l'index 0"
+    );
+    assert_eq!(c0.content, "encore");
+}
+
+#[tokio::test]
+async fn chat_illegal_characters_disconnects_and_notifies_others() {
+    let (_addr, mut alice, mut buf_a, mut bob, mut buf_b) = two_players_in_play().await;
+
+    alice
+        .write_all(&compressed_chat_frame("a\u{a7}b", 0, 0))
+        .await
+        .unwrap();
+
+    let disconnect = read_skipping_until_id(&mut alice, &mut buf_a, 0x20).await;
+    assert_eq!(
+        disconnect[0], 0x0A,
+        "disconnect play = composant NBT compound"
+    );
+    assert!(
+        contains_subslice(&disconnect, b"multiplayer.disconnect.illegal_characters"),
+        "la clé de déconnexion attendue est présente"
+    );
+
+    let left = read_skipping_until_id(&mut bob, &mut buf_b, 0x7C).await;
+    assert!(
+        contains_subslice(&left, b"multiplayer.player.left"),
+        "Bob reçoit le message de départ d'Alice"
+    );
+
+    expect_clean_eof(&mut alice).await;
+}
+
+#[tokio::test]
+async fn chat_command_illegal_characters_disconnects() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    let mut body = Vec::new();
+    write_var_int(0x07, &mut body);
+    write_string("say a\u{7f}b", &mut body);
+    client
+        .write_all(&encode_compressed_frame(&body, CLIENT_THRESHOLD))
+        .await
+        .unwrap();
+
+    let disconnect = read_skipping_until_id(&mut client, &mut buf, 0x20).await;
+    assert!(
+        contains_subslice(&disconnect, b"multiplayer.disconnect.illegal_characters"),
+        "une commande à caractères interdits déconnecte aussi"
+    );
+    expect_clean_eof(&mut client).await;
+}
+
+#[tokio::test]
+async fn chat_command_replies_unknown_command() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    let mut body = Vec::new();
+    write_var_int(0x07, &mut body);
+    write_string("nope", &mut body);
+    client
+        .write_all(&encode_compressed_frame(&body, CLIENT_THRESHOLD))
+        .await
+        .unwrap();
+
+    let system = read_skipping_until_id(&mut client, &mut buf, 0x7C).await;
+    assert!(
+        contains_subslice(&system, b"command.unknown.command"),
+        "une commande inconnue répond command.unknown.command"
+    );
+}
+
+#[tokio::test]
+async fn chat_spam_disconnects_after_broadcasting_last_message() {
+    let (_addr, mut alice, mut buf_a, mut bob, mut buf_b) = two_players_in_play().await;
+
+    for i in 0..11 {
+        alice
+            .write_all(&compressed_chat_frame(&format!("m{i}"), 0, 0))
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(60)).await;
+    }
+
+    let mut alice_chats = 0;
+    let disconnect;
+    loop {
+        let (id, body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+        if id == 0x42 {
+            alice_chats += 1;
+        } else if id == 0x20 {
+            disconnect = body;
+            break;
+        }
+    }
+    assert!(
+        alice_chats >= 1,
+        "le message qui atteint le seuil est diffusé avant l'éjection"
+    );
+    assert!(
+        contains_subslice(&disconnect, b"disconnect.spam"),
+        "l'éjection anti-spam utilise la clé disconnect.spam"
+    );
+
+    let mut bob_chats = 0;
+    while bob_chats < alice_chats {
+        read_skipping_until_id(&mut bob, &mut buf_b, 0x42).await;
+        bob_chats += 1;
+    }
+    assert_eq!(
+        bob_chats, alice_chats,
+        "Bob reçoit chaque message accepté, dont le dernier précédant l'éjection"
+    );
+
+    expect_clean_eof(&mut alice).await;
+}
+
+#[tokio::test]
+async fn chat_ack_and_session_update_produce_no_frame() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    client
+        .write_all(&compressed_chat_ack_frame(0))
+        .await
+        .unwrap();
+    client
+        .write_all(&compressed_chat_session_update_frame())
+        .await
+        .unwrap();
+
+    let silence =
+        try_read_compressed_frame(&mut client, &mut buf, Duration::from_millis(300)).await;
+    assert!(
+        silence.is_none(),
+        "chat_ack et chat_session_update ne produisent aucune trame sortante"
+    );
+
+    client
+        .write_all(&compressed_chat_frame("ping", 0, 0))
+        .await
+        .unwrap();
+    let chat = parse_player_chat(&read_skipping_until_id(&mut client, &mut buf, 0x42).await);
+    assert_eq!(
+        chat.content, "ping",
+        "le chat fonctionne toujours après les paquets ignorés"
+    );
+    assert_eq!(chat.global_index, 0);
+}
