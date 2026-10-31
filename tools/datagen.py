@@ -102,6 +102,11 @@ def main(generated, server_jar, out):
     worldgen_out = Path(out).parent / "worldgen.json"
     worldgen = worldgen_doc(data / "worldgen", server_jar, generated / "reports")
     worldgen_out.write_text(json.dumps(worldgen, separators=(",", ":"), ensure_ascii=False) + "\n", encoding="utf-8")
+    features_out = Path(out).parent / "features.json"
+    features = features_doc(data / "worldgen", server_jar)
+    features_out.write_text(json.dumps(features, separators=(",", ":"), ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"{features_out}: {len(features['placed_feature'])} placed features, {len(features['feature'])} features, "
+          f"{len(features['biome_features'])} biomes")
     print(f"{worldgen_out}: {len(worldgen['density_function'])} fonctions de densite, "
           f"{len(worldgen['noise'])} bruits, reglages {sorted(worldgen['noise_settings'])}, "
           f"{len(worldgen['biome_parameters']['entries']['minecraft:overworld'])} points de biomes, "
@@ -109,6 +114,18 @@ def main(generated, server_jar, out):
 
 
 WORLDGEN_SETTINGS = ["overworld"]
+
+
+def features_doc(worldgen, server_jar):
+    def folder(sub):
+        root = worldgen / sub
+        return {"minecraft:" + p.relative_to(root).with_suffix("").as_posix(): json.loads(p.read_text(encoding="utf-8"))
+                for p in sorted(root.rglob("*.json"))}
+    biomes = folder("biome")
+    return {"game_version": GAME_VERSION, "server_jar_sha1": hashlib.sha1(Path(server_jar).read_bytes()).hexdigest(),
+            "placed_feature": folder("placed_feature"), "feature": folder("feature"),
+            "block_state_provider": folder("block_state_provider"),
+            "biome_features": {k: v.get("features", []) for k, v in biomes.items()}}
 
 
 CLIMATE_ORDER = ["temperature", "humidity", "continentalness", "erosion", "depth", "weirdness", "offset"]

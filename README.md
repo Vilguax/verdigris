@@ -74,13 +74,14 @@ Hors périmètre : le format région vanilla `.mca`, les joueurs, les inventaire
 | `crates/verdigris-worldgen` | Génération de relief pure (sans E/S ni tokio) : bruits, fonctions de densité, remplissage de chunk en catégories pierre/eau/lave/air |
 | `crates/verdigris-protocol/data/26.3/network.json` | Registres synchronisés et tags de la 26.3 |
 | `crates/verdigris-protocol/data/26.3/worldgen.json` | Réglages de bruit de l'overworld, fonctions de densité, bruits, règles de matériaux, climat des biomes et points climatiques des biomes (rapport `biome_parameters`, une ligne par point dans l'ordre température, humidité, continentalité, érosion, profondeur, bizarrerie, décalage) de la 26.3 |
-| `tools/datagen.py` | Génère `network.json`, `blocks.json` (états de bloc, propriétés, objets, taille de pile maximale et case d'équipement de chaque objet tirées du rapport des composants) et `worldgen.json` à partir du générateur de données officiel |
+| `tools/datagen.py` | Génère `network.json`, `features.json` (placed features, features, fournisseurs d'état, features par biome et par étape), `blocks.json` (états de bloc, propriétés, objets, taille de pile maximale et case d'équipement de chaque objet tirées du rapport des composants) et `worldgen.json` à partir du générateur de données officiel |
 | `tools/oracle.py` | Construit le datapack de l'oracle et exporte ses chunks en fixtures de test |
 | `tests-data/oracle-1a` | Relief vanilla de référence : 40 chunks, solide ou non solide bloc par bloc |
 | `tests-data/oracle-1b` | Relief et aquifères vanilla : 64 chunks, air, solide, eau ou lave bloc par bloc |
 | `tests-data/oracle-biomes` | Biomes vanilla : 64 chunks couvrant 21 biomes, un identifiant réseau par cellule de 4 × 4 × 4 blocs |
 | `tests-data/oracle-materiaux` | Blocs vanilla après les règles de matériaux : 48 chunks au statut terrain, un identifiant de bloc u16 par case |
 | `tests-data/oracle-carvers` | Blocs vanilla avec grottes et canyons : 48 chunks au statut terrain, même format que `oracle-materiaux` |
+| `tests-data/oracle-features-fer`, `oracle-features-minerais` | Décoration vanilla : 84 chunks chacun, monde complet où seules quelques placed features sont actives (fer et argile ; 24 minerais et 3 disques) |
 
 ## Données du jeu
 
@@ -136,6 +137,8 @@ Les carvers (grottes et canyons) ont l'oracle `tests-data/oracle-carvers` : mond
 python tools/oracle.py datapack server.jar <monde>/datapacks/oracle-carvers --carvers
 python tools/oracle.py export-blocs <monde>/dimensions/minecraft/overworld/region tests-data/oracle-carvers 0,0 1,0
 ```
+
+La décoration a deux oracles tirés de mondes vanilla complets (aquifères, carvers et matériaux actifs, sans structures) où un datapack met `count` à 0 dans toutes les placed features sauf celles listées dans `enabled_placed_features` de chaque `index.json`. Les listes des biomes ne changent pas, donc les index globaux des features non plus. Seuls les chunks au statut `initialize_light` sont gardés : décorés, jamais simulés. Sur `oracle-features-minerais`, les filons qui débordent d'un chunk sur l'autre dépendent de l'ordre de décoration des chunks, propre à chaque exécution de vanilla : environ 0,7 % des blocs décorés ne sont pas reproductibles à l'identique.
 
 La porte oracle 1a est le test d'intégration `final_fill_matches_oracle_on_all_chunks` du crate `verdigris-worldgen`. Elle construit le générateur en mode `AquiferMode::Disabled` (règle simple, sans aquifères), remplit les 40 chunks et exige l'égalité exacte (solide ⇔ pierre) sur toutes les cases non exclues, avec diagnostic de chunk, position et densité en cas d'écart :
 

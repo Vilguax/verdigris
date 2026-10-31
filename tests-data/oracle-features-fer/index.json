@@ -1,0 +1,607 @@
+{
+ "format": 1,
+ "game_version": "26.3",
+ "seed": 20261029,
+ "min_y": -64,
+ "height": 384,
+ "index": "(y - min_y) * 256 + z * 16 + x",
+ "value": "identifiant de bloc u16 petit-boutiste (champ id de blocks.json, registre minecraft:block)",
+ "chunks": [
+  {
+   "x": -11,
+   "z": -11,
+   "file": "-11.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 11
+  },
+  {
+   "x": -11,
+   "z": -10,
+   "file": "-11.-10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -11,
+   "z": -9,
+   "file": "-11.-9.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -11,
+   "z": -8,
+   "file": "-11.-8.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": -11,
+   "z": -7,
+   "file": "-11.-7.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": -11,
+   "z": -6,
+   "file": "-11.-6.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 8
+  },
+  {
+   "x": -11,
+   "z": -5,
+   "file": "-11.-5.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 8
+  },
+  {
+   "x": -11,
+   "z": -4,
+   "file": "-11.-4.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 8
+  },
+  {
+   "x": -11,
+   "z": -3,
+   "file": "-11.-3.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": -11,
+   "z": -2,
+   "file": "-11.-2.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -11,
+   "z": -1,
+   "file": "-11.-1.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -11,
+   "z": 0,
+   "file": "-11.0.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 12
+  },
+  {
+   "x": -11,
+   "z": 1,
+   "file": "-11.1.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 11
+  },
+  {
+   "x": -11,
+   "z": 2,
+   "file": "-11.2.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 11
+  },
+  {
+   "x": -11,
+   "z": 3,
+   "file": "-11.3.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -11,
+   "z": 4,
+   "file": "-11.4.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 12
+  },
+  {
+   "x": -11,
+   "z": 5,
+   "file": "-11.5.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 11
+  },
+  {
+   "x": -11,
+   "z": 6,
+   "file": "-11.6.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 11
+  },
+  {
+   "x": -11,
+   "z": 7,
+   "file": "-11.7.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 12
+  },
+  {
+   "x": -11,
+   "z": 8,
+   "file": "-11.8.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 12
+  },
+  {
+   "x": -11,
+   "z": 9,
+   "file": "-11.9.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 11
+  },
+  {
+   "x": -11,
+   "z": 10,
+   "file": "-11.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 13
+  },
+  {
+   "x": -10,
+   "z": -11,
+   "file": "-10.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 11
+  },
+  {
+   "x": -10,
+   "z": 10,
+   "file": "-10.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 11
+  },
+  {
+   "x": -9,
+   "z": -11,
+   "file": "-9.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": -9,
+   "z": 10,
+   "file": "-9.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 11
+  },
+  {
+   "x": -8,
+   "z": -11,
+   "file": "-8.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -8,
+   "z": 10,
+   "file": "-8.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 12
+  },
+  {
+   "x": -7,
+   "z": -11,
+   "file": "-7.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -7,
+   "z": 10,
+   "file": "-7.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -6,
+   "z": -11,
+   "file": "-6.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": -6,
+   "z": 10,
+   "file": "-6.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": -5,
+   "z": -11,
+   "file": "-5.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -5,
+   "z": 10,
+   "file": "-5.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -4,
+   "z": -11,
+   "file": "-4.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -4,
+   "z": 10,
+   "file": "-4.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": -3,
+   "z": -11,
+   "file": "-3.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -3,
+   "z": 10,
+   "file": "-3.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": -2,
+   "z": -11,
+   "file": "-2.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": -2,
+   "z": 10,
+   "file": "-2.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": -1,
+   "z": -11,
+   "file": "-1.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": -1,
+   "z": 10,
+   "file": "-1.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 0,
+   "z": -11,
+   "file": "0.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 0,
+   "z": 10,
+   "file": "0.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 1,
+   "z": -11,
+   "file": "1.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 1,
+   "z": 10,
+   "file": "1.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 2,
+   "z": -11,
+   "file": "2.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 2,
+   "z": 10,
+   "file": "2.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 11
+  },
+  {
+   "x": 3,
+   "z": -11,
+   "file": "3.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 3,
+   "z": 10,
+   "file": "3.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 4,
+   "z": -11,
+   "file": "4.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 4,
+   "z": 10,
+   "file": "4.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 5,
+   "z": -11,
+   "file": "5.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 5,
+   "z": 10,
+   "file": "5.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 6,
+   "z": -11,
+   "file": "6.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 6,
+   "z": 10,
+   "file": "6.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 7,
+   "z": -11,
+   "file": "7.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 7,
+   "z": 10,
+   "file": "7.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 8,
+   "z": -11,
+   "file": "8.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 8,
+   "z": 10,
+   "file": "8.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 9,
+   "z": -11,
+   "file": "9.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 9,
+   "z": 10,
+   "file": "9.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": -11,
+   "file": "10.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 10,
+   "z": -10,
+   "file": "10.-10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 10,
+   "z": -9,
+   "file": "10.-9.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": -8,
+   "file": "10.-8.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 10,
+   "z": -7,
+   "file": "10.-7.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 8
+  },
+  {
+   "x": 10,
+   "z": -6,
+   "file": "10.-6.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 8
+  },
+  {
+   "x": 10,
+   "z": -5,
+   "file": "10.-5.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": -4,
+   "file": "10.-4.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": -3,
+   "file": "10.-3.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 10,
+   "z": -2,
+   "file": "10.-2.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 10,
+   "z": -1,
+   "file": "10.-1.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": 0,
+   "file": "10.0.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": 1,
+   "file": "10.1.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": 2,
+   "file": "10.2.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 10,
+   "z": 3,
+   "file": "10.3.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  },
+  {
+   "x": 10,
+   "z": 4,
+   "file": "10.4.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": 5,
+   "file": "10.5.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": 6,
+   "file": "10.6.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": 7,
+   "file": "10.7.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": 8,
+   "file": "10.8.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": 9,
+   "file": "10.9.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 10
+  },
+  {
+   "x": 10,
+   "z": 10,
+   "file": "10.10.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 9
+  }
+ ],
+ "enabled_placed_features": [
+  "minecraft:disk_clay",
+  "minecraft:ore_iron_middle",
+  "minecraft:ore_iron_small",
+  "minecraft:ore_iron_upper"
+ ],
+ "note": "monde vanilla complet (aquiferes, carvers et regles de materiaux vanilla actifs, structures coupees) ou seules les placed features listees sont actives: les autres ont count 0, les listes des biomes et les index globaux sont inchanges. Chunks au statut initialize_light: decores, jamais simules",
+ "exact": true
+}
