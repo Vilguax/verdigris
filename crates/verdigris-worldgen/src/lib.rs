@@ -8,6 +8,7 @@ pub mod carver;
 pub mod chunk_fill;
 pub mod data;
 pub mod df;
+pub mod feature;
 pub mod gradient;
 pub mod hash;
 pub mod interval;

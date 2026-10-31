@@ -1,0 +1,21 @@
+pub mod engine;
+pub mod error;
+pub mod numbers;
+pub mod order;
+pub mod palette;
+pub mod placement;
+pub mod region;
+pub mod registry;
+pub mod rng;
+pub mod tags;
+
+pub use engine::{Decoration, DecorationContext};
+pub use error::FeatureError;
+pub use numbers::{FloatProvider, HeightCtx, HeightProvider, IntProvider};
+pub use order::{DECORATION_STEPS, GlobalOrder, build_order, global_order_from_features};
+pub use palette::{Physics, StatePalette};
+pub use placement::{BlockPredicate, Placement};
+pub use region::{Heightmap, Region, TestRegion};
+pub use registry::{ConfiguredFeature, FeatureRegistry, PlacedFeature};
+pub use rng::FeatureRng;
+pub use tags::{resolve_block_tag, resolve_fluid_tag};
