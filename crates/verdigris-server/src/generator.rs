@@ -5,9 +5,12 @@ use std::time::Instant;
 
 use tracing::error;
 use verdigris_protocol::{
-    ChunkColumn, ChunkGenerator, FlatGenerator, block_index, default_state_of_name, plains_biome_id,
+    ChunkColumn, ChunkGenerator, FlatGenerator, biome_index, block_index, default_state_of_name,
+    plains_biome_id,
 };
-use verdigris_worldgen::{Category, ChunkTerrain, WorldGenerator};
+use verdigris_worldgen::{
+    BiomeSource, Category, ChunkTerrain, SearchState, WorldGenerator, WorldgenData,
+};
 
 pub const GENERATOR_ENV: &str = "VERDIGRIS_GENERATOR";
 pub const SEED_ENV: &str = "VERDIGRIS_SEED";
@@ -94,6 +97,7 @@ fn state_of(name: &str) -> Result<u16, String> {
 
 pub struct NoiseGenerator {
     generator: Arc<WorldGenerator>,
+    biomes: Arc<BiomeSource>,
     metrics: Arc<GenMetrics>,
     stone: u16,
     water: u16,
@@ -106,6 +110,10 @@ pub struct NoiseGenerator {
 
 impl NoiseGenerator {
     pub fn new(generator: Arc<WorldGenerator>, metrics: Arc<GenMetrics>) -> Result<Self, String> {
+        let data = WorldgenData::embedded().map_err(|err| err.to_string())?;
+        let biomes = data
+            .build_biome_source(generator.seed())
+            .map_err(|err| err.to_string())?;
         Ok(NoiseGenerator {
             stone: state_of("minecraft:stone")?,
             water: state_of("minecraft:water")?,
@@ -115,6 +123,7 @@ impl NoiseGenerator {
             min_y: generator.min_y(),
             height: generator.height(),
             generator,
+            biomes: Arc::new(biomes),
             metrics,
         })
     }
@@ -128,7 +137,7 @@ impl NoiseGenerator {
         }
     }
 
-    fn build_column(&self, terrain: &ChunkTerrain) -> ChunkColumn {
+    fn build_column(&self, terrain: &ChunkTerrain, biome_cells: &[u16]) -> ChunkColumn {
         let mut column = ChunkColumn::empty(self.biome);
         for lz in 0..16usize {
             for lx in 0..16usize {
@@ -145,22 +154,52 @@ impl NoiseGenerator {
                 }
             }
         }
+        for (j, section) in column.sections.iter_mut().enumerate() {
+            for yl in 0..4usize {
+                let qy = j * 4 + yl;
+                for qz in 0..4usize {
+                    for qx in 0..4usize {
+                        section.biomes[biome_index(qx, yl, qz)] =
+                            biome_cells[qy * 16 + qz * 4 + qx];
+                    }
+                }
+            }
+        }
         column
     }
 }
 
+struct Scratch {
+    terrain: ChunkTerrain,
+    biome_cells: Vec<u16>,
+    state: SearchState,
+}
+
 thread_local! {
-    static TERRAIN: RefCell<Option<ChunkTerrain>> = const { RefCell::new(None) };
+    static SCRATCH: RefCell<Option<Scratch>> = const { RefCell::new(None) };
 }
 
 impl ChunkGenerator for NoiseGenerator {
     fn generate(&self, chunk_x: i32, chunk_z: i32) -> ChunkColumn {
         let start = Instant::now();
-        let column = TERRAIN.with(|cell| {
+        let column = SCRATCH.with(|cell| {
             let mut slot = cell.borrow_mut();
-            let terrain = slot.get_or_insert_with(|| self.generator.terrain());
-            match self.generator.fill_chunk(chunk_x, chunk_z, terrain) {
-                Ok(()) => self.build_column(terrain),
+            let scratch = slot.get_or_insert_with(|| Scratch {
+                terrain: self.generator.terrain(),
+                biome_cells: vec![self.biome; self.biomes.cell_count()],
+                state: SearchState::new(),
+            });
+            self.biomes.fill_chunk(
+                chunk_x,
+                chunk_z,
+                &mut scratch.state,
+                &mut scratch.biome_cells,
+            );
+            match self
+                .generator
+                .fill_chunk(chunk_x, chunk_z, &mut scratch.terrain)
+            {
+                Ok(()) => self.build_column(&scratch.terrain, &scratch.biome_cells),
                 Err(err) => {
                     error!(
                         x = chunk_x,

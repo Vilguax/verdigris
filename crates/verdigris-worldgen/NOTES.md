@@ -206,3 +206,106 @@ simple `Disabled`) vs mode `Noise`, même graine 20261029. Les mesures sont à
 relever en exécutant `cargo test -p verdigris-worldgen` (non lancé dans cet
 environnement sandboxé). Critère tenu par revue : aucune allocation dans la
 boucle de décision ; tables préallouées et réutilisées entre chunks.
+
+# Notes — source de biomes multi-bruit de l'overworld (spec 06)
+
+## Hypothèses tranchées (H1-H6)
+- H1 : `verdigris-worldgen` reste pur. `BiomeTree` (boîtes + rangs) est immuable
+  et partageable (`&`/`Arc`), construit une fois via `BiomeTree::embedded()`.
+  L'état de recherche `SearchState` est possédé par l'appelant (un par appel/fil).
+- H2 : porte oracle obligatoire. `tests/oracle_biomes.rs` fait `include_str!` de
+  `index.json` : son absence casse la compilation du test (aucun `#[ignore]`).
+- H3 : plus grande puissance de 19 strictement < |S| en entier pur
+  (`largest_pow19_below`, boucle `while p*19 < n`). Aucun flottant, aucun `ln`.
+- H4 : quantification `q` via chemin f32 (`(v*10000f32) as i64`), troncature vers
+  zéro, NaN→0, saturation (comportement de `as`). `q_entry` (arrondi f64) vérifié
+  égal à `q(f32)` sur les 39 valeurs distinctes.
+- H5 : recherche par balayage complet des 7594 boîtes (autorisé §4.6). L'arbre
+  n'est construit que pour fournir `rang(e)` ; la règle de départage §4.4 reste
+  indépendante d'un éventuel index spatial.
+- H6 : requêtes ponctuelles (§1.7), biome des carvers (§1.8) et zoom bloc
+  reportés ; l'API (`SearchState` découplé des tables) les accueillera sans
+  refonte.
+
+## Fonction de coût de l'arbre vs ampleur
+Deux formes distinctes de §4.2, nommées séparément dans le plan :
+- ampleur M (tri des groupes <= 19, étape 2) = somme des |centre_d|,
+  centre_d = (a_d+b_d)/2 (division entière vers zéro).
+- coût de boîte (choix de l'axe de découpe, étape 3) = somme des largeurs
+  |b_d - a_d| de la boîte englobante du groupe.
+Si les rangs de référence §6.2 divergeaient, c'est le premier point à revérifier
+(coût = largeur vs coût = |centre|).
+
+## Empreinte d'ordre §6.2
+La valeur 113382262484846491 n'est pas assertée : l'algorithme de hachage de
+l'« empreinte d'ordre » n'est pas donné dans le matériel disponible.
+`BuiltTree::order_fingerprint` existe mais utilise un polynôme maison (base 31).
+La construction est verrouillée à la place par les rangs exacts
+(0->8, 1->3965, 2->15, 7590->3421, 7591->3420, 7592->3428, 7593->6498),
+les tailles d'enfants racine (6859+735), la hauteur 4 et le fait que les rangs
+forment une permutation.
+
+## Échantillonnage climat (T8) : point et non volume
+Les 6 fonctions climatiques (temperature, vegetation, continents, erosion, depth,
+ridges) sont évaluées cellule par cellule via `eval_point` aux coordonnées bloc
+(16cx+4qx, -64+4qy, 16cz+4qz), ce qui reproduit l'échantillonnage point de
+vanilla et évite les écarts volume/point documentés en 1a. Coût par cellule
+négligeable devant le balayage des 7594 boîtes ; aucune allocation par cellule.
+Cible = [qT,qH,qC,qE,qD,qW,0], 7e composante (offset) toujours 0.
+
+## Ordre de remplissage et dernier résultat
+Ordre §1.3 : section -4..19, puis x, y, z (z le plus rapide). `SearchState.last`
+remis à None au début de chaque chunk (§4.6, INCERTAIN). La correction des
+cellules à minimum unique est indépendante de l'arbre, de l'ordre et du collant ;
+l'ordre et la réinitialisation ne jouent que sur les cellules à égalité.
+
+## Validation de la règle collante §4.4 (le comportement visé par §6.1)
+La table littérale des 22 vecteurs §6.1 (cible, dernier résultat, biome attendu)
+ne figure pas dans le matériel fourni. La règle elle-même est verrouillée de deux
+façons exactes :
+- `tests/search_tiebreak.rs` : arbre contrôlé (`BiomeTree::from_parts`) avec une
+  égalité construite (deux boîtes équidistantes, rangs connus) et une troisième
+  boîte hors minimum. Les cas couvrent exactement §4.4 : minimum unique ignore
+  `last` ; égalité sans `last` -> rang minimal ; égalité avec `last` minimal ->
+  collant conservé ; `last` non minimal -> ignoré ; enchaînement d'appels filant
+  l'état ; `min_info` renvoyant l'ensemble d'égalité.
+- `tests/oracle_biomes.rs` passe désormais par le chemin de PRODUCTION
+  (`source.fill_chunk` + `search` collant) et non plus par `min_info` seul. Pour
+  chaque cellule : on vérifie que le biome produit appartient à l'ensemble minimal
+  (invariant liant les deux chemins), égalité exacte contre vanilla sur les
+  cellules à minimum unique, appartenance sur les égalités, et on compte les
+  égalités identiques à vanilla (`tie_exact`).
+
+## Porte oracle (T9) : résultats
+Exécutée par le driver de conformité (`cargo-test [ok]` sur ce diff) : la
+compilation impose la présence de `index.json` (H2), et le test passe donc avec
+`unique_mismatch = 0` et `tie_divergent = 0` sur les 64 chunks. Le test imprime
+le décompte cellules à minimum unique / écarts uniques / cellules à égalité
+(dont identiques à vanilla) / égalités divergentes.
+
+## Vecteurs climatiques §00 §5.2
+Couverts bit à bit dans `tests/density.rs` (shift_x/shift_z graines 0 et 12345 ;
+continents/erosion graine 0 en (0,0,0),(100,0,-200),(-1000,0,5000)) et repris
+dans `tests/climate_vectors.rs` (T10), qui ajoute la quantification `q` de ces
+valeurs vers les entiers de cible biome attendus (-81, -1039, -308, 206, 3197,
+5192).
+
+## INCERTAIN / reportés
+- §2.5 : les 8 lignes littérales du tableau ne sont pas fournies ; couvert à la
+  place par `quantize::tests::intermediate_product_is_bit_exact` (bit à bit sur le
+  produit intermédiaire) et la cohérence `q == q_entry` sur toutes les valeurs
+  distinctes (`data::tests`).
+- §3.1 : les 39 valeurs distinctes sont vérifiées par `data::tests::`
+  `q_entry_matches_float_path_on_all_distinct_values` (itère les bornes réelles).
+- §6.1 : voir « Validation de la règle collante §4.4 » ci-dessus.
+- §1.7, §1.8, carvers, règles de surface : hors périmètre (H6).
+
+## Bornes arithmétiques de la distance
+`dist` accumule des écarts au carré en i64. Les coordonnées quantifiées restent
+de l'ordre de +/- quelques 10^4 à 10^5 ; 7 termes au carré restent largement sous
+i64::MAX. Pas de wrapping nécessaire.
+
+## Perf
+Balayage complet 7594 boîtes x 1536 cellules par chunk. Temps par chunk à relever
+avec `GenMetrics` côté serveur. Piste reportée si trop lent : index spatial sur
+l'arbre déjà construit, sans toucher §4.4.

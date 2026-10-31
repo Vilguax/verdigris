@@ -310,6 +310,49 @@ impl WorldgenData {
         })
     }
 
+    pub fn build_biome_source(&self, seed: i64) -> Result<crate::biome::BiomeSource, DataError> {
+        let assets = self.assets(seed)?;
+        let functions = self.density_functions()?;
+        let overworld = self.overworld()?;
+        let router = overworld
+            .get("noise_router")
+            .and_then(Value::as_object)
+            .ok_or_else(|| DataError::MissingSection("noise_router".to_string()))?;
+
+        let noise = overworld
+            .get("noise")
+            .and_then(Value::as_object)
+            .ok_or_else(|| DataError::MissingSection("noise_settings/noise".to_string()))?;
+        let read_i32 = |name: &str| -> Result<i32, DataError> {
+            noise
+                .get(name)
+                .and_then(Value::as_i64)
+                .and_then(|v| i32::try_from(v).ok())
+                .ok_or_else(|| DataError::MissingSection(format!("noise_settings/noise/{name}")))
+        };
+        let min_y = read_i32("min_y")?;
+        let height = read_i32("height")?;
+
+        let field = |name: &str| -> Result<Node, DataError> {
+            let value = router
+                .get(name)
+                .ok_or_else(|| DataError::MissingSection(format!("noise_router/{name}")))?;
+            let mut builder = Builder::new(functions, &assets);
+            Ok(builder.build(value)?)
+        };
+
+        Ok(crate::biome::BiomeSource::new(
+            field("temperature")?,
+            field("vegetation")?,
+            field("continents")?,
+            field("erosion")?,
+            field("depth")?,
+            field("ridges")?,
+            min_y,
+            height.max(0) as usize,
+        ))
+    }
+
     pub fn build_named(&self, key: &str, seed: i64) -> Result<(Node, usize), DataError> {
         let assets = self.assets(seed)?;
         let functions = self.density_functions()?;

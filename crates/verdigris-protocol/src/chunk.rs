@@ -498,6 +498,48 @@ mod tests {
     }
 
     #[test]
+    fn real_biome_ids_round_trip_through_network_and_disk() {
+        let mut biomes = [41u16; BIOMES_PER_SECTION];
+        biomes[1] = 11;
+        biomes[2] = 0;
+        biomes[3] = 7;
+        let entries: Vec<u32> = biomes.iter().map(|&b| b as u32).collect();
+
+        let mut buffer = Vec::new();
+        write_paletted_container(&entries, &biome_thresholds(), &mut buffer);
+        assert_eq!(
+            buffer[0], 2,
+            "4 biomes distincts -> palette indirecte 2 bits"
+        );
+        let (len, consumed) = read_var_int(&buffer[1..]).unwrap().unwrap();
+        assert_eq!(len, 4);
+        let mut cursor = 1 + consumed;
+        let mut palette = Vec::new();
+        for _ in 0..4 {
+            let (id, c) = read_var_int(&buffer[cursor..]).unwrap().unwrap();
+            palette.push(id as u16);
+            cursor += c;
+        }
+        assert_eq!(
+            palette,
+            vec![41, 11, 0, 7],
+            "palette dans l'ordre de première apparition"
+        );
+
+        let states = [0u16; BLOCKS_PER_SECTION];
+        let section = Section::from_cells(&states, &biomes);
+        assert_eq!(section.biome_at(1, 0, 0), 11);
+        assert_eq!(section.biome_at(2, 0, 0), 0);
+        assert_eq!(section.biome_at(3, 0, 0), 7);
+        let indices: Vec<u32> = entries
+            .iter()
+            .map(|e| palette.iter().position(|p| *p as u32 == *e).unwrap() as u32)
+            .collect();
+        let packed = pack_longs(&indices, 2);
+        assert_eq!(unpack_longs(&packed, 2, 64), indices);
+    }
+
+    #[test]
     fn unique_container_has_no_data_longs() {
         let mut buffer = Vec::new();
         write_paletted_container(&vec![7u32; 4096], &block_thresholds(), &mut buffer);
