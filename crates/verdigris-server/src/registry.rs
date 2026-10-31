@@ -168,6 +168,11 @@ pub struct Departure {
     pub remaining: Vec<OutboundSender>,
 }
 
+pub struct GamemodeChange {
+    pub senders: Vec<OutboundSender>,
+    pub actions: Vec<ObserverActions>,
+}
+
 struct ReadyInfo {
     uuid: u128,
     entity_id: i32,
@@ -180,14 +185,49 @@ fn is_spectator(game_mode: i32) -> bool {
     game_mode == SPECTATOR_GAME_MODE
 }
 
-fn broadcast_to_player(observer_mode: i32, target_mode: i32) -> bool {
-    is_spectator(observer_mode) || !is_spectator(target_mode)
+#[inline]
+pub fn broadcast_to(viewer_spectator: bool, target_spectator: bool) -> bool {
+    if viewer_spectator {
+        true
+    } else {
+        !target_spectator
+    }
 }
 
 fn within_range(a: &ReadyInfo, b: &ReadyInfo) -> bool {
     let dx = a.x - b.x;
     let dz = a.z - b.z;
     dx * dx + dz * dz <= TRACK_RANGE_BLOCKS * TRACK_RANGE_BLOCKS
+}
+
+fn voit(viewer: &ReadyInfo, viewer_sent: &HashSet<(i32, i32)>, target: &ReadyInfo) -> bool {
+    within_range(viewer, target)
+        && viewer_sent.contains(&(chunk_coord(target.x), chunk_coord(target.z)))
+        && broadcast_to(
+            is_spectator(viewer.game_mode),
+            is_spectator(target.game_mode),
+        )
+}
+
+fn entity_spawn_of(
+    slot: &Slot,
+    uuid: u128,
+    scratch: &mut Vec<(u8, EntityDataValue)>,
+) -> EntitySpawn {
+    let (x, y, z) = slot.tracked.base_position();
+    slot.meta.non_default_entries(scratch);
+    let meta_payload = set_entity_data_payload(slot.entity_id, scratch);
+    EntitySpawn {
+        entity_id: slot.entity_id,
+        uuid,
+        x,
+        y,
+        z,
+        yaw_byte: slot.tracked.base_yaw_byte(),
+        pitch_byte: slot.tracked.base_pitch_byte(),
+        meta_payload,
+        mainhand: slot.mainhand,
+    }
 }
 
 pub struct PlayerRegistry {
@@ -463,6 +503,113 @@ impl PlayerRegistry {
         slots.values().map(|slot| slot.sender.clone()).collect()
     }
 
+    pub fn change_gamemode(&self, uuid: u128, game_mode: i32) -> GamemodeChange {
+        let mut slots = self.slots.lock().unwrap();
+        if let Some(slot) = slots.get_mut(&uuid) {
+            slot.game_mode = game_mode;
+        }
+        let senders: Vec<OutboundSender> = slots.values().map(|slot| slot.sender.clone()).collect();
+
+        let p = match slots.get(&uuid) {
+            Some(slot) if slot.ready => ReadyInfo {
+                uuid,
+                entity_id: slot.entity_id,
+                x: slot.x,
+                z: slot.z,
+                game_mode: slot.game_mode,
+            },
+            _ => {
+                return GamemodeChange {
+                    senders,
+                    actions: Vec::new(),
+                };
+            }
+        };
+
+        let others: Vec<ReadyInfo> = slots
+            .iter()
+            .filter(|&(&o_uuid, slot)| slot.ready && o_uuid != uuid)
+            .map(|(&o_uuid, slot)| ReadyInfo {
+                uuid: o_uuid,
+                entity_id: slot.entity_id,
+                x: slot.x,
+                z: slot.z,
+                game_mode: slot.game_mode,
+            })
+            .collect();
+
+        let mut scratch: Vec<(u8, EntityDataValue)> = Vec::new();
+        let mut actions: Vec<ObserverActions> = Vec::new();
+        let mut p_removed: Vec<i32> = Vec::new();
+        let mut p_entered: Vec<EntitySpawn> = Vec::new();
+        let mut inserts: Vec<(u128, i32)> = Vec::new();
+        let mut removes: Vec<(u128, i32)> = Vec::new();
+
+        for o in &others {
+            let mut o_removed: Vec<i32> = Vec::new();
+            let mut o_entered: Vec<EntitySpawn> = Vec::new();
+
+            let was_o_sees_p = slots.get(&p.uuid).unwrap().observers.contains(&o.entity_id);
+            let now_o_sees_p = voit(o, &slots.get(&o.uuid).unwrap().sent_chunks, &p);
+            if was_o_sees_p && !now_o_sees_p {
+                o_removed.push(p.entity_id);
+                removes.push((p.uuid, o.entity_id));
+            } else if !was_o_sees_p && now_o_sees_p {
+                o_entered.push(entity_spawn_of(
+                    slots.get(&p.uuid).unwrap(),
+                    p.uuid,
+                    &mut scratch,
+                ));
+                inserts.push((p.uuid, o.entity_id));
+            }
+
+            let was_p_sees_o = slots.get(&o.uuid).unwrap().observers.contains(&p.entity_id);
+            let now_p_sees_o = voit(&p, &slots.get(&p.uuid).unwrap().sent_chunks, o);
+            if was_p_sees_o && !now_p_sees_o {
+                p_removed.push(o.entity_id);
+                removes.push((o.uuid, p.entity_id));
+            } else if !was_p_sees_o && now_p_sees_o {
+                p_entered.push(entity_spawn_of(
+                    slots.get(&o.uuid).unwrap(),
+                    o.uuid,
+                    &mut scratch,
+                ));
+                inserts.push((o.uuid, p.entity_id));
+            }
+
+            if !o_removed.is_empty() || !o_entered.is_empty() {
+                actions.push(ObserverActions {
+                    sender: slots.get(&o.uuid).unwrap().sender.clone(),
+                    removed: o_removed,
+                    entered: o_entered,
+                    moved: Vec::new(),
+                });
+            }
+        }
+
+        if !p_removed.is_empty() || !p_entered.is_empty() {
+            actions.push(ObserverActions {
+                sender: slots.get(&p.uuid).unwrap().sender.clone(),
+                removed: p_removed,
+                entered: p_entered,
+                moved: Vec::new(),
+            });
+        }
+
+        for (target, observer_entity) in inserts {
+            if let Some(slot) = slots.get_mut(&target) {
+                slot.observers.insert(observer_entity);
+            }
+        }
+        for (target, observer_entity) in removes {
+            if let Some(slot) = slots.get_mut(&target) {
+                slot.observers.remove(&observer_entity);
+            }
+        }
+
+        GamemodeChange { senders, actions }
+    }
+
     pub fn latency_broadcast(&self) -> (Vec<(u128, i32)>, Vec<OutboundSender>) {
         let slots = self.slots.lock().unwrap();
         let entries = slots
@@ -499,10 +646,7 @@ impl PlayerRegistry {
                 if a.entity_id == b.entity_id {
                     continue;
                 }
-                let visible = within_range(a, b)
-                    && a_sent.contains(&(chunk_coord(b.x), chunk_coord(b.z)))
-                    && broadcast_to_player(a.game_mode, b.game_mode);
-                if visible {
+                if voit(a, a_sent, b) {
                     new_obs.get_mut(&b.entity_id).unwrap().insert(a.entity_id);
                 }
             }
@@ -549,21 +693,11 @@ impl PlayerRegistry {
                 if was && !now {
                     removed.push(b.entity_id);
                 } else if !was && now {
-                    let b_slot = slots.get(&b.uuid).unwrap();
-                    let (bx, by, bz) = b_slot.tracked.base_position();
-                    b_slot.meta.non_default_entries(&mut meta_scratch);
-                    let meta_payload = set_entity_data_payload(b.entity_id, &meta_scratch);
-                    entered.push(EntitySpawn {
-                        entity_id: b.entity_id,
-                        uuid: b.uuid,
-                        x: bx,
-                        y: by,
-                        z: bz,
-                        yaw_byte: b_slot.tracked.base_yaw_byte(),
-                        pitch_byte: b_slot.tracked.base_pitch_byte(),
-                        meta_payload,
-                        mainhand: b_slot.mainhand,
-                    });
+                    entered.push(entity_spawn_of(
+                        slots.get(&b.uuid).unwrap(),
+                        b.uuid,
+                        &mut meta_scratch,
+                    ));
                 } else if was
                     && now
                     && let Some(frame) = move_frames.get(&b.entity_id)
@@ -735,6 +869,131 @@ mod tests {
             .find(|a| a.removed == vec![11])
             .expect("Alice perd Bob hors de portée");
         assert!(alice.entered.is_empty());
+    }
+
+    #[test]
+    fn broadcast_to_survival_sees_survival() {
+        assert!(broadcast_to(false, false));
+    }
+
+    #[test]
+    fn broadcast_to_survival_does_not_see_spectator() {
+        assert!(!broadcast_to(false, true));
+    }
+
+    #[test]
+    fn broadcast_to_spectator_sees_survival() {
+        assert!(broadcast_to(true, false));
+    }
+
+    #[test]
+    fn broadcast_to_spectator_sees_spectator() {
+        assert!(broadcast_to(true, true));
+    }
+
+    #[test]
+    fn change_gamemode_spectator_removes_from_non_spectator_only() {
+        let reg = registry();
+        let (tx_a, _rx_a) = unbounded_channel();
+        let (tx_b, _rx_b) = unbounded_channel();
+        let (tx_c, _rx_c) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
+        reg.register(2, 11, (0.5, -60.0, 0.5), "Bob".to_owned(), 1, 0, tx_b);
+        reg.register(3, 12, (0.5, -60.0, 0.5), "Ghost".to_owned(), 3, 0, tx_c);
+        reg.update_sent_chunks(1, &full_square((0, 0)));
+        reg.update_sent_chunks(2, &full_square((0, 0)));
+        reg.update_sent_chunks(3, &full_square((0, 0)));
+        reg.activate(1);
+        reg.activate(2);
+        reg.activate(3);
+        reg.tick(256);
+
+        let change = reg.change_gamemode(2, 3);
+        let bob_removed: Vec<i32> = change
+            .actions
+            .iter()
+            .flat_map(|a| a.removed.iter().copied())
+            .collect();
+        assert_eq!(
+            bob_removed,
+            vec![11],
+            "Bob devenu spectateur disparaît des observateurs non-spectateurs"
+        );
+        assert!(
+            change
+                .actions
+                .iter()
+                .all(|a| a.entered.iter().all(|e| e.entity_id != 11)),
+            "Bob ne réapparaît chez personne en entrant spectateur"
+        );
+
+        let slots = reg.slots.lock().unwrap();
+        assert!(
+            slots.get(&2).unwrap().observers.contains(&12),
+            "le spectateur Ghost continue de voir Bob"
+        );
+        assert!(
+            !slots.get(&2).unwrap().observers.contains(&10),
+            "Alice ne voit plus Bob"
+        );
+    }
+
+    #[test]
+    fn change_gamemode_back_to_survival_respawns_to_observers() {
+        let reg = registry();
+        let (tx_a, _rx_a) = unbounded_channel();
+        let (tx_b, _rx_b) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
+        reg.register(2, 11, (0.5, -60.0, 0.5), "Bob".to_owned(), 1, 0, tx_b);
+        reg.update_sent_chunks(1, &full_square((0, 0)));
+        reg.update_sent_chunks(2, &full_square((0, 0)));
+        reg.activate(1);
+        reg.activate(2);
+        reg.tick(256);
+
+        reg.change_gamemode(2, 3);
+        let change = reg.change_gamemode(2, 1);
+        let spawned: Vec<i32> = change
+            .actions
+            .iter()
+            .flat_map(|a| a.entered.iter().map(|e| e.entity_id))
+            .collect();
+        assert_eq!(
+            spawned,
+            vec![11],
+            "le retour en survie réapparaît chez Alice"
+        );
+        assert!(
+            change.actions.iter().all(|a| a.removed.is_empty()),
+            "aucun retrait au retour en survie"
+        );
+    }
+
+    #[test]
+    fn change_gamemode_two_spectators_see_each_other() {
+        let reg = registry();
+        let (tx_a, _rx_a) = unbounded_channel();
+        let (tx_b, _rx_b) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
+        reg.register(2, 11, (0.5, -60.0, 0.5), "Bob".to_owned(), 1, 0, tx_b);
+        reg.update_sent_chunks(1, &full_square((0, 0)));
+        reg.update_sent_chunks(2, &full_square((0, 0)));
+        reg.activate(1);
+        reg.activate(2);
+        reg.tick(256);
+
+        reg.change_gamemode(1, 3);
+        reg.change_gamemode(2, 3);
+
+        let slots = reg.slots.lock().unwrap();
+        assert!(
+            slots.get(&1).unwrap().observers.contains(&11),
+            "Bob spectateur voit Alice spectatrice"
+        );
+        assert!(
+            slots.get(&2).unwrap().observers.contains(&10),
+            "Alice spectatrice voit Bob spectateur"
+        );
     }
 
     #[test]

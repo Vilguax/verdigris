@@ -13,8 +13,8 @@ use verdigris_protocol::{
 };
 use verdigris_server::{
     ChunkStore, KeepAliveConfig, LoadOutcome, PlayerRegistry, REASON_CONFIG_NOT_VANILLA,
-    REASON_KEEP_ALIVE_TIMEOUT, REASON_LOGIN_INVALID_NAME, run, run_with_config, run_with_registry,
-    run_with_store,
+    REASON_KEEP_ALIVE_TIMEOUT, REASON_LOGIN_INVALID_NAME, broadcast_gamemode_change, run,
+    run_with_config, run_with_registry, run_with_store,
 };
 
 async fn spawn_server() -> SocketAddr {
@@ -2040,6 +2040,91 @@ async fn two_players_spawn_and_despawn_as_entities() {
         parse_player_info_remove(&info_remove_body),
         vec![offline_uuid("Bob")]
     );
+}
+
+async fn read_gamemode_update(client: &mut TcpStream, buf: &mut Vec<u8>) {
+    let (id, body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(id, 0x47, "changement de mode: Player Info Update 0x47");
+    assert_eq!(body[0], 0x04, "action UPDATE_GAME_MODE 0x04");
+}
+
+#[tokio::test]
+async fn spectator_mode_hides_and_restores_entity_over_tcp() {
+    let registry = Arc::new(PlayerRegistry::new("Verdigris", 20));
+    let addr = spawn_server_with_registry(Arc::clone(&registry)).await;
+
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    let alice_eid = consume_world_capturing_entity_id(&mut alice, &mut buf_a).await;
+    let (info_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(info_id, 0x47);
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_named(&mut bob, &mut buf_b, "Bob").await;
+    let bob_eid = consume_world_capturing_entity_id(&mut bob, &mut buf_b).await;
+    let (info_id, _) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
+    assert_eq!(info_id, 0x47);
+    let (tab_id, _) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let alice_seen = read_spawn_bundle(&mut bob, &mut buf_b).await;
+    assert_eq!(alice_seen.entity_id, alice_eid, "Bob voit l'entité d'Alice");
+
+    let (add_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(add_id, 0x47);
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D);
+    let bob_seen = read_spawn_bundle(&mut alice, &mut buf_a).await;
+    assert_eq!(bob_seen.entity_id, bob_eid, "Alice voit l'entité de Bob");
+
+    let alice_uuid = offline_uuid("Alice");
+    let bob_uuid = offline_uuid("Bob");
+
+    broadcast_gamemode_change(&registry, bob_uuid, 3);
+    read_gamemode_update(&mut alice, &mut buf_a).await;
+    let (remove_id, remove_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(
+        remove_id, 0x4E,
+        "Bob spectateur: Remove Entities chez Alice"
+    );
+    assert_eq!(
+        parse_remove_entities(&remove_body),
+        vec![bob_eid],
+        "la disparition cible l'entité de Bob"
+    );
+    read_gamemode_update(&mut bob, &mut buf_b).await;
+
+    broadcast_gamemode_change(&registry, bob_uuid, 0);
+    read_gamemode_update(&mut alice, &mut buf_a).await;
+    let bob_again = read_spawn_bundle(&mut alice, &mut buf_a).await;
+    assert_eq!(
+        bob_again.entity_id, bob_eid,
+        "retour en survie: Bob réapparaît chez Alice"
+    );
+    read_gamemode_update(&mut bob, &mut buf_b).await;
+
+    broadcast_gamemode_change(&registry, alice_uuid, 3);
+    read_gamemode_update(&mut bob, &mut buf_b).await;
+    let (remove_id, remove_body) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
+    assert_eq!(
+        remove_id, 0x4E,
+        "Alice spectatrice: Remove Entities chez Bob"
+    );
+    assert_eq!(parse_remove_entities(&remove_body), vec![alice_eid]);
+    read_gamemode_update(&mut alice, &mut buf_a).await;
+
+    broadcast_gamemode_change(&registry, bob_uuid, 3);
+    read_gamemode_update(&mut bob, &mut buf_b).await;
+    let alice_again = read_spawn_bundle(&mut bob, &mut buf_b).await;
+    assert_eq!(
+        alice_again.entity_id, alice_eid,
+        "deux spectateurs: Alice réapparaît chez Bob"
+    );
+    read_gamemode_update(&mut alice, &mut buf_a).await;
 }
 
 fn parse_entity_pos(body: &[u8]) -> (i32, i16, i16, i16) {
