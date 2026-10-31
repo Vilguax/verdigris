@@ -80,6 +80,7 @@ Hors périmètre : le format région vanilla `.mca`, les joueurs, les inventaire
 | `tests-data/oracle-1b` | Relief et aquifères vanilla : 64 chunks, air, solide, eau ou lave bloc par bloc |
 | `tests-data/oracle-biomes` | Biomes vanilla : 64 chunks couvrant 21 biomes, un identifiant réseau par cellule de 4 × 4 × 4 blocs |
 | `tests-data/oracle-materiaux` | Blocs vanilla après les règles de matériaux : 48 chunks au statut terrain, un identifiant de bloc u16 par case |
+| `tests-data/oracle-carvers` | Blocs vanilla avec grottes et canyons : 48 chunks au statut terrain, même format que `oracle-materiaux` |
 
 ## Données du jeu
 
@@ -127,6 +128,13 @@ Les règles de matériaux (surface, filons, deepslate) ont l'oracle `tests-data/
 
 ```sh
 python tools/oracle.py export-blocs <monde>/dimensions/minecraft/overworld/region tests-data/oracle-materiaux 0,0 1,0
+```
+
+Les carvers (grottes et canyons) ont l'oracle `tests-data/oracle-carvers` : monde vanilla avec aquifères et carvers actifs, features vidées et sans structures (`--carvers`), mêmes règles d'export que `oracle-materiaux`. Les 48 chunks sont choisis pour leur air souterrain et leur lave de fond.
+
+```sh
+python tools/oracle.py datapack server.jar <monde>/datapacks/oracle-carvers --carvers
+python tools/oracle.py export-blocs <monde>/dimensions/minecraft/overworld/region tests-data/oracle-carvers 0,0 1,0
 ```
 
 La porte oracle 1a est le test d'intégration `final_fill_matches_oracle_on_all_chunks` du crate `verdigris-worldgen`. Elle construit le générateur en mode `AquiferMode::Disabled` (règle simple, sans aquifères), remplit les 40 chunks et exige l'égalité exacte (solide ⇔ pierre) sur toutes les cases non exclues, avec diagnostic de chunk, position et densité en cas d'écart :

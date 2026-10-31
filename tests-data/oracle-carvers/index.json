@@ -1,0 +1,347 @@
+{
+ "format": 1,
+ "game_version": "26.3",
+ "seed": 20261029,
+ "min_y": -64,
+ "height": 384,
+ "index": "(y - min_y) * 256 + z * 16 + x",
+ "value": "identifiant de bloc u16 petit-boutiste (champ id de blocks.json, registre minecraft:block)",
+ "chunks": [
+  {
+   "x": -193,
+   "z": 328,
+   "file": "-193.328.bin",
+   "status": "minecraft:terrain",
+   "distinct": 8
+  },
+  {
+   "x": -189,
+   "z": 327,
+   "file": "-189.327.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 8
+  },
+  {
+   "x": -188,
+   "z": 327,
+   "file": "-188.327.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 6
+  },
+  {
+   "x": -187,
+   "z": 326,
+   "file": "-187.326.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 6
+  },
+  {
+   "x": -187,
+   "z": 327,
+   "file": "-187.327.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 6
+  },
+  {
+   "x": -187,
+   "z": 328,
+   "file": "-187.328.bin",
+   "status": "minecraft:terrain",
+   "distinct": 6
+  },
+  {
+   "x": -186,
+   "z": 326,
+   "file": "-186.326.bin",
+   "status": "minecraft:terrain",
+   "distinct": 8
+  },
+  {
+   "x": -186,
+   "z": 327,
+   "file": "-186.327.bin",
+   "status": "minecraft:terrain",
+   "distinct": 10
+  },
+  {
+   "x": -186,
+   "z": 328,
+   "file": "-186.328.bin",
+   "status": "minecraft:terrain",
+   "distinct": 7
+  },
+  {
+   "x": -175,
+   "z": 313,
+   "file": "-175.313.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 7
+  },
+  {
+   "x": -175,
+   "z": 314,
+   "file": "-175.314.bin",
+   "status": "minecraft:terrain",
+   "distinct": 7
+  },
+  {
+   "x": -174,
+   "z": 313,
+   "file": "-174.313.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 8
+  },
+  {
+   "x": -174,
+   "z": 314,
+   "file": "-174.314.bin",
+   "status": "minecraft:terrain",
+   "distinct": 8
+  },
+  {
+   "x": -173,
+   "z": 305,
+   "file": "-173.305.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 8
+  },
+  {
+   "x": -173,
+   "z": 310,
+   "file": "-173.310.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 7
+  },
+  {
+   "x": -173,
+   "z": 311,
+   "file": "-173.311.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 7
+  },
+  {
+   "x": -173,
+   "z": 312,
+   "file": "-173.312.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 7
+  },
+  {
+   "x": -173,
+   "z": 313,
+   "file": "-173.313.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 8
+  },
+  {
+   "x": -173,
+   "z": 314,
+   "file": "-173.314.bin",
+   "status": "minecraft:terrain",
+   "distinct": 8
+  },
+  {
+   "x": -172,
+   "z": 310,
+   "file": "-172.310.bin",
+   "status": "minecraft:terrain",
+   "distinct": 7
+  },
+  {
+   "x": -172,
+   "z": 311,
+   "file": "-172.311.bin",
+   "status": "minecraft:terrain",
+   "distinct": 7
+  },
+  {
+   "x": -172,
+   "z": 312,
+   "file": "-172.312.bin",
+   "status": "minecraft:terrain",
+   "distinct": 7
+  },
+  {
+   "x": -172,
+   "z": 313,
+   "file": "-172.313.bin",
+   "status": "minecraft:terrain",
+   "distinct": 7
+  },
+  {
+   "x": -172,
+   "z": 314,
+   "file": "-172.314.bin",
+   "status": "minecraft:terrain",
+   "distinct": 10
+  },
+  {
+   "x": -4,
+   "z": -12,
+   "file": "-4.-12.bin",
+   "status": "minecraft:terrain",
+   "distinct": 8
+  },
+  {
+   "x": -4,
+   "z": -11,
+   "file": "-4.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 8
+  },
+  {
+   "x": -3,
+   "z": -12,
+   "file": "-3.-12.bin",
+   "status": "minecraft:terrain",
+   "distinct": 8
+  },
+  {
+   "x": 3,
+   "z": -12,
+   "file": "3.-12.bin",
+   "status": "minecraft:terrain",
+   "distinct": 8
+  },
+  {
+   "x": 3,
+   "z": -11,
+   "file": "3.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 7
+  },
+  {
+   "x": 4,
+   "z": -12,
+   "file": "4.-12.bin",
+   "status": "minecraft:terrain",
+   "distinct": 8
+  },
+  {
+   "x": 4,
+   "z": -11,
+   "file": "4.-11.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 7
+  },
+  {
+   "x": 10,
+   "z": -9,
+   "file": "10.-9.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 8
+  },
+  {
+   "x": 248,
+   "z": -119,
+   "file": "248.-119.bin",
+   "status": "minecraft:terrain",
+   "distinct": 10
+  },
+  {
+   "x": 249,
+   "z": -122,
+   "file": "249.-122.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 12
+  },
+  {
+   "x": 249,
+   "z": -117,
+   "file": "249.-117.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 7
+  },
+  {
+   "x": 249,
+   "z": -116,
+   "file": "249.-116.bin",
+   "status": "minecraft:terrain",
+   "distinct": 6
+  },
+  {
+   "x": 252,
+   "z": -117,
+   "file": "252.-117.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 7
+  },
+  {
+   "x": 253,
+   "z": -117,
+   "file": "253.-117.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 6
+  },
+  {
+   "x": 254,
+   "z": -135,
+   "file": "254.-135.bin",
+   "status": "minecraft:terrain",
+   "distinct": 8
+  },
+  {
+   "x": 255,
+   "z": -135,
+   "file": "255.-135.bin",
+   "status": "minecraft:terrain",
+   "distinct": 8
+  },
+  {
+   "x": 255,
+   "z": -134,
+   "file": "255.-134.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 7
+  },
+  {
+   "x": 256,
+   "z": -126,
+   "file": "256.-126.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 6
+  },
+  {
+   "x": 258,
+   "z": -117,
+   "file": "258.-117.bin",
+   "status": "minecraft:initialize_light",
+   "distinct": 7
+  },
+  {
+   "x": 258,
+   "z": -116,
+   "file": "258.-116.bin",
+   "status": "minecraft:terrain",
+   "distinct": 7
+  },
+  {
+   "x": 259,
+   "z": -119,
+   "file": "259.-119.bin",
+   "status": "minecraft:terrain",
+   "distinct": 8
+  },
+  {
+   "x": 259,
+   "z": -118,
+   "file": "259.-118.bin",
+   "status": "minecraft:terrain",
+   "distinct": 7
+  },
+  {
+   "x": 259,
+   "z": -117,
+   "file": "259.-117.bin",
+   "status": "minecraft:terrain",
+   "distinct": 7
+  },
+  {
+   "x": 259,
+   "z": -116,
+   "file": "259.-116.bin",
+   "status": "minecraft:terrain",
+   "distinct": 7
+  }
+ ]
+}
