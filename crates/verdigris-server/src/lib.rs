@@ -37,21 +37,22 @@ use tracing_subscriber::EnvFilter;
 use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
     COMPRESSION_THRESHOLD, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, HumanoidArm,
-    Intent, ListedPlayer, MAIN_HAND_LEFT, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
-    MovePlayerStatus, PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID, Serverbound, State,
-    StatusInfo, World, add_entity_payload, block_changed_ack_payload, block_update_payload,
-    build_compressed_packet, build_packet, bundle_delimiter_payload, chunk_batch_finished_payload,
-    chunk_batch_start_payload, chunk_coord, chunks_to_forget, chunks_to_load, client_has_core,
-    config_disconnect_payload, container_set_slot_payload, decode_client_information,
-    decode_compressed_frame, decode_frame, decode_known_packs, decode_serverbound,
-    forget_level_chunk_payload, game_event_payload, keep_alive_payload, known_packs_payload,
-    login_disconnect_payload, login_play_payload, login_success_payload, network_data,
-    offline_uuid, packet_ids, player_abilities_payload, player_info_remove_payload,
-    player_info_update_gamemode_payload, player_info_update_init_payload,
-    player_info_update_latency_payload, player_position_payload, pong_payload, random_session_id,
-    read_var_int, registry_data_payload, remove_entities_payload, server_known_pack,
-    set_chunk_cache_center_payload, set_compression_payload, set_held_slot_payload, status_json,
-    status_response_payload, tab_list_payload, update_tags_payload, validate_name,
+    Intent, ItemStack, ListedPlayer, MAIN_HAND_LEFT, MovePlayerPos, MovePlayerPosRot,
+    MovePlayerRot, MovePlayerStatus, PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID,
+    SWING_DURATION, SWING_WHACK, Serverbound, State, StatusInfo, World, add_entity_payload,
+    block_changed_ack_payload, block_update_payload, build_compressed_packet, build_packet,
+    bundle_delimiter_payload, chunk_batch_finished_payload, chunk_batch_start_payload, chunk_coord,
+    chunks_to_forget, chunks_to_load, client_has_core, config_disconnect_payload,
+    container_set_slot_payload, decode_client_information, decode_compressed_frame, decode_frame,
+    decode_known_packs, decode_serverbound, forget_level_chunk_payload, game_event_payload,
+    keep_alive_payload, known_packs_payload, login_disconnect_payload, login_play_payload,
+    login_success_payload, network_data, offline_uuid, packet_ids, player_abilities_payload,
+    player_info_remove_payload, player_info_update_gamemode_payload,
+    player_info_update_init_payload, player_info_update_latency_payload, player_position_payload,
+    pong_payload, random_session_id, read_var_int, registry_data_payload, remove_entities_payload,
+    server_known_pack, set_chunk_cache_center_payload, set_compression_payload,
+    set_equipment_payload, set_held_slot_payload, status_json, status_response_payload,
+    swing_animation_payload, tab_list_payload, update_tags_payload, validate_name,
     write_chunk_payload,
 };
 use verdigris_protocol::{GAME_VERSION, WORLD_MAX_Y, WORLD_MIN_Y, is_air, is_fluid};
@@ -231,6 +232,15 @@ fn spawn_bundle(spawn: &EntitySpawn) -> Vec<Arc<[u8]>> {
         frames.push(frame);
     }
     if let Some(frame) = frame_arc(play_cb::SET_ENTITY_DATA, &spawn.meta_payload) {
+        frames.push(frame);
+    }
+    if let ItemStack::Item { count, .. } = spawn.mainhand
+        && count > 0
+        && let Some(frame) = frame_arc(
+            play_cb::SET_EQUIPMENT,
+            &set_equipment_payload(spawn.entity_id, &[(0, spawn.mainhand)]),
+        )
+    {
         frames.push(frame);
     }
     if let Some(frame) = frame_arc(play_cb::BUNDLE_DELIMITER, &bundle_delimiter_payload()) {
@@ -816,6 +826,7 @@ async fn dispatch(
         | Serverbound::PlaySetCreativeModeSlot(_)
         | Serverbound::PlayPickItemFromBlock(_)
         | Serverbound::PlayClientInformation(_)
+        | Serverbound::PlayPunch
         | Serverbound::PlayIgnored { .. } => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
         }
@@ -1512,6 +1523,7 @@ async fn run_play(
                             {
                                 return;
                             }
+                            sync_equipment(&session);
                         }
                         Err(err) => {
                             let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
@@ -1592,6 +1604,47 @@ fn publish_orientation(session: &Session<'_>) {
     session
         .registry
         .set_orientation(session.uuid, yaw, pitch, sneaking);
+}
+
+fn mainhand_stack(player: &PlayerState) -> ItemStack {
+    match player.inventory.selected_item() {
+        Some(slot) => ItemStack::Item {
+            item: slot.item,
+            count: slot.count,
+        },
+        None => ItemStack::Empty,
+    }
+}
+
+fn broadcast_swing(session: &Session<'_>) {
+    let Some((entity_id, senders)) = session.registry.try_swing(session.uuid) else {
+        return;
+    };
+    if senders.is_empty() {
+        return;
+    }
+    if let Some(frame) = frame_arc(
+        play_cb::SWING_ANIMATION,
+        &swing_animation_payload(entity_id, 0, SWING_WHACK, SWING_DURATION),
+    ) {
+        push_frame(&senders, &frame);
+    }
+}
+
+fn sync_equipment(session: &Session<'_>) {
+    let item = mainhand_stack(&session.player);
+    let Some((entity_id, senders)) = session.registry.update_mainhand(session.uuid, item) else {
+        return;
+    };
+    if senders.is_empty() {
+        return;
+    }
+    if let Some(frame) = frame_arc(
+        play_cb::SET_EQUIPMENT,
+        &set_equipment_payload(entity_id, &[(0, item)]),
+    ) {
+        push_frame(&senders, &frame);
+    }
 }
 
 async fn handle_play_packet(
@@ -1701,10 +1754,16 @@ async fn handle_play_packet(
             emit_interaction(stream, framing, state, result).await
         }
         Serverbound::PlayUseItemOn(use_item_on) => {
+            let hand = use_item_on.hand;
             let result = session
                 .player
                 .handle_use_item_on(session.world, use_item_on);
-            emit_interaction(stream, framing, state, result).await
+            let placed = matches!(result, player::ActionResult::Respond { .. });
+            let closed = emit_interaction(stream, framing, state, result).await;
+            if !closed && hand == 0 && placed {
+                broadcast_swing(session);
+            }
+            closed
         }
         Serverbound::PlayUseItem(use_item) => {
             let result = session.player.handle_use_item(session.world, use_item);
@@ -1760,6 +1819,10 @@ async fn handle_play_packet(
                 info.model_customisation,
                 arm_of(info.main_hand == MAIN_HAND_LEFT),
             );
+            false
+        }
+        Serverbound::PlayPunch => {
+            broadcast_swing(session);
             false
         }
         Serverbound::PlayIgnored { id } => {

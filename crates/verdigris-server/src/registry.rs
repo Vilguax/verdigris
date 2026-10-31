@@ -1,17 +1,28 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::UnboundedSender;
 use verdigris_protocol::{
-    EntityDataValue, EntitySnapshot, HumanoidArm, ListedPlayer, Pose, TrackedState, chunk_coord,
-    frame_entity_pass, set_entity_data_payload,
+    EntityDataValue, EntitySnapshot, HumanoidArm, ItemStack, ListedPlayer, Pose, TrackedState,
+    chunk_coord, frame_entity_pass, set_entity_data_payload,
 };
 
 pub type OutboundSender = UnboundedSender<Arc<[u8]>>;
 
 pub const TRACK_RANGE_BLOCKS: f64 = 128.0;
 const SPECTATOR_GAME_MODE: i32 = 3;
+const SWING_DURATION_TICKS: u64 = 6;
+
+pub fn accepts_swing(last_start: Option<u64>, now: u64, duration: u64) -> bool {
+    match last_start {
+        None => true,
+        Some(start) => {
+            let elapsed = now.saturating_sub(start);
+            elapsed == 0 || elapsed > duration / 2
+        }
+    }
+}
 
 const META_FLAGS: u8 = 0;
 const META_POSE: u8 = 6;
@@ -97,6 +108,8 @@ struct Slot {
     sent_chunks: HashSet<(i32, i32)>,
     observers: HashSet<i32>,
     meta: PlayerMeta,
+    mainhand: ItemStack,
+    last_swing_start_tick: Option<u64>,
     sender: OutboundSender,
 }
 
@@ -129,6 +142,7 @@ pub struct EntitySpawn {
     pub yaw_byte: u8,
     pub pitch_byte: u8,
     pub meta_payload: Vec<u8>,
+    pub mainhand: ItemStack,
 }
 
 pub struct ObserverActions {
@@ -180,6 +194,7 @@ pub struct PlayerRegistry {
     slots: Mutex<HashMap<u128, Slot>>,
     motd: String,
     max_players: i32,
+    tick_counter: AtomicU64,
 }
 
 impl PlayerRegistry {
@@ -188,7 +203,51 @@ impl PlayerRegistry {
             slots: Mutex::new(HashMap::new()),
             motd: motd.to_owned(),
             max_players,
+            tick_counter: AtomicU64::new(0),
         }
+    }
+
+    pub fn current_tick(&self) -> u64 {
+        self.tick_counter.load(Ordering::Relaxed)
+    }
+
+    pub fn try_swing(&self, uuid: u128) -> Option<(i32, Vec<OutboundSender>)> {
+        let now = self.tick_counter.load(Ordering::Relaxed);
+        let mut slots = self.slots.lock().unwrap();
+        let slot = slots.get(&uuid)?;
+        if !accepts_swing(slot.last_swing_start_tick, now, SWING_DURATION_TICKS) {
+            return None;
+        }
+        let entity_id = slot.entity_id;
+        let observers = slot.observers.clone();
+        slots.get_mut(&uuid).unwrap().last_swing_start_tick = Some(now);
+        let senders = slots
+            .values()
+            .filter(|slot| observers.contains(&slot.entity_id))
+            .map(|slot| slot.sender.clone())
+            .collect();
+        Some((entity_id, senders))
+    }
+
+    pub fn update_mainhand(
+        &self,
+        uuid: u128,
+        item: ItemStack,
+    ) -> Option<(i32, Vec<OutboundSender>)> {
+        let mut slots = self.slots.lock().unwrap();
+        let slot = slots.get(&uuid)?;
+        if slot.mainhand == item {
+            return None;
+        }
+        let entity_id = slot.entity_id;
+        let observers = slot.observers.clone();
+        slots.get_mut(&uuid).unwrap().mainhand = item;
+        let senders = slots
+            .values()
+            .filter(|slot| observers.contains(&slot.entity_id))
+            .map(|slot| slot.sender.clone())
+            .collect();
+        Some((entity_id, senders))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -242,6 +301,8 @@ impl PlayerRegistry {
                 sent_chunks: HashSet::new(),
                 observers: HashSet::new(),
                 meta: PlayerMeta::new(),
+                mainhand: ItemStack::Empty,
+                last_swing_start_tick: None,
                 sender,
             },
         );
@@ -413,6 +474,7 @@ impl PlayerRegistry {
     }
 
     pub fn tick(&self, threshold: usize) -> TickOutput {
+        self.tick_counter.fetch_add(1, Ordering::Relaxed);
         let mut slots = self.slots.lock().unwrap();
 
         let ready: Vec<ReadyInfo> = slots
@@ -500,6 +562,7 @@ impl PlayerRegistry {
                         yaw_byte: b_slot.tracked.base_yaw_byte(),
                         pitch_byte: b_slot.tracked.base_pitch_byte(),
                         meta_payload,
+                        mainhand: b_slot.mainhand,
                     });
                 } else if was
                     && now
@@ -848,6 +911,72 @@ mod tests {
 
         let again = reg.tick(256);
         assert!(again.meta.is_empty(), "plus rien de sale au tick suivant");
+    }
+
+    #[test]
+    fn swing_refused_inside_half_duration_accepted_after() {
+        assert!(accepts_swing(None, 100, 6), "premier balancement accepté");
+        assert!(
+            !accepts_swing(Some(100), 102, 6),
+            "second balancement à 2 ticks refusé"
+        );
+        assert!(
+            accepts_swing(Some(100), 104, 6),
+            "balancement à 4 ticks accepté"
+        );
+        assert!(
+            accepts_swing(Some(100), 100, 6),
+            "même tick (elapsed 0) accepté"
+        );
+    }
+
+    #[test]
+    fn try_swing_targets_observers_and_enforces_delay() {
+        let reg = registry();
+        let (tx_a, _rx_a) = unbounded_channel();
+        let (tx_b, _rx_b) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
+        reg.register(2, 11, (0.5, -60.0, 0.5), "Bob".to_owned(), 1, 0, tx_b);
+        reg.update_sent_chunks(1, &full_square((0, 0)));
+        reg.update_sent_chunks(2, &full_square((0, 0)));
+        reg.activate(1);
+        reg.activate(2);
+        reg.tick(256);
+
+        let (entity_id, senders) = reg.try_swing(2).expect("premier balancement accepté");
+        assert_eq!(entity_id, 11);
+        assert_eq!(senders.len(), 1, "seul l'observateur Alice est visé");
+        reg.tick(256);
+        assert!(
+            reg.try_swing(2).is_none(),
+            "balancement un tick après le précédent refusé"
+        );
+    }
+
+    #[test]
+    fn update_mainhand_detects_change_and_targets_observers() {
+        let reg = registry();
+        let (tx_a, _rx_a) = unbounded_channel();
+        let (tx_b, _rx_b) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
+        reg.register(2, 11, (0.5, -60.0, 0.5), "Bob".to_owned(), 1, 0, tx_b);
+        reg.update_sent_chunks(1, &full_square((0, 0)));
+        reg.update_sent_chunks(2, &full_square((0, 0)));
+        reg.activate(1);
+        reg.activate(2);
+        reg.tick(256);
+
+        let item = ItemStack::Item { count: 1, item: 55 };
+        let (entity_id, senders) = reg.update_mainhand(2, item).expect("changement détecté");
+        assert_eq!(entity_id, 11);
+        assert_eq!(senders.len(), 1);
+        assert!(
+            reg.update_mainhand(2, item).is_none(),
+            "aucun changement: pas de rediffusion"
+        );
+        let (_eid, _senders) = reg
+            .update_mainhand(2, ItemStack::Empty)
+            .expect("passage plein->vide détecté");
     }
 
     #[test]

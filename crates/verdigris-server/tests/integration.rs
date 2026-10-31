@@ -2247,6 +2247,204 @@ async fn observer_receives_movement_rotation_departure_and_return() {
     assert_eq!(back.pitch_byte, 0x00, "tangage de base nul");
 }
 
+fn compressed_punch_frame() -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x2E, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn parse_swing(body: &[u8]) -> (i32, i32, i32, i32) {
+    let (entity_id, u1) = read_var_int(body).unwrap().unwrap();
+    let mut cursor = &body[u1..];
+    let (hand, u2) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[u2..];
+    let (anim, u3) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[u3..];
+    let (duration, _u4) = read_var_int(cursor).unwrap().unwrap();
+    (entity_id, hand, anim, duration)
+}
+
+#[allow(clippy::type_complexity)]
+fn parse_set_equipment(body: &[u8]) -> (i32, Vec<(i8, Option<(i32, i32)>)>) {
+    let (entity_id, used) = read_var_int(body).unwrap().unwrap();
+    let mut cursor = &body[used..];
+    let mut entries = Vec::new();
+    loop {
+        let raw = cursor[0];
+        cursor = &cursor[1..];
+        let slot = (raw & 0x7F) as i8;
+        let has_more = raw & 0x80 != 0;
+        let (count, c) = read_var_int(cursor).unwrap().unwrap();
+        cursor = &cursor[c..];
+        let stack = if count > 0 {
+            let (item, ci) = read_var_int(cursor).unwrap().unwrap();
+            cursor = &cursor[ci..];
+            let (_added, ca) = read_var_int(cursor).unwrap().unwrap();
+            cursor = &cursor[ca..];
+            let (_removed, cr) = read_var_int(cursor).unwrap().unwrap();
+            cursor = &cursor[cr..];
+            Some((item, count))
+        } else {
+            None
+        };
+        entries.push((slot, stack));
+        if !has_more {
+            break;
+        }
+    }
+    (entity_id, entries)
+}
+
+async fn expect_player_info_and_tab(client: &mut TcpStream, buf: &mut Vec<u8>) {
+    let (info_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(info_id, 0x47);
+    let (tab_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(tab_id, 0x7D);
+}
+
+fn is_movement_frame(id: i32) -> bool {
+    matches!(id, 0x36 | 0x37 | 0x39 | 0x55 | 0x23)
+}
+
+async fn read_until_id(client: &mut TcpStream, buf: &mut Vec<u8>, wanted: i32) -> Vec<u8> {
+    loop {
+        let (id, body) = read_one_compressed_frame(client, buf).await;
+        if id == wanted {
+            return body;
+        }
+        assert!(
+            is_movement_frame(id),
+            "frame inattendue {id:#x} en attendant {wanted:#x}"
+        );
+    }
+}
+
+#[allow(clippy::type_complexity)]
+async fn read_spawn_bundle_maybe_equipment(
+    client: &mut TcpStream,
+    buf: &mut Vec<u8>,
+) -> (AddedEntity, Option<(i32, Vec<(i8, Option<(i32, i32)>)>)>) {
+    let (open_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(open_id, 0x00, "ouverture du bundle d'apparition");
+    let (add_id, add_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(add_id, 0x01, "add_entity 0x01");
+    let added = parse_add_entity(&add_body);
+    let (data_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(data_id, 0x65, "set_entity_data 0x65");
+    let (next_id, next_body) = read_one_compressed_frame(client, buf).await;
+    if next_id == 0x68 {
+        let equipment = parse_set_equipment(&next_body);
+        let (close_id, _) = read_one_compressed_frame(client, buf).await;
+        assert_eq!(close_id, 0x00, "fermeture du bundle après l'équipement");
+        (added, Some(equipment))
+    } else {
+        assert_eq!(next_id, 0x00, "fermeture du bundle sans équipement");
+        (added, None)
+    }
+}
+
+#[tokio::test]
+async fn swing_and_equipment_broadcast_over_tcp() {
+    let addr = spawn_server().await;
+
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    let alice_id = consume_world_capturing_entity_id(&mut alice, &mut buf_a).await;
+    expect_player_info_and_tab(&mut alice, &mut buf_a).await;
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_named(&mut bob, &mut buf_b, "Bob").await;
+    let bob_id = consume_world_capturing_entity_id(&mut bob, &mut buf_b).await;
+    expect_player_info_and_tab(&mut bob, &mut buf_b).await;
+    let alice_seen = read_spawn_bundle(&mut bob, &mut buf_b).await;
+    assert_eq!(alice_seen.entity_id, alice_id);
+
+    let (add_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(add_id, 0x47, "Alice reçoit l'ADD_PLAYER de Bob");
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D);
+    let bob_spawn = read_spawn_bundle(&mut alice, &mut buf_a).await;
+    assert_eq!(bob_spawn.entity_id, bob_id);
+
+    bob.write_all(&compressed_punch_frame()).await.unwrap();
+    let anim_body = read_until_id(&mut alice, &mut buf_a, 0x7B).await;
+    let (swing_eid, hand, anim, duration) = parse_swing(&anim_body);
+    assert_eq!(swing_eid, bob_id, "le balancement porte l'entité de Bob");
+    assert_eq!(hand, 0, "main principale");
+    assert_eq!(anim, 1, "animation whack");
+    assert_eq!(duration, 6, "durée de 6 ticks");
+
+    if let Some((id, _)) =
+        try_read_compressed_frame(&mut bob, &mut buf_b, Duration::from_millis(200)).await
+    {
+        assert!(
+            is_movement_frame(id),
+            "l'émetteur ne reçoit jamais son propre balancement, reçu {id:#x}"
+        );
+    }
+
+    let dirt = item_id_of_name("minecraft:dirt").unwrap();
+    bob.write_all(&compressed_set_creative_mode_slot_frame(36, dirt, 1))
+        .await
+        .unwrap();
+    let eq_body = read_until_id(&mut alice, &mut buf_a, 0x68).await;
+    let (eid, entries) = parse_set_equipment(&eq_body);
+    assert_eq!(eid, bob_id, "Alice reçoit l'équipement de Bob");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, 0, "emplacement main principale (0)");
+    assert_eq!(entries[0].1, Some((dirt, 1)), "terre tenue en main");
+
+    bob.write_all(&compressed_set_carried_item_frame(1))
+        .await
+        .unwrap();
+    let eq_body = read_until_id(&mut alice, &mut buf_a, 0x68).await;
+    let (eid, entries) = parse_set_equipment(&eq_body);
+    assert_eq!(eid, bob_id, "Alice voit la main passer à vide");
+    assert_eq!(entries[0].0, 0);
+    assert_eq!(entries[0].1, None, "pile vide encodée 00");
+
+    bob.write_all(&compressed_set_carried_item_frame(0))
+        .await
+        .unwrap();
+    let eq_body = read_until_id(&mut alice, &mut buf_a, 0x68).await;
+    let (_eid, entries) = parse_set_equipment(&eq_body);
+    assert_eq!(entries[0].1, Some((dirt, 1)), "retour sur la terre");
+
+    let mut carol = TcpStream::connect(addr).await.unwrap();
+    let mut buf_c = Vec::new();
+    drive_to_play_named(&mut carol, &mut buf_c, "Carol").await;
+    let _carol_id = consume_world_capturing_entity_id(&mut carol, &mut buf_c).await;
+    expect_player_info_and_tab(&mut carol, &mut buf_c).await;
+
+    let first = read_spawn_bundle_maybe_equipment(&mut carol, &mut buf_c).await;
+    let second = read_spawn_bundle_maybe_equipment(&mut carol, &mut buf_c).await;
+    let (bob_bundle, alice_bundle) = if first.0.entity_id == bob_id {
+        (first, second)
+    } else {
+        (second, first)
+    };
+
+    assert_eq!(bob_bundle.0.uuid, offline_uuid("Bob"));
+    let (eq_eid, eq_entries) = bob_bundle
+        .1
+        .expect("le bundle d'apparition de Bob contient son équipement");
+    assert_eq!(eq_eid, bob_id);
+    assert_eq!(eq_entries[0].0, 0);
+    assert_eq!(
+        eq_entries[0].1,
+        Some((dirt, 1)),
+        "Carol voit Bob tenir la terre dès l'apparition"
+    );
+
+    assert_eq!(alice_bundle.0.uuid, offline_uuid("Alice"));
+    assert!(
+        alice_bundle.1.is_none(),
+        "Alice a la main vide: aucun paquet d'équipement à l'apparition"
+    );
+}
+
 #[tokio::test]
 async fn placed_block_persists_across_restart() {
     let base = unique_world_dir();
