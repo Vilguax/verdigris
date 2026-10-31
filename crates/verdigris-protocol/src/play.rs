@@ -47,6 +47,9 @@ pub mod packet_ids {
         pub const SWING_ANIMATION: i32 = 0x7B;
         pub const SYSTEM_CHAT: i32 = 0x7C;
         pub const PLAYER_CHAT: i32 = 0x42;
+        pub const COMMANDS: i32 = 0x10;
+        pub const COMMAND_SUGGESTIONS: i32 = 0x11;
+        pub const ENTITY_EVENT: i32 = 0x22;
     }
 
     pub mod serverbound {
@@ -74,6 +77,7 @@ pub mod packet_ids {
         pub const PICK_ITEM_FROM_BLOCK: i32 = 0x24;
         pub const CLIENT_INFORMATION: i32 = 0x0E;
         pub const PUNCH: i32 = 0x2E;
+        pub const COMMAND_SUGGESTION: i32 = 0x0F;
     }
 }
 
@@ -1066,22 +1070,44 @@ pub fn normalize_chat(s: &str) -> &str {
     s.trim()
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TickThrottler {
     count: u32,
+    threshold: u32,
+}
+
+impl Default for TickThrottler {
+    fn default() -> Self {
+        TickThrottler::new()
+    }
 }
 
 impl TickThrottler {
     pub const STEP: u32 = 20;
     pub const THRESHOLD: u32 = 200;
+    pub const TICKS_PER_SECOND: u32 = 20;
 
     pub fn new() -> Self {
-        TickThrottler { count: 0 }
+        TickThrottler {
+            count: 0,
+            threshold: TickThrottler::THRESHOLD,
+        }
+    }
+
+    pub fn with_threshold(threshold: u32) -> Self {
+        TickThrottler {
+            count: 0,
+            threshold,
+        }
+    }
+
+    pub fn disabled(&self) -> bool {
+        self.threshold == 0
     }
 
     pub fn increment(&mut self) -> bool {
         self.count += TickThrottler::STEP;
-        self.count >= TickThrottler::THRESHOLD
+        !self.disabled() && self.count >= self.threshold
     }
 
     pub fn tick(&mut self) {
@@ -2505,6 +2531,22 @@ mod tests {
             }
         }
         assert!(over, "11 incréments en 10 ticks dépassent au 11e");
+    }
+
+    #[test]
+    fn tick_throttler_threshold_zero_never_triggers() {
+        let mut throttler = TickThrottler::with_threshold(0);
+        assert!(throttler.disabled());
+        for _ in 0..100 {
+            assert!(!throttler.increment());
+        }
+    }
+
+    #[test]
+    fn tick_throttler_custom_threshold() {
+        let mut throttler = TickThrottler::with_threshold(40);
+        assert!(!throttler.increment());
+        assert!(throttler.increment());
     }
 
     #[test]

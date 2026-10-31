@@ -15,6 +15,10 @@ use crate::portal;
 use crate::raycast::{cast_ray, look_direction};
 
 pub const GAMEMODE_ENV: &str = "VERDIGRIS_GAMEMODE";
+pub const OPS_ENV: &str = "VERDIGRIS_OPS";
+pub const DEFAULT_PERMISSION_ENV: &str = "VERDIGRIS_DEFAULT_PERMISSION";
+pub const DEFAULT_PERMISSION_LEVEL: u8 = 4;
+pub const OP_PERMISSION_LEVEL: u8 = 4;
 
 pub const EYE_HEIGHT: f64 = 1.62;
 pub const SNEAKING_EYE_HEIGHT: f64 = 1.27;
@@ -45,6 +49,32 @@ pub fn resolve_gamemode(value: Option<&str>) -> GameMode {
 
 pub fn read_gamemode() -> GameMode {
     resolve_gamemode(std::env::var(GAMEMODE_ENV).ok().as_deref())
+}
+
+pub fn resolve_permission(name: &str, ops: Option<&str>, default: Option<&str>) -> u8 {
+    if let Some(list) = ops {
+        let is_op = list
+            .split(',')
+            .map(|entry| entry.trim())
+            .filter(|entry| !entry.is_empty())
+            .any(|entry| entry.eq_ignore_ascii_case(name));
+        if is_op {
+            return OP_PERMISSION_LEVEL;
+        }
+    }
+    match default {
+        Some(raw) => match raw.trim().parse::<u8>() {
+            Ok(level) if level <= 4 => level,
+            _ => {
+                warn!(
+                    value = raw,
+                    "VERDIGRIS_DEFAULT_PERMISSION invalide, repli sur 4"
+                );
+                DEFAULT_PERMISSION_LEVEL
+            }
+        },
+        None => DEFAULT_PERMISSION_LEVEL,
+    }
 }
 
 pub const SPAWN: (f64, f64, f64) = (0.5, -60.0, 0.5);
@@ -320,6 +350,7 @@ pub struct PlayerState {
     pub skin: u8,
     pub main_hand_left: bool,
     pub view_distance: i8,
+    pub permission_level: u8,
     pub inventory: Inventory,
     pub container_state_id: i32,
 }
@@ -342,6 +373,7 @@ impl PlayerState {
             skin: 0,
             main_hand_left: false,
             view_distance: 0,
+            permission_level: DEFAULT_PERMISSION_LEVEL,
             inventory: Inventory::new(),
             container_state_id: 0,
         }
@@ -733,6 +765,7 @@ impl PlayerState {
             skin: 0,
             main_hand_left: false,
             view_distance: 0,
+            permission_level: DEFAULT_PERMISSION_LEVEL,
             inventory,
             container_state_id: 0,
         }
@@ -746,6 +779,21 @@ mod tests {
         block_id_of_name, default_state_of_name, item_id_of_name, property_of, state_with,
         with_property,
     };
+
+    #[test]
+    fn permission_ops_list_grants_level_four() {
+        assert_eq!(resolve_permission("Alice", Some("Alice,Bob"), Some("0")), 4);
+        assert_eq!(resolve_permission("bob", Some("Alice,Bob"), Some("0")), 4);
+        assert_eq!(resolve_permission("Eve", Some("Alice,Bob"), Some("0")), 0);
+    }
+
+    #[test]
+    fn permission_default_used_without_ops() {
+        assert_eq!(resolve_permission("Any", None, None), 4);
+        assert_eq!(resolve_permission("Any", None, Some("2")), 2);
+        assert_eq!(resolve_permission("Any", None, Some("9")), 4);
+        assert_eq!(resolve_permission("Any", None, Some("x")), 4);
+    }
 
     #[test]
     fn absent_env_is_creative() {

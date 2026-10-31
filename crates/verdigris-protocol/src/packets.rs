@@ -74,6 +74,7 @@ pub enum Serverbound {
     PlayChatCommandSigned(ChatCommandSigned),
     PlayChatAck(i32),
     PlayChatSessionUpdate,
+    PlayCommandSuggestion { id: i32, text: String },
     PlayIgnored { id: i32 },
 }
 
@@ -241,6 +242,12 @@ fn decode_play(id: i32, body: &[u8]) -> Result<Serverbound, ProtocolError> {
     } else if id == play_ids::serverbound::CHAT_SESSION_UPDATE {
         decode_chat_session_update(body)?;
         Ok(Serverbound::PlayChatSessionUpdate)
+    } else if id == play_ids::serverbound::COMMAND_SUGGESTION {
+        let (suggestion_id, text) = crate::commands::decode_command_suggestion(body)?;
+        Ok(Serverbound::PlayCommandSuggestion {
+            id: suggestion_id,
+            text,
+        })
     } else {
         Ok(Serverbound::PlayIgnored { id })
     }

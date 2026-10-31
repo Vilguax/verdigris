@@ -15,8 +15,8 @@ use verdigris_protocol::{
 use verdigris_server::{
     ChunkStore, KeepAliveConfig, LoadOutcome, PlayerRegistry, REASON_CONFIG_NOT_VANILLA,
     REASON_KEEP_ALIVE_TIMEOUT, REASON_LOGIN_INVALID_NAME, broadcast_gamemode_change,
-    player_joined_message, player_left_message, run, run_with_config, run_with_registry,
-    run_with_store,
+    broadcast_permission_change, player_joined_message, player_left_message, run, run_with_config,
+    run_with_registry, run_with_store,
 };
 
 async fn spawn_server() -> SocketAddr {
@@ -382,6 +382,17 @@ async fn play_sequence_sends_empty_world_and_stays_open() {
         "creative par défaut: flags 0x0D, flying_speed 0.05, walking_speed 0.1"
     );
 
+    let (commands_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(
+        commands_id, 0x10,
+        "Player Abilities is followed by Commands"
+    );
+    let (entity_event_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(
+        entity_event_id, 0x22,
+        "Commands is followed by Entity Event (permission level)"
+    );
+
     let (position_id, position_body) = read_one_compressed_frame(&mut client, &mut buf).await;
     assert_eq!(
         position_id, 0x49,
@@ -694,6 +705,10 @@ async fn consume_empty_world(client: &mut TcpStream, buf: &mut Vec<u8>) {
     assert_eq!(login_id, 0x32);
     let (abilities_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(abilities_id, 0x41);
+    let (commands_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(commands_id, 0x10, "Commands 0x10");
+    let (entity_event_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(entity_event_id, 0x22, "Entity Event 0x22");
     let (position_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(position_id, 0x49);
     let (game_event_id, _) = read_one_compressed_frame(client, buf).await;
@@ -1517,6 +1532,10 @@ async fn consume_world_only(client: &mut TcpStream, buf: &mut Vec<u8>) {
     assert_eq!(login_id, 0x32);
     let (abilities_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(abilities_id, 0x41);
+    let (commands_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(commands_id, 0x10, "Commands 0x10");
+    let (entity_event_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(entity_event_id, 0x22, "Entity Event 0x22");
     let (position_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(position_id, 0x49);
     let (game_event_id, _) = read_one_compressed_frame(client, buf).await;
@@ -1664,6 +1683,10 @@ async fn consume_world_capturing_entity_id(client: &mut TcpStream, buf: &mut Vec
     let entity_id = login_entity_id(&login_body);
     let (abilities_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(abilities_id, 0x41);
+    let (commands_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(commands_id, 0x10, "Commands 0x10");
+    let (entity_event_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(entity_event_id, 0x22, "Entity Event 0x22");
     let (position_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(position_id, 0x49);
     let (game_event_id, _) = read_one_compressed_frame(client, buf).await;
@@ -3062,8 +3085,18 @@ async fn read_skipping_until_id(stream: &mut TcpStream, buf: &mut Vec<u8>, want:
     }
 }
 
+async fn spawn_server_with_permission(level: u8) -> SocketAddr {
+    let registry = Arc::new(PlayerRegistry::with_permissions(
+        "Verdigris",
+        20,
+        Vec::new(),
+        level,
+    ));
+    spawn_server_with_registry(registry).await
+}
+
 async fn two_players_in_play() -> (SocketAddr, TcpStream, Vec<u8>, TcpStream, Vec<u8>) {
-    let addr = spawn_server().await;
+    let addr = spawn_server_with_permission(0).await;
     let mut alice = TcpStream::connect(addr).await.unwrap();
     let mut buf_a = Vec::new();
     drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
@@ -3285,4 +3318,347 @@ async fn chat_ack_and_session_update_produce_no_frame() {
         "le chat fonctionne toujours après les paquets ignorés"
     );
     assert_eq!(chat.global_index, 0);
+}
+
+fn compressed_chat_command_frame(command: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x07, &mut body);
+    write_string(command, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_chat_command_signed_frame(command: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x08, &mut body);
+    write_string(command, &mut body);
+    write_i64(0, &mut body);
+    write_i64(0, &mut body);
+    write_var_int(0, &mut body);
+    body.push(0x00);
+    body.extend_from_slice(&[0x00, 0x00, 0x00]);
+    body.push(0x01);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_command_suggestion_frame(id: i32, text: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x0F, &mut body);
+    write_var_int(id, &mut body);
+    write_string(text, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn commands_root_literals(body: &[u8]) -> Vec<String> {
+    let (count, c) = read_var_int(body).unwrap().unwrap();
+    let mut cursor = &body[c..];
+    let mut flags_of = Vec::new();
+    let mut children_of = Vec::new();
+    let mut name_of = Vec::new();
+    for _ in 0..count {
+        let flags = cursor[0];
+        cursor = &cursor[1..];
+        let (nchildren, c) = read_var_int(cursor).unwrap().unwrap();
+        cursor = &cursor[c..];
+        let mut children = Vec::new();
+        for _ in 0..nchildren {
+            let (child, c) = read_var_int(cursor).unwrap().unwrap();
+            cursor = &cursor[c..];
+            children.push(child as usize);
+        }
+        if flags & 0x08 != 0 {
+            let (_redirect, c) = read_var_int(cursor).unwrap().unwrap();
+            cursor = &cursor[c..];
+        }
+        let name = if flags & 0x03 != 0 {
+            let (len, c) = read_var_int(cursor).unwrap().unwrap();
+            cursor = &cursor[c..];
+            let text = String::from_utf8(cursor[..len as usize].to_vec()).unwrap();
+            cursor = &cursor[len as usize..];
+            text
+        } else {
+            String::new()
+        };
+        if flags & 0x03 == 0x02 {
+            let (parser, c) = read_var_int(cursor).unwrap().unwrap();
+            cursor = &cursor[c..];
+            match parser {
+                3 => {
+                    let pflags = cursor[0];
+                    cursor = &cursor[1..];
+                    if pflags & 0x01 != 0 {
+                        cursor = &cursor[4..];
+                    }
+                    if pflags & 0x02 != 0 {
+                        cursor = &cursor[4..];
+                    }
+                }
+                5 => {
+                    let (_, c) = read_var_int(cursor).unwrap().unwrap();
+                    cursor = &cursor[c..];
+                }
+                6 => cursor = &cursor[1..],
+                0x2b => cursor = &cursor[4..],
+                _ => {}
+            }
+        }
+        if flags & 0x10 != 0 {
+            let (len, c) = read_var_int(cursor).unwrap().unwrap();
+            cursor = &cursor[c..];
+            cursor = &cursor[len as usize..];
+        }
+        flags_of.push(flags);
+        children_of.push(children);
+        name_of.push(name);
+    }
+    let (root, _) = read_var_int(cursor).unwrap().unwrap();
+    children_of[root as usize]
+        .iter()
+        .map(|&i| name_of[i].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn commands_packet_precedes_entity_event_and_filters_for_level_zero() {
+    let addr = spawn_server_with_permission(0).await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+
+    let (login_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(login_id, 0x32);
+    let (abilities_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(abilities_id, 0x41);
+
+    let (commands_id, commands_body) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(
+        commands_id, 0x10,
+        "le premier paquet de commandes précède tout"
+    );
+    let literals = commands_root_literals(&commands_body);
+    assert_eq!(
+        literals,
+        vec!["help", "list", "msg", "tell", "w"],
+        "un joueur niveau 0 ne voit que les commandes sociales"
+    );
+
+    let (entity_event_id, entity_event_body) =
+        read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(entity_event_id, 0x22, "puis le niveau de permission");
+    assert_eq!(
+        *entity_event_body.last().unwrap(),
+        24,
+        "le statut d'un joueur niveau 0 vaut 24"
+    );
+}
+
+#[tokio::test]
+async fn permission_change_reemits_commands_then_entity_event() {
+    let registry = Arc::new(PlayerRegistry::with_permissions(
+        "Verdigris",
+        20,
+        Vec::new(),
+        0,
+    ));
+    let registry_handle = Arc::clone(&registry);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = run_with_registry(
+            listener,
+            KeepAliveConfig::default(),
+            registry,
+            std::future::pending::<()>(),
+        )
+        .await;
+    });
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    broadcast_permission_change(&registry_handle, offline_uuid("Verdi"), 4);
+
+    let commands_body = read_skipping_until_id(&mut client, &mut buf, 0x10).await;
+    let literals = commands_root_literals(&commands_body);
+    assert!(
+        literals.contains(&"gamemode".to_owned()),
+        "l'arbre reflète le nouveau niveau: {literals:?}"
+    );
+
+    let entity_event_body = read_skipping_until_id(&mut client, &mut buf, 0x22).await;
+    assert_eq!(
+        *entity_event_body.last().unwrap(),
+        28,
+        "le statut d'un opérateur niveau 4 vaut 28"
+    );
+}
+
+#[tokio::test]
+async fn list_command_reports_players() {
+    let (_addr, mut alice, mut buf_a, _bob, _buf_b) = two_players_in_play().await;
+
+    alice
+        .write_all(&compressed_chat_command_frame("list"))
+        .await
+        .unwrap();
+
+    let system = loop {
+        let body = read_skipping_until_id(&mut alice, &mut buf_a, 0x7C).await;
+        if contains_subslice(&body, b"commands.list.players") {
+            break body;
+        }
+    };
+    assert!(contains_subslice(&system, b"Alice"));
+    assert!(contains_subslice(&system, b"Bob"));
+}
+
+#[tokio::test]
+async fn unknown_command_sends_error_then_context() {
+    let addr = spawn_server_with_permission(0).await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    client
+        .write_all(&compressed_chat_command_frame("frobnicate"))
+        .await
+        .unwrap();
+
+    let first = read_skipping_until_id(&mut client, &mut buf, 0x7C).await;
+    assert!(
+        contains_subslice(&first, b"command.unknown.command"),
+        "première ligne: erreur inconnue"
+    );
+    let second = read_skipping_until_id(&mut client, &mut buf, 0x7C).await;
+    assert!(
+        contains_subslice(&second, b"command.context.here"),
+        "seconde ligne: contexte d'erreur"
+    );
+}
+
+#[tokio::test]
+async fn time_command_is_unknown_for_level_zero() {
+    let addr = spawn_server_with_permission(0).await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    client
+        .write_all(&compressed_chat_command_frame("time set day"))
+        .await
+        .unwrap();
+
+    let system = read_skipping_until_id(&mut client, &mut buf, 0x7C).await;
+    assert!(
+        contains_subslice(&system, b"command.unknown.command"),
+        "time est absent de l'arbre d'un joueur niveau 0"
+    );
+}
+
+#[tokio::test]
+async fn msg_command_sends_incoming_and_outgoing() {
+    let (_addr, mut alice, mut buf_a, mut bob, mut buf_b) = two_players_in_play().await;
+    let alice_uuid = offline_uuid("Alice");
+
+    alice
+        .write_all(&compressed_chat_command_signed_frame("msg Bob psst"))
+        .await
+        .unwrap();
+
+    let to_bob = parse_player_chat(&read_skipping_until_id(&mut bob, &mut buf_b, 0x42).await);
+    assert_eq!(to_bob.content, "psst");
+    assert_eq!(to_bob.sender, alice_uuid);
+    assert_eq!(to_bob.chat_type, 3, "msg_command_incoming (holder 3)");
+
+    let to_alice = parse_player_chat(&read_skipping_until_id(&mut alice, &mut buf_a, 0x42).await);
+    assert_eq!(to_alice.content, "psst");
+    assert_eq!(to_alice.chat_type, 4, "msg_command_outgoing (holder 4)");
+}
+
+#[tokio::test]
+async fn oversized_command_disconnects() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    let mut body = Vec::new();
+    write_var_int(0x07, &mut body);
+    write_string(&"a".repeat(32768), &mut body);
+    client
+        .write_all(&encode_compressed_frame(&body, CLIENT_THRESHOLD))
+        .await
+        .unwrap();
+
+    let disconnect = read_skipping_until_id(&mut client, &mut buf, 0x20).await;
+    assert!(
+        contains_subslice(&disconnect, b"Paquet invalide"),
+        "une commande au-delà de 32767 est rejetée au décodage"
+    );
+}
+
+#[tokio::test]
+async fn oversized_suggestion_is_ignored() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    client
+        .write_all(&compressed_command_suggestion_frame(7, &"a".repeat(300)))
+        .await
+        .unwrap();
+
+    let silence =
+        try_read_compressed_frame(&mut client, &mut buf, Duration::from_millis(300)).await;
+    assert!(
+        silence.is_none(),
+        "une suggestion trop longue est ignorée silencieusement"
+    );
+}
+
+#[tokio::test]
+async fn suggestion_receives_empty_response() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    client
+        .write_all(&compressed_command_suggestion_frame(1, "gamemode "))
+        .await
+        .unwrap();
+
+    let body = read_skipping_until_id(&mut client, &mut buf, 0x11).await;
+    assert_eq!(body, vec![0x01, 0x00, 0x00, 0x00], "suggestions vides");
+}
+
+#[tokio::test]
+async fn command_spam_disconnects_level_zero_player() {
+    let addr = spawn_server_with_permission(0).await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    for _ in 0..11 {
+        client
+            .write_all(&compressed_chat_command_frame("list"))
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    let disconnect = read_skipping_until_id(&mut client, &mut buf, 0x20).await;
+    assert!(
+        contains_subslice(&disconnect, b"disconnect.spam"),
+        "une rafale de commandes éjecte un joueur non opérateur"
+    );
+    expect_clean_eof(&mut client).await;
 }
