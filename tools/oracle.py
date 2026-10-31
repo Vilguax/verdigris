@@ -113,7 +113,7 @@ def cells_of(chunk, fluids=False):
     return cells
 
 
-def datapack(server_jar, out, aquifers=False):
+def datapack(server_jar, out, aquifers=False, carvers=False):
     with zipfile.ZipFile(server_jar) as outer:
         inner = next(n for n in outer.namelist() if n.startswith("META-INF/versions/") and n.endswith(".jar"))
         jar = zipfile.ZipFile(__import__("io").BytesIO(outer.read(inner)))
@@ -124,19 +124,22 @@ def datapack(server_jar, out, aquifers=False):
     for name in jar.namelist():
         if not name.endswith(".json"):
             continue
-        if name.startswith("data/minecraft/worldgen/carver/"):
+        if name.startswith("data/minecraft/worldgen/carver/") and not carvers:
             body = json.loads(jar.read(name))
             body["probability"] = 0.0
             (wg / "carver" / Path(name).name).write_text(json.dumps(body, indent=2), encoding="utf-8")
         elif name.startswith("data/minecraft/worldgen/biome/"):
             body = json.loads(jar.read(name))
-            body["features"], body["carvers"] = [], []
+            body["features"] = []
+            if not carvers:
+                body["carvers"] = []
             (wg / "biome" / Path(name).name).write_text(json.dumps(body, indent=2), encoding="utf-8")
     settings = json.loads(jar.read("data/minecraft/worldgen/noise_settings/overworld.json"))
     if not aquifers:
         settings.pop("aquifers", None)
     (wg / "noise_settings" / "overworld.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
-    phase = "1b: aquiferes, sans carvers ni features" if aquifers else "1a: sans aquiferes, carvers ni features"
+    phase = ("carvers: aquiferes et carvers, sans features" if carvers else
+             "1b: aquiferes, sans carvers ni features" if aquifers else "1a: sans aquiferes, carvers ni features")
     meta = {"pack": {"description": f"Verdigris oracle phase {phase}",
                      "min_format": PACK_FORMAT, "max_format": PACK_FORMAT}}
     (root / "pack.mcmeta").write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -287,7 +290,8 @@ if __name__ == "__main__":
     flags = {a for a in sys.argv[2:] if a.startswith("--")}
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if len(args) >= 3 and args[0] == "datapack":
-        datapack(args[1], args[2], aquifers="--aquiferes" in flags)
+        datapack(args[1], args[2], aquifers="--aquiferes" in flags or "--carvers" in flags,
+                 carvers="--carvers" in flags)
     elif len(args) >= 3 and args[0] == "export-blocs":
         export_blocks(args[1], args[2], parse_chunks(args[3:]))
     elif len(args) >= 3 and args[0] == "export-biomes":
@@ -295,7 +299,7 @@ if __name__ == "__main__":
     elif len(args) >= 3 and args[0] == "export":
         export(args[1], args[2], parse_chunks(args[3:]), fluids="--fluides" in flags)
     else:
-        raise SystemExit("usage: oracle.py datapack <server.jar> <dossier datapack> [--aquiferes]\n"
+        raise SystemExit("usage: oracle.py datapack <server.jar> <dossier datapack> [--aquiferes] [--carvers]\n"
                          "       oracle.py export <dossier region> <dossier sortie> [cx,cz ...] [--fluides]\n"
                          "       oracle.py export-biomes <dossier region> <dossier sortie> [cx,cz ...]\n"
                          "       oracle.py export-blocs <dossier region> <dossier sortie> [cx,cz ...]")

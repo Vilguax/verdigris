@@ -112,7 +112,7 @@ WORLDGEN_SETTINGS = ["overworld"]
 
 
 CLIMATE_ORDER = ["temperature", "humidity", "continentalness", "erosion", "depth", "weirdness", "offset"]
-BIOME_CLIMATE = ["has_precipitation", "temperature", "temperature_modifier", "downfall"]
+BIOME_CLIMATE = ["has_precipitation", "temperature", "temperature_modifier", "downfall", "carvers"]
 
 
 def worldgen_doc(worldgen, server_jar, reports):
@@ -129,6 +129,7 @@ def worldgen_doc(worldgen, server_jar, reports):
             "density_function": folder("density_function"), "noise": folder("noise"),
             "material_rule": folder("material_rule"),
             "material_condition": folder("material_condition"),
+            "carver": folder("carver"),
             "biome": {k: {f: v[f] for f in BIOME_CLIMATE if f in v} for k, v in folder("biome").items()},
             "biome_parameters": {"dimensions": CLIMATE_ORDER, "entries": {f"minecraft:{s}": [
                 [b["biome"]] + [b["parameters"][d] for d in CLIMATE_ORDER]
