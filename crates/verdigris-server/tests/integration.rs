@@ -9,12 +9,14 @@ use verdigris_protocol::{
     BlockPos, MAX_STRING_LEN, MAX_USERNAME_LEN, WORLD_MIN_Y, block_item_of_state,
     decode_compressed_frame, decode_frame, default_state_of_name, encode_compressed_frame,
     encode_frame, item_id_of_name, offline_uuid, property_of, read_f64, read_i64, read_string,
-    read_var_int, write_f32, write_f64, write_i64, write_string, write_u16, write_var_int,
+    read_var_int, system_chat_payload, write_f32, write_f64, write_i64, write_string, write_u16,
+    write_var_int,
 };
 use verdigris_server::{
     ChunkStore, KeepAliveConfig, LoadOutcome, PlayerRegistry, REASON_CONFIG_NOT_VANILLA,
-    REASON_KEEP_ALIVE_TIMEOUT, REASON_LOGIN_INVALID_NAME, broadcast_gamemode_change, run,
-    run_with_config, run_with_registry, run_with_store,
+    REASON_KEEP_ALIVE_TIMEOUT, REASON_LOGIN_INVALID_NAME, broadcast_gamemode_change,
+    player_joined_message, player_left_message, run, run_with_config, run_with_registry,
+    run_with_store,
 };
 
 async fn spawn_server() -> SocketAddr {
@@ -1838,6 +1840,7 @@ async fn entity_metadata_skin_crouch_sprint_over_tcp() {
     let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
     assert_eq!(tab_id, 0x7D);
 
+    expect_system_chat(&mut alice, &mut buf_a).await;
     let (bob_seen, bob_meta) = read_spawn_bundle_with_meta(&mut alice, &mut buf_a).await;
     assert_eq!(bob_seen.entity_id, bob_local);
     assert!(
@@ -1938,6 +1941,7 @@ async fn two_clients_share_the_tab_list() {
     let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
     assert_eq!(tab_id, 0x7D, "le pied de liste d'Alice est réactualisé");
 
+    expect_system_chat(&mut alice, &mut buf_a).await;
     let bob_spawn = read_spawn_bundle(&mut alice, &mut buf_a).await;
     assert_eq!(
         bob_spawn.uuid,
@@ -2014,6 +2018,7 @@ async fn two_players_spawn_and_despawn_as_entities() {
     let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
     assert_eq!(tab_id, 0x7D);
 
+    expect_system_chat(&mut alice, &mut buf_a).await;
     let bob_seen = read_spawn_bundle(&mut alice, &mut buf_a).await;
     assert_eq!(bob_seen.uuid, offline_uuid("Bob"));
     assert_eq!(bob_seen.entity_type, 159);
@@ -2039,6 +2044,71 @@ async fn two_players_spawn_and_despawn_as_entities() {
     assert_eq!(
         parse_player_info_remove(&info_remove_body),
         vec![offline_uuid("Bob")]
+    );
+}
+
+#[tokio::test]
+async fn join_and_leave_system_messages_over_tcp() {
+    let addr = spawn_server().await;
+
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    consume_world_only(&mut alice, &mut buf_a).await;
+    expect_player_info_and_tab(&mut alice, &mut buf_a).await;
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_named(&mut bob, &mut buf_b, "Bob").await;
+    consume_world_only(&mut bob, &mut buf_b).await;
+    expect_player_info_and_tab(&mut bob, &mut buf_b).await;
+
+    let (info_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(info_id, 0x47, "Alice reçoit l'ajout de Bob à la liste");
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D);
+    let (join_id, join_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(
+        join_id, 0x7C,
+        "Alice reçoit l'arrivée de Bob en System Chat 0x7C"
+    );
+    assert_eq!(
+        join_body,
+        system_chat_payload(&player_joined_message("Bob"), false),
+        "le NBT décrit multiplayer.player.joined jaune avec le nom Bob"
+    );
+
+    let alice_seen = read_spawn_bundle(&mut bob, &mut buf_b).await;
+    assert_eq!(
+        alice_seen.uuid,
+        offline_uuid("Alice"),
+        "Bob ne reçoit jamais son propre message d'arrivée, seulement l'apparition d'Alice"
+    );
+
+    let bob_seen = read_spawn_bundle(&mut alice, &mut buf_a).await;
+    assert_eq!(bob_seen.uuid, offline_uuid("Bob"));
+
+    drop(bob);
+
+    let (remove_id, remove_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(remove_id, 0x4E, "départ: Remove Entities d'abord");
+    assert_eq!(
+        parse_remove_entities(&remove_body),
+        vec![bob_seen.entity_id]
+    );
+    let (info_remove_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(info_remove_id, 0x46, "puis Player Info Remove");
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D, "puis le pied de liste");
+    let (leave_id, leave_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(
+        leave_id, 0x7C,
+        "enfin le message système de départ en System Chat 0x7C"
+    );
+    assert_eq!(
+        leave_body,
+        system_chat_payload(&player_left_message("Bob"), false),
+        "le NBT décrit multiplayer.player.left avec le nom Bob"
     );
 }
 
@@ -2078,6 +2148,7 @@ async fn spectator_mode_hides_and_restores_entity_over_tcp() {
     assert_eq!(add_id, 0x47);
     let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
     assert_eq!(tab_id, 0x7D);
+    expect_system_chat(&mut alice, &mut buf_a).await;
     let bob_seen = read_spawn_bundle(&mut alice, &mut buf_a).await;
     assert_eq!(bob_seen.entity_id, bob_eid, "Alice voit l'entité de Bob");
 
@@ -2387,6 +2458,11 @@ async fn expect_player_info_and_tab(client: &mut TcpStream, buf: &mut Vec<u8>) {
     assert_eq!(tab_id, 0x7D);
 }
 
+async fn expect_system_chat(client: &mut TcpStream, buf: &mut Vec<u8>) {
+    let (id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(id, 0x7C, "message système d'arrivée (System Chat 0x7C)");
+}
+
 fn is_movement_frame(id: i32) -> bool {
     matches!(id, 0x36 | 0x37 | 0x39 | 0x55 | 0x23)
 }
@@ -2450,6 +2526,7 @@ async fn swing_and_equipment_broadcast_over_tcp() {
     assert_eq!(add_id, 0x47, "Alice reçoit l'ADD_PLAYER de Bob");
     let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
     assert_eq!(tab_id, 0x7D);
+    expect_system_chat(&mut alice, &mut buf_a).await;
     let bob_spawn = read_spawn_bundle(&mut alice, &mut buf_a).await;
     assert_eq!(bob_spawn.entity_id, bob_id);
 

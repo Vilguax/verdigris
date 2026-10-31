@@ -292,7 +292,7 @@ fn escape_json_char(ch: char) -> String {
     }
 }
 
-fn write_nbt_network_string(text: &str, out: &mut Vec<u8>) {
+pub(crate) fn write_nbt_network_string(text: &str, out: &mut Vec<u8>) {
     let mut bytes = Vec::new();
     for ch in text.chars() {
         if bytes.len() + mutf8_len(ch) > MAX_NBT_STRING_BYTES {

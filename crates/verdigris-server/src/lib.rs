@@ -36,8 +36,8 @@ use tracing_subscriber::EnvFilter;
 
 use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
-    COMPRESSION_THRESHOLD, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, HumanoidArm,
-    Intent, ItemStack, ListedPlayer, MAIN_HAND_LEFT, MovePlayerPos, MovePlayerPosRot,
+    Arg, COMPRESSION_THRESHOLD, Component, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS,
+    HumanoidArm, Intent, ItemStack, ListedPlayer, MAIN_HAND_LEFT, MovePlayerPos, MovePlayerPosRot,
     MovePlayerRot, MovePlayerStatus, PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID,
     SWING_DURATION, SWING_WHACK, Serverbound, State, StatusInfo, World, add_entity_payload,
     block_changed_ack_payload, block_update_payload, build_compressed_packet, build_packet,
@@ -52,8 +52,8 @@ use verdigris_protocol::{
     pong_payload, random_session_id, read_var_int, registry_data_payload, remove_entities_payload,
     server_known_pack, set_chunk_cache_center_payload, set_compression_payload,
     set_equipment_payload, set_held_slot_payload, status_json, status_response_payload,
-    swing_animation_payload, tab_list_payload, update_tags_payload, validate_name,
-    write_chunk_payload,
+    swing_animation_payload, system_chat_payload, tab_list_payload, update_tags_payload,
+    validate_name, write_chunk_payload,
 };
 use verdigris_protocol::{GAME_VERSION, WORLD_MAX_Y, WORLD_MIN_Y, is_air, is_fluid};
 
@@ -211,6 +211,22 @@ fn push_frame(senders: &[OutboundSender], frame: &Arc<[u8]>) {
     }
 }
 
+pub fn player_joined_message(name: &str) -> Component {
+    Component::translate("multiplayer.player.joined")
+        .color("yellow")
+        .with(Arg::Str(name.to_owned()))
+}
+
+pub fn player_left_message(name: &str) -> Component {
+    Component::translate("multiplayer.player.left")
+        .color("yellow")
+        .with(Arg::Str(name.to_owned()))
+}
+
+fn system_chat_frame(component: &Component) -> Option<Arc<[u8]>> {
+    frame_arc(play_cb::SYSTEM_CHAT, &system_chat_payload(component, false))
+}
+
 fn spawn_bundle(spawn: &EntitySpawn) -> Vec<Arc<[u8]>> {
     let mut frames = Vec::with_capacity(4);
     if let Some(frame) = frame_arc(play_cb::BUNDLE_DELIMITER, &bundle_delimiter_payload()) {
@@ -327,6 +343,7 @@ fn broadcast_latency(registry: &Arc<PlayerRegistry>) {
 struct PlayGuard {
     registry: Arc<PlayerRegistry>,
     uuid: u128,
+    name: String,
 }
 
 impl Drop for PlayGuard {
@@ -354,6 +371,9 @@ impl Drop for PlayGuard {
         }
         if let Some(frame) = &tab_frame {
             push_frame(&departure.remaining, frame);
+        }
+        if let Some(frame) = system_chat_frame(&player_left_message(&self.name)) {
+            push_frame(&departure.remaining, &frame);
         }
     }
 }
@@ -1292,6 +1312,7 @@ async fn enter_play(
     let _guard = PlayGuard {
         registry: Arc::clone(registry),
         uuid,
+        name: player.name.clone(),
     };
 
     let own = ListedPlayer {
@@ -1347,6 +1368,9 @@ async fn enter_play(
             push_frame(&snapshot.other_senders, &frame);
         }
         if let Some(frame) = frame_arc(play_cb::TAB_LIST, &tab) {
+            push_frame(&snapshot.other_senders, &frame);
+        }
+        if let Some(frame) = system_chat_frame(&player_joined_message(&player.name)) {
             push_frame(&snapshot.other_senders, &frame);
         }
     }
