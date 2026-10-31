@@ -48,6 +48,22 @@ impl TrackedState {
         self.entity_id
     }
 
+    pub fn base_position(&self) -> (f64, f64, f64) {
+        (
+            self.base_q[0] as f64 / 4096.0,
+            self.base_q[1] as f64 / 4096.0,
+            self.base_q[2] as f64 / 4096.0,
+        )
+    }
+
+    pub fn base_yaw_byte(&self) -> u8 {
+        self.last_yrot as u8
+    }
+
+    pub fn base_pitch_byte(&self) -> u8 {
+        self.last_xrot as u8
+    }
+
     pub fn on_tick(&mut self, cur: &EntitySnapshot, out: &mut Vec<u8>) -> bool {
         if self.tick_count % 2 != 0 {
             self.tick_count += 1;

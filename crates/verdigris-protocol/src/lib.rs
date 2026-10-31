@@ -63,9 +63,9 @@ pub use clientbound::{
     MAX_OUTBOUND_PACKET_LEN, MOVE_ENTITY_POS_ID, MOVE_ENTITY_POS_ROT_ID, MOVE_ENTITY_ROT_ID,
     NBT_TAG_STRING, PLAYER_ENTITY_TYPE, ROTATE_HEAD_ID, SET_COMPRESSION_ID, add_entity_payload,
     build_compressed_packet, build_packet, bundle_delimiter_payload, config_disconnect_payload,
-    entity_position_sync, login_disconnect_payload, move_entity_pos, move_entity_pos_rot,
-    move_entity_rot, remove_entities_payload, rotate_head, set_compression_payload,
-    set_entity_data_health_payload, text_component_nbt,
+    entity_position_sync, frame_entity_pass, login_disconnect_payload, move_entity_pos,
+    move_entity_pos_rot, move_entity_rot, remove_entities_payload, rotate_head,
+    set_compression_payload, set_entity_data_health_payload, text_component_nbt,
 };
 pub use config::{
     MAX_KNOWN_PACKS, client_has_core, decode_known_packs, known_packs_payload, packet_ids,
