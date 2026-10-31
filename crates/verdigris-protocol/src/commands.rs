@@ -13,7 +13,8 @@ pub const PARSER_STRING: i32 = 5;
 pub const PARSER_ENTITY: i32 = 6;
 pub const PARSER_VEC3: i32 = 10;
 pub const PARSER_ITEM_STACK: i32 = 14;
-pub const PARSER_RESOURCE_LOCATION: i32 = 35;
+pub const PARSER_MESSAGE: i32 = 20;
+pub const PARSER_RESOURCE_LOCATION: i32 = 36;
 pub const PARSER_GAMEMODE: i32 = 0x2a;
 pub const PARSER_TIME: i32 = 0x2b;
 
@@ -51,6 +52,7 @@ pub enum Parser {
     IntegerMin(i32),
     StringGreedy,
     StringWord,
+    Message,
     Entity { flags: u8 },
     GameMode,
     Vec3,
@@ -64,6 +66,7 @@ impl Parser {
         match self {
             Parser::IntegerMin(_) => PARSER_INTEGER,
             Parser::StringGreedy | Parser::StringWord => PARSER_STRING,
+            Parser::Message => PARSER_MESSAGE,
             Parser::Entity { .. } => PARSER_ENTITY,
             Parser::GameMode => PARSER_GAMEMODE,
             Parser::Vec3 => PARSER_VEC3,
@@ -82,6 +85,7 @@ impl Parser {
             Parser::StringGreedy => write_var_int(STRING_GREEDY, out),
             Parser::StringWord => write_var_int(STRING_SINGLE_WORD, out),
             Parser::Entity { flags } => out.push(flags),
+            Parser::Message => {}
             Parser::GameMode => {}
             Parser::Vec3 => {}
             Parser::ItemStack => {}
@@ -107,6 +111,7 @@ struct Node {
     redirect: Option<usize>,
     suggestions: bool,
     level: u8,
+    top: bool,
     children: Vec<usize>,
 }
 
@@ -125,6 +130,7 @@ impl Builder {
                 redirect: None,
                 suggestions: false,
                 level: 0,
+                top: false,
                 children: Vec::new(),
             }],
         }
@@ -140,6 +146,7 @@ impl Builder {
             redirect: None,
             suggestions: false,
             level,
+            top: parent == 0,
             children: Vec::new(),
         });
         self.nodes[parent].children.push(index);
@@ -165,6 +172,7 @@ impl Builder {
             redirect: None,
             suggestions,
             level,
+            top: false,
             children: Vec::new(),
         });
         self.nodes[parent].children.push(index);
@@ -205,19 +213,21 @@ fn full_tree() -> Vec<Node> {
         false,
         false,
     );
-    b.argument(msg_targets, "message", Parser::StringGreedy, 0, true, false);
+    b.argument(msg_targets, "message", Parser::Message, 0, true, false);
     b.redirect_literal(root, "tell", 0, msg);
     b.redirect_literal(root, "w", 0, msg);
 
     let say = b.literal(root, "say", 2, false);
-    b.argument(say, "message", Parser::StringGreedy, 2, true, false);
+    b.argument(say, "message", Parser::Message, 2, true, false);
 
     let gamemode = b.literal(root, "gamemode", 2, false);
     let gamemode_mode = b.argument(gamemode, "gamemode", Parser::GameMode, 2, true, false);
     b.argument(
         gamemode_mode,
         "target",
-        Parser::Entity { flags: 0 },
+        Parser::Entity {
+            flags: ENTITY_PLAYERS_ONLY,
+        },
         2,
         true,
         false,
@@ -226,7 +236,7 @@ fn full_tree() -> Vec<Node> {
     let give = b.literal(root, "give", 2, false);
     let give_target = b.argument(
         give,
-        "target",
+        "targets",
         Parser::Entity {
             flags: ENTITY_PLAYERS_ONLY,
         },
@@ -253,9 +263,17 @@ fn full_tree() -> Vec<Node> {
 
     let time = b.literal(root, "time", 2, false);
     let time_set = b.literal(time, "set", 2, false);
-    b.argument(time_set, "time", Parser::TimeMin(0), 2, true, true);
+    b.argument(time_set, "time", Parser::TimeMin(0), 2, true, false);
+    b.argument(
+        time_set,
+        "timemarker",
+        Parser::ResourceLocation,
+        2,
+        true,
+        true,
+    );
     let time_add = b.literal(time, "add", 2, false);
-    b.argument(time_add, "time", Parser::TimeMin(0), 2, true, false);
+    b.argument(time_add, "time", Parser::TimeMin(i32::MIN), 2, true, false);
     let time_query = b.literal(time, "query", 2, false);
     b.literal(time_query, "daytime", 2, true);
 
@@ -265,7 +283,7 @@ fn full_tree() -> Vec<Node> {
     b.literal(weather, "thunder", 2, true);
 
     let kill = b.literal(root, "kill", 2, true);
-    b.argument(kill, "target", Parser::Entity { flags: 0 }, 2, true, false);
+    b.argument(kill, "targets", Parser::Entity { flags: 0 }, 2, true, false);
 
     b.nodes
 }
@@ -285,7 +303,7 @@ fn flags_for(node: &Node) -> u8 {
     if node.suggestions {
         flags |= FLAG_SUGGESTIONS;
     }
-    if node.level >= RESTRICTED_LEVEL {
+    if node.top && node.level >= RESTRICTED_LEVEL {
         flags |= FLAG_RESTRICTED;
     }
     flags
@@ -805,6 +823,7 @@ mod tests {
             redirect: None,
             suggestions: false,
             level: 2,
+            top: false,
             children: Vec::new(),
         };
         let remap = vec![Some(0usize)];
@@ -870,7 +889,74 @@ mod tests {
             .iter()
             .find(|n| n.0 & FLAG_SUGGESTIONS != 0)
             .expect("un noeud porte ask_server");
-        assert_eq!(suggesting.3.as_deref(), Some("time"));
+        assert_eq!(suggesting.3.as_deref(), Some("timemarker"));
+    }
+
+    fn contains(payload: &[u8], needle: &[u8]) -> bool {
+        payload.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn message_nodes_use_message_parser() {
+        let payload = commands_payload(4);
+        let mut needle = vec![0x06, 0x00, 0x07];
+        needle.extend_from_slice(b"message");
+        needle.push(0x14);
+        assert!(contains(&payload, &needle));
+        let mut greedy = vec![0x06, 0x00, 0x07];
+        greedy.extend_from_slice(b"message");
+        greedy.extend_from_slice(&[0x05, 0x02]);
+        assert!(!contains(&payload, &greedy));
+    }
+
+    #[test]
+    fn time_set_nodes_match_capture() {
+        let payload = commands_payload(4);
+        let mut time = vec![0x06, 0x00, 0x04];
+        time.extend_from_slice(b"time");
+        time.extend_from_slice(&[0x2b, 0x00, 0x00, 0x00, 0x00]);
+        assert!(contains(&payload, &time));
+        let mut marker = vec![0x16, 0x00, 0x0a];
+        marker.extend_from_slice(b"timemarker");
+        marker.extend_from_slice(&[0x24, 0x14]);
+        marker.extend_from_slice(b"minecraft:ask_server");
+        assert!(contains(&payload, &marker));
+        let mut add = vec![0x06, 0x00, 0x04];
+        add.extend_from_slice(b"time");
+        add.extend_from_slice(&[0x2b, 0x80, 0x00, 0x00, 0x00]);
+        assert!(contains(&payload, &add));
+    }
+
+    #[test]
+    fn only_top_literals_are_restricted() {
+        let payload = commands_payload(4);
+        let (nodes, _) = decode_tree(&payload);
+        for node in &nodes {
+            if node.0 & FLAG_TYPE_MASK == FLAG_ARGUMENT {
+                assert_eq!(
+                    node.0 & FLAG_RESTRICTED,
+                    0,
+                    "argument restreint: {:?}",
+                    node.3
+                );
+            }
+        }
+        let mut target = vec![0x06, 0x00, 0x06];
+        target.extend_from_slice(b"target");
+        target.extend_from_slice(&[0x06, 0x02]);
+        assert!(contains(&payload, &target));
+        let mut targets = vec![0x07];
+        targets.extend_from_slice(b"targets");
+        targets.extend_from_slice(&[0x06, 0x02]);
+        let occurrences = payload
+            .windows(targets.len())
+            .filter(|w| *w == targets.as_slice())
+            .count();
+        assert_eq!(occurrences, 2, "targets de msg et de give");
+        let mut count = vec![0x06, 0x00, 0x05];
+        count.extend_from_slice(b"count");
+        count.extend_from_slice(&[0x03, 0x01, 0x00, 0x00, 0x00, 0x01]);
+        assert!(contains(&payload, &count));
     }
 
     #[test]
