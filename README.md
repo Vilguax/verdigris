@@ -75,6 +75,7 @@ Hors périmètre : le format région vanilla `.mca`, les joueurs, les inventaire
 | `crates/verdigris-protocol/data/26.3/network.json` | Registres synchronisés et tags de la 26.3 |
 | `crates/verdigris-protocol/data/26.3/worldgen.json` | Réglages de bruit de l'overworld, fonctions de densité, bruits, règles de matériaux, climat des biomes et points climatiques des biomes (rapport `biome_parameters`, une ligne par point dans l'ordre température, humidité, continentalité, érosion, profondeur, bizarrerie, décalage) de la 26.3 |
 | `tools/datagen.py` | Génère `network.json`, `gameplay.json` (types de dégâts et leurs étiquettes, composants food et consumable des aliments), `features.json` (placed features, features, fournisseurs d'état, features par biome et par étape), `blocks.json` (états de bloc, propriétés, objets, taille de pile maximale et case d'équipement de chaque objet tirées du rapport des composants), `worldgen.json` et `crafting.json` (toutes les recettes triées par identifiant avec catégorie, groupe et display ids du livre, durées de combustion au four et en haut fourneau ou fumoir, restes de fabrication, ensembles de propriétés, critères de déblocage des recettes) à partir du générateur de données officiel |
+| `tools/PhysicsProbe.java` | Sonde qui interroge le `server.jar` officiel et exporte, pour chaque état de bloc dans l'ordre des identifiants, ses propriétés physiques absentes des rapports du générateur : air, liquide, solide historique, remplaçable, rendu solide, faces de support (pleine, centrale, rigide), faces de collision et d'occlusion par direction, fluide et niveau, lumière émise et atténuation, dureté, résistance aux explosions, friction, facteurs de vitesse et de saut, boîte de collision. `datagen.py` en tire `physics.json` |
 | `tools/oracle.py` | Construit le datapack de l'oracle et exporte ses chunks en fixtures de test |
 | `tests-data/oracle-1a` | Relief vanilla de référence : 40 chunks, solide ou non solide bloc par bloc |
 | `tests-data/oracle-1b` | Relief et aquifères vanilla : 64 chunks, air, solide, eau ou lave bloc par bloc |
@@ -90,6 +91,14 @@ Hors périmètre : le format région vanilla `.mca`, les joueurs, les inventaire
 ```sh
 java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --server --reports --output generated
 python tools/datagen.py generated server.jar crates/verdigris-protocol/data/26.3/network.json
+```
+
+`physics.json` demande en plus la sonde, compilée et lancée avec le jar versionné et ses bibliothèques (extraits par le bundler dans `versions/` et `libraries/`) :
+
+```sh
+javac -cp "versions/26.3/server-26.3.jar;libraries/..." -d probe tools/PhysicsProbe.java
+java -cp "versions/26.3/server-26.3.jar;libraries/...;probe" PhysicsProbe sonde.json
+python tools/datagen.py generated server.jar crates/verdigris-protocol/data/26.3/network.json sonde.json
 ```
 
 Le `server.jar` n'est pas inclus dans ce dépôt. Le générateur de la 26.3 demande Java 25.
