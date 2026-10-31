@@ -256,15 +256,28 @@ fn push_bundle(sender: &OutboundSender, frames: &[Arc<[u8]>]) {
 }
 
 pub fn broadcast_gamemode_change(registry: &Arc<PlayerRegistry>, uuid: u128, mode: i32) {
-    let senders = registry.set_gamemode(uuid, mode);
-    if senders.is_empty() {
+    let change = registry.change_gamemode(uuid, mode);
+    if change.senders.is_empty() {
         return;
     }
     if let Some(frame) = frame_arc(
         play_cb::PLAYER_INFO_UPDATE,
         &player_info_update_gamemode_payload(uuid, mode),
     ) {
-        push_frame(&senders, &frame);
+        push_frame(&change.senders, &frame);
+    }
+    for actions in &change.actions {
+        if !actions.removed.is_empty()
+            && let Some(frame) = frame_arc(
+                play_cb::REMOVE_ENTITIES,
+                &remove_entities_payload(&actions.removed),
+            )
+        {
+            let _ = actions.sender.send(frame);
+        }
+        for spawn in &actions.entered {
+            push_bundle(&actions.sender, &spawn_bundle(spawn));
+        }
     }
 }
 
