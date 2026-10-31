@@ -1,5 +1,6 @@
 use crate::framing::{encode_compressed_frame, encode_frame};
 use crate::primitives::{write_f32, write_f64, write_i16, write_string, write_u16};
+use crate::text::{Component, write_nbt};
 use crate::varint::{read_var_int, write_var_int};
 use crate::{MAX_PACKET_LEN, MAX_STRING_LEN};
 
@@ -230,6 +231,29 @@ pub fn build_compressed_packet(
         return Err(EncodeError::PacketTooLarge);
     }
     Ok(encode_compressed_frame(&body, threshold))
+}
+
+pub fn write_command_suggestions(
+    buf: &mut Vec<u8>,
+    id: i32,
+    start: u32,
+    length: u32,
+    entries: &[(&str, Option<&Component>)],
+) {
+    write_var_int(id, buf);
+    write_var_int(start as i32, buf);
+    write_var_int(length as i32, buf);
+    write_var_int(entries.len() as i32, buf);
+    for (text, tooltip) in entries {
+        write_string(text, buf);
+        match tooltip {
+            Some(component) => {
+                buf.push(0x01);
+                write_nbt(buf, component);
+            }
+            None => buf.push(0x00),
+        }
+    }
 }
 
 pub fn set_compression_payload(threshold: i32) -> Vec<u8> {
@@ -491,6 +515,75 @@ mod tests {
             set_entity_data_health_payload(5),
             vec![0x05, 0x09, 0x03, 0x41, 0xA0, 0x00, 0x00, 0xFF]
         );
+    }
+
+    #[test]
+    fn command_suggestions_gamemode_creative_bytes() {
+        let mut buf = Vec::new();
+        write_command_suggestions(&mut buf, 2, 10, 2, &[("creative", None)]);
+        assert_eq!(
+            buf,
+            vec![
+                0x02, 0x0a, 0x02, 0x01, 0x08, b'c', b'r', b'e', b'a', b't', b'i', b'v', b'e', 0x00
+            ]
+        );
+    }
+
+    #[test]
+    fn command_suggestions_gamemode_all_bytes() {
+        let mut buf = Vec::new();
+        write_command_suggestions(
+            &mut buf,
+            1,
+            10,
+            0,
+            &[
+                ("adventure", None),
+                ("creative", None),
+                ("spectator", None),
+                ("survival", None),
+            ],
+        );
+        let mut expected = vec![0x01, 0x0a, 0x00, 0x04];
+        for name in ["adventure", "creative", "spectator", "survival"] {
+            expected.push(name.len() as u8);
+            expected.extend_from_slice(name.as_bytes());
+            expected.push(0x00);
+        }
+        assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn command_suggestions_time_marker_bytes() {
+        let mut buf = Vec::new();
+        write_command_suggestions(&mut buf, 11, 10, 1, &[("minecraft:day", None)]);
+        let mut expected = vec![0x0b, 0x0a, 0x01, 0x01, 0x0d];
+        expected.extend_from_slice(b"minecraft:day");
+        expected.push(0x00);
+        assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn command_suggestions_entry_with_tooltip_is_all_players() {
+        let tooltip = Component::translate("argument.entity.selector.allPlayers");
+        let mut buf = Vec::new();
+        write_command_suggestions(&mut buf, 2, 0, 0, &[("@a", Some(&tooltip))]);
+        let (header, entry) = buf.split_at(4);
+        assert_eq!(header, &[0x02, 0x00, 0x00, 0x01]);
+        let mut expected = vec![0x02, b'@', b'a', 0x01, 0x0a, 0x08, 0x00, 0x09];
+        expected.extend_from_slice(b"translate");
+        expected.push(0x00);
+        expected.push(0x23);
+        expected.extend_from_slice(b"argument.entity.selector.allPlayers");
+        expected.push(0x00);
+        assert_eq!(entry, expected.as_slice());
+    }
+
+    #[test]
+    fn command_suggestions_empty_is_id_zero_zero_zero() {
+        let mut buf = Vec::new();
+        write_command_suggestions(&mut buf, 7, 0, 0, &[]);
+        assert_eq!(buf, vec![0x07, 0x00, 0x00, 0x00]);
     }
 
     #[test]

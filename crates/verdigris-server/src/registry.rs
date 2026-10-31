@@ -308,6 +308,13 @@ impl PlayerRegistry {
         self.tick_counter.load(Ordering::Relaxed)
     }
 
+    pub fn player_names(&self) -> Vec<String> {
+        let slots = self.slots.lock().unwrap();
+        let mut names: Vec<String> = slots.values().map(|slot| slot.name.clone()).collect();
+        names.sort();
+        names
+    }
+
     pub fn try_swing(&self, uuid: u128) -> Option<(i32, Vec<OutboundSender>)> {
         let now = self.tick_counter.load(Ordering::Relaxed);
         let mut slots = self.slots.lock().unwrap();

@@ -46,6 +46,16 @@ pub const CHAT_TYPE_MSG_OUTGOING_HOLDER: i32 = 4;
 pub const CHAT_TYPE_SAY_HOLDER: i32 = 5;
 
 pub const MAX_SUGGESTION_LEN_DEFAULT: usize = 256;
+pub const MAX_SUGGESTION_LEN_OP: usize = 32500;
+pub const MAX_SUGGESTIONS: usize = 1000;
+
+pub const GAMEMODES: [&str; 4] = ["adventure", "creative", "spectator", "survival"];
+pub const TIME_MARKERS: [&str; 4] = [
+    "minecraft:day",
+    "minecraft:midnight",
+    "minecraft:night",
+    "minecraft:noon",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Parser {
@@ -508,6 +518,118 @@ pub fn decode_command_suggestion(body: &[u8]) -> Result<(i32, String), ProtocolE
         return Err(ProtocolError::TrailingBytes);
     }
     Ok((id, text))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Completion {
+    pub start: u32,
+    pub length: u32,
+}
+
+fn completion_tree() -> &'static [Node] {
+    static TREE: std::sync::OnceLock<Vec<Node>> = std::sync::OnceLock::new();
+    TREE.get_or_init(full_tree)
+}
+
+fn utf16_len(text: &str) -> u32 {
+    text.chars().map(|ch| ch.len_utf16() as u32).sum()
+}
+
+fn navigate(nodes: &[Node], current: usize, token: &str) -> Option<usize> {
+    let mut literal = None;
+    let mut argument = None;
+    for &child in &nodes[current].children {
+        match nodes[child].kind {
+            NodeKind::Literal if nodes[child].name == token => literal = Some(child),
+            NodeKind::Argument if argument.is_none() => argument = Some(child),
+            _ => {}
+        }
+    }
+    let chosen = literal.or(argument)?;
+    Some(match nodes[chosen].redirect {
+        Some(target) => target,
+        None => chosen,
+    })
+}
+
+fn push_prefixed<'a>(pool: &[&'a str], word: &str, out: &mut Vec<&'a str>) {
+    for &candidate in pool {
+        if candidate.starts_with(word) {
+            out.push(candidate);
+        }
+    }
+}
+
+fn push_resources(pool: &[&'static str], word: &str, out: &mut Vec<&str>) {
+    for &candidate in pool {
+        let path_match = candidate
+            .split_once(':')
+            .is_some_and(|(_, path)| path.starts_with(word));
+        if candidate.starts_with(word) || path_match {
+            out.push(candidate);
+        }
+    }
+}
+
+fn collect_candidates<'a>(
+    nodes: &[Node],
+    current: usize,
+    word: &str,
+    players: &[&'a str],
+    out: &mut Vec<&'a str>,
+) {
+    for &child in &nodes[current].children {
+        match nodes[child].kind {
+            NodeKind::Literal => {
+                if nodes[child].name.starts_with(word) {
+                    out.push(nodes[child].name);
+                }
+            }
+            NodeKind::Argument => match nodes[child].parser {
+                Some(Parser::GameMode) => push_prefixed(&GAMEMODES, word, out),
+                Some(Parser::ResourceLocation) => push_resources(&TIME_MARKERS, word, out),
+                Some(Parser::Entity { .. }) => push_prefixed(players, word, out),
+                _ => {}
+            },
+            NodeKind::Root => {}
+        }
+    }
+}
+
+pub fn suggest_completions<'a>(
+    command_with_slash: &str,
+    players: &[&'a str],
+    out: &mut Vec<&'a str>,
+) -> Option<Completion> {
+    let has_slash = command_with_slash.starts_with('/');
+    let rest = command_with_slash
+        .strip_prefix('/')
+        .unwrap_or(command_with_slash);
+
+    let word_start = match rest.rfind(' ') {
+        Some(idx) => idx + 1,
+        None => 0,
+    };
+    let (prefix, word) = rest.split_at(word_start);
+    let slash_units = u32::from(has_slash);
+    let start = slash_units + utf16_len(prefix);
+    let length = utf16_len(word);
+
+    let nodes = completion_tree();
+    let mut current = 0usize;
+    let completed = prefix.trim_end_matches(' ');
+    if !completed.is_empty() {
+        for token in completed.split(' ') {
+            current = navigate(nodes, current, token)?;
+        }
+    }
+
+    collect_candidates(nodes, current, word, players, out);
+    if out.is_empty() {
+        None
+    } else {
+        Some(Completion { start, length })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -992,6 +1114,107 @@ mod tests {
             decode_command_suggestion(&body).unwrap(),
             (5, "gamemode ".to_owned())
         );
+    }
+
+    #[test]
+    fn suggest_gamemode_prefix_yields_creative() {
+        let mut out = Vec::new();
+        let completion = suggest_completions("/gamemode cr", &[], &mut out).unwrap();
+        assert_eq!(
+            completion,
+            Completion {
+                start: 10,
+                length: 2
+            }
+        );
+        assert_eq!(out, vec!["creative"]);
+    }
+
+    #[test]
+    fn suggest_gamemode_empty_token_yields_sorted_modes() {
+        let mut out = Vec::new();
+        let completion = suggest_completions("/gamemode ", &[], &mut out).unwrap();
+        assert_eq!(
+            completion,
+            Completion {
+                start: 10,
+                length: 0
+            }
+        );
+        out.sort_unstable();
+        assert_eq!(out, vec!["adventure", "creative", "spectator", "survival"]);
+    }
+
+    #[test]
+    fn suggest_time_markers_empty_and_prefixed() {
+        let mut all = Vec::new();
+        let completion = suggest_completions("/time set ", &[], &mut all).unwrap();
+        assert_eq!(
+            completion,
+            Completion {
+                start: 10,
+                length: 0
+            }
+        );
+        all.sort_unstable();
+        assert_eq!(
+            all,
+            vec![
+                "minecraft:day",
+                "minecraft:midnight",
+                "minecraft:night",
+                "minecraft:noon"
+            ]
+        );
+
+        let mut day = Vec::new();
+        let completion = suggest_completions("/time set d", &[], &mut day).unwrap();
+        assert_eq!(
+            completion,
+            Completion {
+                start: 10,
+                length: 1
+            }
+        );
+        assert_eq!(day, vec!["minecraft:day"]);
+    }
+
+    #[test]
+    fn suggest_players_for_entity_argument() {
+        let mut out = Vec::new();
+        let players = ["Alice", "Bob"];
+        let completion = suggest_completions("/msg ", &players, &mut out).unwrap();
+        assert_eq!(
+            completion,
+            Completion {
+                start: 5,
+                length: 0
+            }
+        );
+        out.sort_unstable();
+        assert_eq!(out, vec!["Alice", "Bob"]);
+    }
+
+    #[test]
+    fn suggest_unparseable_returns_none() {
+        let mut out = Vec::new();
+        assert_eq!(suggest_completions("/zzz", &[], &mut out), None);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn suggest_offset_uses_utf16_for_non_bmp() {
+        let mut out = Vec::new();
+        let players = ["Alice"];
+        let completion = suggest_completions("/gamemode \u{10437} Al", &players, &mut out).unwrap();
+        assert_eq!(
+            completion,
+            Completion {
+                start: 13,
+                length: 2
+            }
+        );
+        assert_eq!(out, vec!["Alice"]);
     }
 
     #[test]

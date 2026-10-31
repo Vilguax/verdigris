@@ -3603,7 +3603,7 @@ async fn oversized_command_disconnects() {
 
 #[tokio::test]
 async fn oversized_suggestion_is_ignored() {
-    let addr = spawn_server().await;
+    let addr = spawn_server_with_permission(0).await;
     let mut client = TcpStream::connect(addr).await.unwrap();
     let mut buf = Vec::new();
     drive_to_play(&mut client, &mut buf).await;
@@ -3623,7 +3623,7 @@ async fn oversized_suggestion_is_ignored() {
 }
 
 #[tokio::test]
-async fn suggestion_receives_empty_response() {
+async fn suggestion_returns_sorted_gamemodes() {
     let addr = spawn_server().await;
     let mut client = TcpStream::connect(addr).await.unwrap();
     let mut buf = Vec::new();
@@ -3631,12 +3631,88 @@ async fn suggestion_receives_empty_response() {
     consume_empty_world(&mut client, &mut buf).await;
 
     client
-        .write_all(&compressed_command_suggestion_frame(1, "gamemode "))
+        .write_all(&compressed_command_suggestion_frame(1, "/gamemode "))
         .await
         .unwrap();
 
-    let body = read_skipping_until_id(&mut client, &mut buf, 0x11).await;
-    assert_eq!(body, vec![0x01, 0x00, 0x00, 0x00], "suggestions vides");
+    let payload = read_skipping_until_id(&mut client, &mut buf, 0x0F).await;
+    let mut expected = vec![0x01, 0x0a, 0x00, 0x04];
+    for name in ["adventure", "creative", "spectator", "survival"] {
+        expected.push(name.len() as u8);
+        expected.extend_from_slice(name.as_bytes());
+        expected.push(0x00);
+    }
+    assert_eq!(payload, expected, "les quatre modes triés sans infobulle");
+}
+
+#[tokio::test]
+async fn burst_of_suggestions_collapses_to_last_id() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    let mut batch = Vec::new();
+    for id in 1..=10 {
+        batch.extend_from_slice(&compressed_command_suggestion_frame(id, "/gamemode "));
+    }
+    client.write_all(&batch).await.unwrap();
+    sleep(Duration::from_millis(500)).await;
+
+    let mut responded = Vec::new();
+    while let Some((id, payload)) =
+        try_read_compressed_frame(&mut client, &mut buf, Duration::from_millis(200)).await
+    {
+        if id == 0x0F {
+            let (req_id, _) = read_var_int(&payload).unwrap().unwrap();
+            responded.push(req_id);
+        }
+    }
+    assert!(
+        responded.contains(&10),
+        "l'identifiant 10 reçoit une réponse"
+    );
+    for req_id in &responded {
+        assert!(
+            *req_id == 1 || *req_id == 10,
+            "toute réponse porte l'identifiant 1 ou 10, obtenu {req_id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn spaced_suggestions_each_get_a_response() {
+    let addr = spawn_server().await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play(&mut client, &mut buf).await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    let mut seen = Vec::new();
+    for id in 1..=3 {
+        client
+            .write_all(&compressed_command_suggestion_frame(id, "/gamemode "))
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(100)).await;
+        loop {
+            let (fid, payload) =
+                try_read_compressed_frame(&mut client, &mut buf, Duration::from_millis(500))
+                    .await
+                    .expect("une réponse de suggestion est attendue");
+            if fid == 0x0F {
+                let (req_id, _) = read_var_int(&payload).unwrap().unwrap();
+                seen.push(req_id);
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![1, 2, 3],
+        "chaque requête espacée reçoit sa réponse"
+    );
 }
 
 #[tokio::test]
