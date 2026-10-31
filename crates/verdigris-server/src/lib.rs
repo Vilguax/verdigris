@@ -39,14 +39,14 @@ use verdigris_protocol::{
     Arg, CHAT_TYPE_CHAT_HOLDER, CHAT_TYPE_MSG_INCOMING_HOLDER, CHAT_TYPE_MSG_OUTGOING_HOLDER,
     CHAT_TYPE_SAY_HOLDER, COMPRESSION_THRESHOLD, Chat, Component, Content, EncodeError,
     FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, HumanoidArm, Intent, ItemStack, ListedPlayer,
-    MAIN_HAND_LEFT, MAX_SUGGESTION_LEN_DEFAULT, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
-    MovePlayerStatus, PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID, SWING_DURATION,
-    SWING_WHACK, Serverbound, State, StatusInfo, Style, TickThrottler, World, add_entity_payload,
-    argument_error_component, block_changed_ack_payload, block_update_payload,
-    build_compressed_packet, build_packet, bundle_delimiter_payload, chunk_batch_finished_payload,
-    chunk_batch_start_payload, chunk_coord, chunks_to_forget, chunks_to_load, client_has_core,
-    command_suggestions_empty_payload, command_usage, command_usages, command_visible,
-    commands_payload, config_disconnect_payload, container_set_slot_payload,
+    MAIN_HAND_LEFT, MAX_SUGGESTION_LEN_DEFAULT, MAX_SUGGESTION_LEN_OP, MAX_SUGGESTIONS,
+    MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PLAYER_ENTITY_TYPE,
+    PROTOCOL_VERSION, SET_COMPRESSION_ID, SWING_DURATION, SWING_WHACK, Serverbound, State,
+    StatusInfo, Style, TickThrottler, World, add_entity_payload, argument_error_component,
+    block_changed_ack_payload, block_update_payload, build_compressed_packet, build_packet,
+    bundle_delimiter_payload, chunk_batch_finished_payload, chunk_batch_start_payload, chunk_coord,
+    chunks_to_forget, chunks_to_load, client_has_core, command_usage, command_usages,
+    command_visible, commands_payload, config_disconnect_payload, container_set_slot_payload,
     decode_client_information, decode_compressed_frame, decode_frame, decode_known_packs,
     decode_serverbound, entity_event_permission_payload, forget_level_chunk_payload,
     game_event_payload, keep_alive_payload, known_packs_payload, login_disconnect_payload,
@@ -56,9 +56,10 @@ use verdigris_protocol::{
     player_info_update_latency_payload, player_position_payload, pong_payload, random_session_id,
     read_var_int, registry_data_payload, remove_entities_payload, server_known_pack,
     set_chunk_cache_center_payload, set_compression_payload, set_equipment_payload,
-    set_held_slot_payload, status_json, status_response_payload, swing_animation_payload,
-    system_chat_payload, tab_list_payload, unknown_command_components, update_tags_payload,
-    validate_chat_content, validate_name, write_chunk_payload, write_nbt, write_var_int,
+    set_held_slot_payload, status_json, status_response_payload, suggest_completions,
+    swing_animation_payload, system_chat_payload, tab_list_payload, unknown_command_components,
+    update_tags_payload, validate_chat_content, validate_name, write_chunk_payload,
+    write_command_suggestions, write_nbt, write_var_int,
 };
 use verdigris_protocol::{GAME_VERSION, WORLD_MAX_Y, WORLD_MIN_Y, is_air, is_fluid};
 
@@ -1606,6 +1607,43 @@ struct ChatState {
     command_throttler: TickThrottler,
 }
 
+struct SuggestState {
+    pending: Option<i32>,
+    cmd: String,
+    resp_buf: Vec<u8>,
+}
+
+impl SuggestState {
+    fn new() -> Self {
+        SuggestState {
+            pending: None,
+            cmd: String::new(),
+            resp_buf: Vec::new(),
+        }
+    }
+}
+
+fn suggestion_len_limit(level: u8) -> usize {
+    if level < COMMAND_PERMISSION_EXEMPT {
+        MAX_SUGGESTION_LEN_DEFAULT
+    } else {
+        MAX_SUGGESTION_LEN_OP
+    }
+}
+
+fn suggestion_utf16_len(text: &str) -> usize {
+    text.chars().map(char::len_utf16).sum()
+}
+
+fn record_suggestion(suggest: &mut SuggestState, level: u8, id: i32, text: &str) {
+    if suggestion_utf16_len(text) > suggestion_len_limit(level) {
+        return;
+    }
+    suggest.cmd.clear();
+    suggest.cmd.push_str(text);
+    suggest.pending = Some(id);
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_play(
     stream: &mut TcpStream,
@@ -1637,49 +1675,25 @@ async fn run_play(
             COMMAND_SPAM_THRESHOLD_ENV,
         )),
     };
+    let mut suggest = SuggestState::new();
 
     loop {
-        loop {
-            match decode_compressed_frame(buf, threshold) {
-                Ok(Some((body, consumed))) => {
-                    buf.drain(..consumed);
-                    match decode_serverbound(State::Play, &body) {
-                        Ok(packet) => {
-                            if dispatch_play_packet(
-                                stream,
-                                framing,
-                                *state,
-                                threshold,
-                                packet,
-                                &mut ka,
-                                &mut session,
-                                &mut chat,
-                                &mut rx,
-                                Instant::now(),
-                            )
-                            .await
-                            {
-                                return;
-                            }
-                            sync_equipment(&session);
-                        }
-                        Err(err) => {
-                            let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
-                            disconnect(stream, framing, *state, &reason).await;
-                            return;
-                        }
-                    }
-                    if run_keep_alive_action(stream, framing, *state, &mut ka, &keep_alive).await {
-                        return;
-                    }
-                }
-                Ok(None) => break,
-                Err(err) => {
-                    let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
-                    disconnect(stream, framing, *state, &reason).await;
-                    return;
-                }
-            }
+        if pump_inbound(
+            stream,
+            framing,
+            *state,
+            threshold,
+            buf,
+            &mut ka,
+            &mut session,
+            &mut chat,
+            &mut rx,
+            &keep_alive,
+            &mut suggest,
+        )
+        .await
+        {
+            return;
         }
 
         let step = tokio::select! {
@@ -1698,6 +1712,31 @@ async fn run_play(
             PlayStep::Throttle => {
                 chat.chat_throttler.tick();
                 chat.command_throttler.tick();
+                if drain_socket(stream, buf, chunk) {
+                    disconnect(stream, framing, *state, REASON_CONNECTION_LOST).await;
+                    return;
+                }
+                if pump_inbound(
+                    stream,
+                    framing,
+                    *state,
+                    threshold,
+                    buf,
+                    &mut ka,
+                    &mut session,
+                    &mut chat,
+                    &mut rx,
+                    &keep_alive,
+                    &mut suggest,
+                )
+                .await
+                {
+                    return;
+                }
+                if flush_suggestion(stream, framing, *state, &session, &mut suggest).await {
+                    disconnect(stream, framing, *state, REASON_CONNECTION_LOST).await;
+                    return;
+                }
             }
             PlayStep::Outbound(Some(outbound)) => {
                 if write_outbound(stream, threshold, &mut chat.next_chat_index, outbound)
@@ -1721,6 +1760,119 @@ async fn run_play(
             }
         }
     }
+}
+
+fn drain_socket(stream: &TcpStream, buf: &mut Vec<u8>, chunk: &mut [u8]) -> bool {
+    loop {
+        match stream.try_read(chunk) {
+            Ok(0) => return true,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => return false,
+            Err(_) => return true,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn pump_inbound(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    threshold: usize,
+    buf: &mut Vec<u8>,
+    ka: &mut KeepAliveState,
+    session: &mut Session<'_>,
+    chat: &mut ChatState,
+    rx: &mut UnboundedReceiver<Outbound>,
+    keep_alive: &KeepAliveConfig,
+    suggest: &mut SuggestState,
+) -> bool {
+    loop {
+        match decode_compressed_frame(buf, threshold) {
+            Ok(Some((body, consumed))) => {
+                buf.drain(..consumed);
+                match decode_serverbound(State::Play, &body) {
+                    Ok(packet) => {
+                        if dispatch_play_packet(
+                            stream,
+                            framing,
+                            state,
+                            threshold,
+                            packet,
+                            ka,
+                            session,
+                            chat,
+                            rx,
+                            suggest,
+                            Instant::now(),
+                        )
+                        .await
+                        {
+                            return true;
+                        }
+                        sync_equipment(session);
+                    }
+                    Err(err) => {
+                        let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
+                        disconnect(stream, framing, state, &reason).await;
+                        return true;
+                    }
+                }
+                if run_keep_alive_action(stream, framing, state, ka, keep_alive).await {
+                    return true;
+                }
+            }
+            Ok(None) => return false,
+            Err(err) => {
+                let reason = format!("{REASON_PROTOCOL_ERROR_PREFIX}{err}");
+                disconnect(stream, framing, state, &reason).await;
+                return true;
+            }
+        }
+    }
+}
+
+async fn flush_suggestion(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    session: &Session<'_>,
+    suggest: &mut SuggestState,
+) -> bool {
+    let Some(id) = suggest.pending.take() else {
+        return false;
+    };
+    let players = session.registry.player_names();
+    let player_refs: Vec<&str> = players.iter().map(String::as_str).collect();
+    let mut candidates: Vec<&str> = Vec::new();
+    let completion = suggest_completions(&suggest.cmd, &player_refs, &mut candidates);
+    suggest.resp_buf.clear();
+    match completion {
+        Some(completion) => {
+            candidates.sort_unstable();
+            candidates.dedup();
+            candidates.truncate(MAX_SUGGESTIONS);
+            let entries: Vec<(&str, Option<&Component>)> =
+                candidates.iter().map(|&name| (name, None)).collect();
+            write_command_suggestions(
+                &mut suggest.resp_buf,
+                id,
+                completion.start,
+                completion.length,
+                &entries,
+            );
+        }
+        None => write_command_suggestions(&mut suggest.resp_buf, id, 0, 0, &[]),
+    }
+    write_packet(
+        stream,
+        framing,
+        state,
+        play_cb::COMMAND_SUGGESTIONS,
+        &suggest.resp_buf,
+    )
+    .await
+    .is_err()
 }
 
 fn encode_player_chat(next_chat_index: &mut i32, tail: &[u8], threshold: usize) -> Option<Vec<u8>> {
@@ -1810,6 +1962,7 @@ async fn dispatch_play_packet(
     session: &mut Session<'_>,
     chat: &mut ChatState,
     rx: &mut UnboundedReceiver<Outbound>,
+    suggest: &mut SuggestState,
     now: Instant,
 ) -> bool {
     match packet {
@@ -1833,7 +1986,8 @@ async fn dispatch_play_packet(
         }
         Serverbound::PlayChatAck(_) | Serverbound::PlayChatSessionUpdate => false,
         Serverbound::PlayCommandSuggestion { id, text } => {
-            handle_command_suggestion(stream, framing, state, id, &text).await
+            record_suggestion(suggest, session.player.permission_level, id, &text);
+            false
         }
         other => handle_play_packet(stream, framing, state, other, ka, session, now).await,
     }
@@ -2192,27 +2346,6 @@ fn resolve_targets(session: &Session<'_>, selector: &str) -> Vec<PlayerHandle> {
             .filter(|handle| handle.name == name)
             .collect(),
     }
-}
-
-async fn handle_command_suggestion(
-    stream: &mut TcpStream,
-    framing: &Framing,
-    state: State,
-    id: i32,
-    text: &str,
-) -> bool {
-    if text.chars().count() > MAX_SUGGESTION_LEN_DEFAULT {
-        return false;
-    }
-    write_packet(
-        stream,
-        framing,
-        state,
-        play_cb::COMMAND_SUGGESTIONS,
-        &command_suggestions_empty_payload(id),
-    )
-    .await
-    .is_err()
 }
 
 async fn run_keep_alive_action(
@@ -2705,8 +2838,9 @@ async fn drain(stream: &mut TcpStream, deadline: Instant) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Arc, Outbound, PLAY_THRESHOLD, PlayerRegistry, World, broadcast_gamemode_change,
-        broadcast_latency, build_env_filter, spawn_position,
+        Arc, Outbound, PLAY_THRESHOLD, PlayerRegistry, SuggestState, World,
+        broadcast_gamemode_change, broadcast_latency, build_env_filter, record_suggestion,
+        spawn_position,
     };
     use tokio::sync::mpsc::unbounded_channel;
     use verdigris_protocol::{
@@ -2727,6 +2861,31 @@ mod tests {
             .unwrap();
         let (id, header) = read_var_int(&body).unwrap().unwrap();
         (id, body[header])
+    }
+
+    #[test]
+    fn suggestion_place_keeps_only_last_request() {
+        let mut suggest = SuggestState::new();
+        for id in 1..=5 {
+            record_suggestion(&mut suggest, 4, id, &format!("gamemode {id}"));
+        }
+        assert_eq!(suggest.pending, Some(5));
+        assert_eq!(suggest.cmd, "gamemode 5");
+    }
+
+    #[test]
+    fn suggestion_length_limits_depend_on_permission() {
+        let mut op = SuggestState::new();
+        record_suggestion(&mut op, 4, 1, &"a".repeat(32501));
+        assert_eq!(op.pending, None, "niveau 4 refuse au-delà de 32500");
+
+        let mut low_over = SuggestState::new();
+        record_suggestion(&mut low_over, 0, 1, &"a".repeat(257));
+        assert_eq!(low_over.pending, None, "niveau 0 refuse au-delà de 256");
+
+        let mut low_ok = SuggestState::new();
+        record_suggestion(&mut low_ok, 0, 2, &"a".repeat(256));
+        assert_eq!(low_ok.pending, Some(2), "niveau 0 accepte 256");
     }
 
     #[test]

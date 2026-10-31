@@ -48,7 +48,7 @@ pub mod packet_ids {
         pub const SYSTEM_CHAT: i32 = 0x7C;
         pub const PLAYER_CHAT: i32 = 0x42;
         pub const COMMANDS: i32 = 0x10;
-        pub const COMMAND_SUGGESTIONS: i32 = 0x11;
+        pub const COMMAND_SUGGESTIONS: i32 = 0x0F;
         pub const ENTITY_EVENT: i32 = 0x22;
     }
 
@@ -1192,6 +1192,12 @@ mod tests {
         assert_eq!(packet_ids::clientbound::SET_EQUIPMENT, 0x68);
         assert_eq!(packet_ids::clientbound::SWING_ANIMATION, 0x7B);
         assert_eq!(packet_ids::serverbound::PUNCH, 0x2E);
+    }
+
+    #[test]
+    fn command_suggestion_ids_are_both_0x0f() {
+        assert_eq!(packet_ids::clientbound::COMMAND_SUGGESTIONS, 0x0F);
+        assert_eq!(packet_ids::serverbound::COMMAND_SUGGESTION, 0x0F);
     }
 
     #[test]
