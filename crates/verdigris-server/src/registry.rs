@@ -116,6 +116,7 @@ struct Slot {
     meta: PlayerMeta,
     mainhand: ItemStack,
     last_swing_start_tick: Option<u64>,
+    permission_level: u8,
     sender: OutboundSender,
 }
 
@@ -136,6 +137,15 @@ impl Slot {
 pub struct RegisterSnapshot {
     pub existing: Vec<ListedPlayer>,
     pub other_senders: Vec<OutboundSender>,
+}
+
+#[derive(Clone)]
+pub struct PlayerHandle {
+    pub uuid: u128,
+    pub name: String,
+    pub x: f64,
+    pub z: f64,
+    pub sender: OutboundSender,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -240,16 +250,57 @@ pub struct PlayerRegistry {
     slots: Mutex<HashMap<u128, Slot>>,
     motd: String,
     max_players: i32,
+    ops: Vec<String>,
+    default_permission: u8,
     tick_counter: AtomicU64,
 }
 
 impl PlayerRegistry {
     pub fn new(motd: &str, max_players: i32) -> Self {
+        let ops = std::env::var(crate::player::OPS_ENV)
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(|entry| entry.trim().to_owned())
+                    .filter(|entry| !entry.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let default_permission = crate::player::resolve_permission(
+            "",
+            None,
+            std::env::var(crate::player::DEFAULT_PERMISSION_ENV)
+                .ok()
+                .as_deref(),
+        );
+        PlayerRegistry::with_permissions(motd, max_players, ops, default_permission)
+    }
+
+    pub fn with_permissions(
+        motd: &str,
+        max_players: i32,
+        ops: Vec<String>,
+        default_permission: u8,
+    ) -> Self {
         PlayerRegistry {
             slots: Mutex::new(HashMap::new()),
             motd: motd.to_owned(),
             max_players,
+            ops,
+            default_permission,
             tick_counter: AtomicU64::new(0),
+        }
+    }
+
+    pub fn permission_for(&self, name: &str) -> u8 {
+        if self
+            .ops
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(name))
+        {
+            crate::player::OP_PERMISSION_LEVEL
+        } else {
+            self.default_permission
         }
     }
 
@@ -349,6 +400,7 @@ impl PlayerRegistry {
                 meta: PlayerMeta::new(),
                 mainhand: ItemStack::Empty,
                 last_swing_start_tick: None,
+                permission_level: 0,
                 sender,
             },
         );
@@ -759,6 +811,53 @@ impl PlayerRegistry {
             .values()
             .map(|slot| slot.sender.clone())
             .collect()
+    }
+
+    pub fn sender_of(&self, uuid: u128) -> Option<OutboundSender> {
+        self.slots
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .map(|slot| slot.sender.clone())
+    }
+
+    pub fn set_permission(&self, uuid: u128, level: u8) -> Option<(i32, OutboundSender)> {
+        let mut slots = self.slots.lock().unwrap();
+        slots.get_mut(&uuid).map(|slot| {
+            slot.permission_level = level;
+            (slot.entity_id, slot.sender.clone())
+        })
+    }
+
+    pub fn players(&self) -> Vec<PlayerHandle> {
+        self.slots
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&uuid, slot)| PlayerHandle {
+                uuid,
+                name: slot.name.clone(),
+                x: slot.x,
+                z: slot.z,
+                sender: slot.sender.clone(),
+            })
+            .collect()
+    }
+
+    pub fn listed_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .slots
+            .lock()
+            .unwrap()
+            .values()
+            .map(|slot| slot.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    pub fn max_players(&self) -> i32 {
+        self.max_players
     }
 
     pub fn count(&self) -> usize {

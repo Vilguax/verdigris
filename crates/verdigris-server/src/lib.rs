@@ -21,7 +21,7 @@ pub use generator::{
 pub use level::{LEVEL_FILE, LevelConfig, LevelError, ensure as ensure_level, level_path};
 pub use player::{GAMEMODE_ENV, PlayerState, read_gamemode, resolve_gamemode};
 pub use registry::PlayerRegistry;
-use registry::{EntitySpawn, Outbound, OutboundSender, allocate_entity_id};
+use registry::{EntitySpawn, Outbound, OutboundSender, PlayerHandle, allocate_entity_id};
 pub use storage::{
     CHUNKS_SUBDIR, ChunkStore, DEFAULT_WORLD_DIR, DiskLoader, LoadOutcome, REJECTED_SUFFIX,
     WORLD_ENV, world_dir,
@@ -36,26 +36,29 @@ use tracing_subscriber::EnvFilter;
 
 use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
-    Arg, CHAT_TYPE_CHAT_HOLDER, COMPRESSION_THRESHOLD, Chat, Component, Content, EncodeError,
+    Arg, CHAT_TYPE_CHAT_HOLDER, CHAT_TYPE_MSG_INCOMING_HOLDER, CHAT_TYPE_MSG_OUTGOING_HOLDER,
+    CHAT_TYPE_SAY_HOLDER, COMPRESSION_THRESHOLD, Chat, Component, Content, EncodeError,
     FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, HumanoidArm, Intent, ItemStack, ListedPlayer,
-    MAIN_HAND_LEFT, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus,
-    PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID, SWING_DURATION, SWING_WHACK,
-    Serverbound, State, StatusInfo, Style, TickThrottler, World, add_entity_payload,
-    block_changed_ack_payload, block_update_payload, build_compressed_packet, build_packet,
-    bundle_delimiter_payload, chunk_batch_finished_payload, chunk_batch_start_payload, chunk_coord,
-    chunks_to_forget, chunks_to_load, client_has_core, config_disconnect_payload,
-    container_set_slot_payload, decode_client_information, decode_compressed_frame, decode_frame,
-    decode_known_packs, decode_serverbound, forget_level_chunk_payload, game_event_payload,
-    keep_alive_payload, known_packs_payload, login_disconnect_payload, login_play_payload,
-    login_success_payload, network_data, normalize_chat, offline_uuid, packet_ids,
-    player_abilities_payload, player_chat_tail, player_info_remove_payload,
+    MAIN_HAND_LEFT, MAX_SUGGESTION_LEN_DEFAULT, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
+    MovePlayerStatus, PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID, SWING_DURATION,
+    SWING_WHACK, Serverbound, State, StatusInfo, Style, TickThrottler, World, add_entity_payload,
+    argument_error_component, block_changed_ack_payload, block_update_payload,
+    build_compressed_packet, build_packet, bundle_delimiter_payload, chunk_batch_finished_payload,
+    chunk_batch_start_payload, chunk_coord, chunks_to_forget, chunks_to_load, client_has_core,
+    command_suggestions_empty_payload, command_usage, command_usages, command_visible,
+    commands_payload, config_disconnect_payload, container_set_slot_payload,
+    decode_client_information, decode_compressed_frame, decode_frame, decode_known_packs,
+    decode_serverbound, entity_event_permission_payload, forget_level_chunk_payload,
+    game_event_payload, keep_alive_payload, known_packs_payload, login_disconnect_payload,
+    login_play_payload, login_success_payload, network_data, normalize_chat, offline_uuid,
+    packet_ids, player_abilities_payload, player_chat_tail, player_info_remove_payload,
     player_info_update_gamemode_payload, player_info_update_init_payload,
     player_info_update_latency_payload, player_position_payload, pong_payload, random_session_id,
     read_var_int, registry_data_payload, remove_entities_payload, server_known_pack,
     set_chunk_cache_center_payload, set_compression_payload, set_equipment_payload,
     set_held_slot_payload, status_json, status_response_payload, swing_animation_payload,
-    system_chat_payload, tab_list_payload, update_tags_payload, validate_chat_content,
-    validate_name, write_chunk_payload, write_nbt, write_var_int,
+    system_chat_payload, tab_list_payload, unknown_command_components, update_tags_payload,
+    validate_chat_content, validate_name, write_chunk_payload, write_nbt, write_var_int,
 };
 use verdigris_protocol::{GAME_VERSION, WORLD_MAX_Y, WORLD_MIN_Y, is_air, is_fluid};
 
@@ -88,6 +91,29 @@ pub const REASON_READ_TIMEOUT: &str = "Délai de lecture dépassé";
 pub const REASON_KEEP_ALIVE_TIMEOUT: &str = "keep alive délai dépassé";
 pub const DISCONNECT_ILLEGAL_CHARACTERS: &str = "multiplayer.disconnect.illegal_characters";
 pub const DISCONNECT_SPAM: &str = "disconnect.spam";
+
+pub const CHAT_SPAM_THRESHOLD_ENV: &str = "VERDIGRIS_CHAT_SPAM_THRESHOLD";
+pub const COMMAND_SPAM_THRESHOLD_ENV: &str = "VERDIGRIS_COMMAND_SPAM_THRESHOLD";
+pub const DEFAULT_SPAM_SECONDS: u32 = 10;
+const COMMAND_PERMISSION_EXEMPT: u8 = 2;
+
+pub fn resolve_spam_threshold(value: Option<&str>) -> u32 {
+    let seconds = match value {
+        Some(raw) => match raw.trim().parse::<u32>() {
+            Ok(seconds) => seconds,
+            Err(_) => {
+                warn!(value = raw, "seuil anti-spam invalide, repli sur 10s");
+                DEFAULT_SPAM_SECONDS
+            }
+        },
+        None => DEFAULT_SPAM_SECONDS,
+    };
+    seconds.saturating_mul(TickThrottler::TICKS_PER_SECOND)
+}
+
+fn read_spam_threshold(env_name: &str) -> u32 {
+    resolve_spam_threshold(std::env::var(env_name).ok().as_deref())
+}
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -298,6 +324,21 @@ pub fn broadcast_gamemode_change(registry: &Arc<PlayerRegistry>, uuid: u128, mod
         for spawn in &actions.entered {
             push_bundle(&actions.sender, &spawn_bundle(spawn));
         }
+    }
+}
+
+pub fn broadcast_permission_change(registry: &Arc<PlayerRegistry>, uuid: u128, level: u8) {
+    let Some((entity_id, sender)) = registry.set_permission(uuid, level) else {
+        return;
+    };
+    if let Some(frame) = frame_arc(play_cb::COMMANDS, &commands_payload(level)) {
+        let _ = sender.send(Outbound::Frame(frame));
+    }
+    if let Some(frame) = frame_arc(
+        play_cb::ENTITY_EVENT,
+        &entity_event_permission_payload(entity_id, level),
+    ) {
+        let _ = sender.send(Outbound::Frame(frame));
     }
 }
 
@@ -869,6 +910,7 @@ async fn dispatch(
         | Serverbound::PlayChatCommandSigned(_)
         | Serverbound::PlayChatAck(_)
         | Serverbound::PlayChatSessionUpdate
+        | Serverbound::PlayCommandSuggestion { .. }
         | Serverbound::PlayIgnored { .. } => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
         }
@@ -1277,6 +1319,33 @@ async fn enter_play(
         return;
     }
 
+    player.permission_level = registry.permission_for(&player.name);
+    let permission_level = player.permission_level;
+    if write_packet(
+        stream,
+        framing,
+        *state,
+        play_cb::COMMANDS,
+        &commands_payload(permission_level),
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+    if write_packet(
+        stream,
+        framing,
+        *state,
+        play_cb::ENTITY_EVENT,
+        &entity_event_permission_payload(entity_id, permission_level),
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
     let position = player_position_payload(PLAY_TELEPORT_ID, spawn, [0.0; 3], 0.0, 0.0, 0);
     if write_packet(stream, framing, *state, play_cb::PLAYER_POSITION, &position)
         .await
@@ -1383,6 +1452,8 @@ async fn enter_play(
             push_frame(&snapshot.other_senders, &frame);
         }
     }
+
+    registry.set_permission(uuid, permission_level);
 
     registry.activate(uuid);
 
@@ -1561,8 +1632,10 @@ async fn run_play(
     throttle_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut chat = ChatState {
         next_chat_index: 0,
-        chat_throttler: TickThrottler::new(),
-        command_throttler: TickThrottler::new(),
+        chat_throttler: TickThrottler::with_threshold(read_spam_threshold(CHAT_SPAM_THRESHOLD_ENV)),
+        command_throttler: TickThrottler::with_threshold(read_spam_threshold(
+            COMMAND_SPAM_THRESHOLD_ENV,
+        )),
     };
 
     loop {
@@ -1759,6 +1832,9 @@ async fn dispatch_play_packet(
             .await
         }
         Serverbound::PlayChatAck(_) | Serverbound::PlayChatSessionUpdate => false,
+        Serverbound::PlayCommandSuggestion { id, text } => {
+            handle_command_suggestion(stream, framing, state, id, &text).await
+        }
         other => handle_play_packet(stream, framing, state, other, ka, session, now).await,
     }
 }
@@ -1791,7 +1867,11 @@ async fn handle_chat(
         return false;
     }
 
-    let over_threshold = chat.chat_throttler.increment();
+    let over_threshold = if session.player.permission_level >= COMMAND_PERMISSION_EXEMPT {
+        false
+    } else {
+        chat.chat_throttler.increment()
+    };
 
     let name = Component::text(&session.player.name);
     let mut tail = Vec::new();
@@ -1849,7 +1929,11 @@ async fn handle_command(
         return true;
     }
 
-    let over_threshold = chat.command_throttler.increment();
+    let over_threshold = if session.player.permission_level >= COMMAND_PERMISSION_EXEMPT {
+        false
+    } else {
+        chat.command_throttler.increment()
+    };
 
     if execute_command(stream, framing, session, command).await {
         return true;
@@ -1878,20 +1962,254 @@ async fn execute_command(
     command: &str,
 ) -> bool {
     debug!(player = %session.player.name, command, "commande reçue");
-    let failure = Component {
-        content: Content::Text(String::new()),
-        style: Style {
-            color: Some("red".to_owned()),
-            ..Style::default()
-        },
-        extra: vec![Component::translate("command.unknown.command")],
-    };
+    let command = command.trim_start();
+    let level = session.player.permission_level;
+    let name = command.split_whitespace().next().unwrap_or("");
+    if name.is_empty() || !command_visible(level, name) {
+        return send_unknown_command(stream, framing, command).await;
+    }
+    match name {
+        "help" => {
+            let argument = command.split_whitespace().nth(1);
+            send_help(stream, framing, level, argument).await
+        }
+        "list" => {
+            let argument = command.split_whitespace().nth(1);
+            send_list(stream, framing, session, argument).await
+        }
+        "say" => {
+            send_say(session, remainder(command, name));
+            false
+        }
+        "msg" | "tell" | "w" => send_message_command(stream, framing, session, command, name).await,
+        _ => {
+            warn!(command = name, "commande sans exécuteur enregistré");
+            false
+        }
+    }
+}
+
+fn remainder<'a>(command: &'a str, name: &str) -> &'a str {
+    command[name.len()..].trim_start()
+}
+
+async fn send_unknown_command(stream: &mut TcpStream, framing: &Framing, command: &str) -> bool {
+    for component in unknown_command_components(command, 0) {
+        if write_packet(
+            stream,
+            framing,
+            State::Play,
+            play_cb::SYSTEM_CHAT,
+            &system_chat_payload(&component, false),
+        )
+        .await
+        .is_err()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+async fn send_system_line(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    component: &Component,
+) -> bool {
     write_packet(
         stream,
         framing,
         State::Play,
         play_cb::SYSTEM_CHAT,
-        &system_chat_payload(&failure, false),
+        &system_chat_payload(component, false),
+    )
+    .await
+    .is_err()
+}
+
+async fn send_help(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    level: u8,
+    argument: Option<&str>,
+) -> bool {
+    let lines = match argument {
+        Some(name) => match command_usage(level, name) {
+            Some(line) => vec![line],
+            None => return send_unknown_command(stream, framing, name).await,
+        },
+        None => command_usages(level),
+    };
+    for line in lines {
+        if send_system_line(stream, framing, &Component::text(line)).await {
+            return true;
+        }
+    }
+    false
+}
+
+async fn send_list(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &Session<'_>,
+    argument: Option<&str>,
+) -> bool {
+    let mut players = session.registry.players();
+    players.sort_by(|a, b| a.name.cmp(&b.name));
+    let with_ids = argument == Some("uuids");
+    let max = session.registry.max_players();
+
+    let mut list = Component {
+        content: Content::Text(String::new()),
+        style: Style::default(),
+        extra: Vec::new(),
+    };
+    for (index, handle) in players.iter().enumerate() {
+        if index > 0 {
+            list.extra.push(Component::text(", ").color("gray"));
+        }
+        if with_ids {
+            list.extra.push(
+                Component::translate("commands.list.nameAndId")
+                    .with(Arg::Str(handle.name.clone()))
+                    .with(Arg::Str(format!("{:032x}", handle.uuid))),
+            );
+        } else {
+            list.extra.push(Component::text(handle.name.clone()));
+        }
+    }
+
+    let component = Component::translate("commands.list.players")
+        .with(Arg::Int(players.len() as i32))
+        .with(Arg::Int(max))
+        .with(Arg::Comp(Box::new(list)));
+    send_system_line(stream, framing, &component).await
+}
+
+fn send_say(session: &Session<'_>, message: &str) {
+    if message.is_empty() {
+        return;
+    }
+    let name = Component::text(&session.player.name);
+    let mut tail = Vec::new();
+    player_chat_tail(
+        &mut tail,
+        session.uuid,
+        message,
+        0,
+        0,
+        CHAT_TYPE_SAY_HOLDER,
+        &name,
+        None,
+    );
+    let tail: Arc<[u8]> = Arc::from(tail.into_boxed_slice());
+    for handle in session.registry.players() {
+        let _ = handle.sender.send(Outbound::PlayerChat(Arc::clone(&tail)));
+    }
+}
+
+async fn send_message_command(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &Session<'_>,
+    command: &str,
+    name: &str,
+) -> bool {
+    let rest = remainder(command, name);
+    let (selector, message) = match rest.split_once(char::is_whitespace) {
+        Some((selector, message)) => (selector, message.trim_start()),
+        None => (rest, ""),
+    };
+    if selector.is_empty() || message.is_empty() {
+        return false;
+    }
+    let targets = resolve_targets(session, selector);
+    if targets.is_empty() {
+        let error = argument_error_component("argument.entity.notfound.player", selector);
+        return send_system_line(stream, framing, &error).await;
+    }
+
+    let sender_name = Component::text(&session.player.name);
+    let self_sender = session.registry.sender_of(session.uuid);
+    for target in targets {
+        let mut incoming = Vec::new();
+        player_chat_tail(
+            &mut incoming,
+            session.uuid,
+            message,
+            0,
+            0,
+            CHAT_TYPE_MSG_INCOMING_HOLDER,
+            &sender_name,
+            None,
+        );
+        let incoming: Arc<[u8]> = Arc::from(incoming.into_boxed_slice());
+        let _ = target.sender.send(Outbound::PlayerChat(incoming));
+
+        if let Some(self_sender) = &self_sender {
+            let target_name = Component::text(target.name.clone());
+            let mut outgoing = Vec::new();
+            player_chat_tail(
+                &mut outgoing,
+                session.uuid,
+                message,
+                0,
+                0,
+                CHAT_TYPE_MSG_OUTGOING_HOLDER,
+                &sender_name,
+                Some(&target_name),
+            );
+            let outgoing: Arc<[u8]> = Arc::from(outgoing.into_boxed_slice());
+            let _ = self_sender.send(Outbound::PlayerChat(outgoing));
+        }
+    }
+    false
+}
+
+fn resolve_targets(session: &Session<'_>, selector: &str) -> Vec<PlayerHandle> {
+    let players = session.registry.players();
+    match selector {
+        "@a" => players,
+        "@s" => players
+            .into_iter()
+            .filter(|handle| handle.uuid == session.uuid)
+            .collect(),
+        "@p" => {
+            let (sx, _, sz) = session.player.pos;
+            players
+                .into_iter()
+                .min_by(|a, b| {
+                    let da = (a.x - sx).powi(2) + (a.z - sz).powi(2);
+                    let db = (b.x - sx).powi(2) + (b.z - sz).powi(2);
+                    da.total_cmp(&db)
+                })
+                .into_iter()
+                .collect()
+        }
+        "@r" => players.into_iter().take(1).collect(),
+        name => players
+            .into_iter()
+            .filter(|handle| handle.name == name)
+            .collect(),
+    }
+}
+
+async fn handle_command_suggestion(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    id: i32,
+    text: &str,
+) -> bool {
+    if text.chars().count() > MAX_SUGGESTION_LEN_DEFAULT {
+        return false;
+    }
+    write_packet(
+        stream,
+        framing,
+        state,
+        play_cb::COMMAND_SUGGESTIONS,
+        &command_suggestions_empty_payload(id),
     )
     .await
     .is_err()
