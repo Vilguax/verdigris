@@ -8,9 +8,7 @@ use verdigris_protocol::{
     ChunkColumn, ChunkGenerator, FlatGenerator, biome_index, block_index, default_state_of_name,
     plains_biome_id,
 };
-use verdigris_worldgen::{
-    BiomeSource, Category, ChunkTerrain, SearchState, WorldGenerator, WorldgenData,
-};
+use verdigris_worldgen::{BiomeSource, ChunkTerrain, SearchState, WorldGenerator, WorldgenData};
 
 pub const GENERATOR_ENV: &str = "VERDIGRIS_GENERATOR";
 pub const SEED_ENV: &str = "VERDIGRIS_SEED";
@@ -99,10 +97,7 @@ pub struct NoiseGenerator {
     generator: Arc<WorldGenerator>,
     biomes: Arc<BiomeSource>,
     metrics: Arc<GenMetrics>,
-    stone: u16,
-    water: u16,
-    lava: u16,
-    bedrock: u16,
+    states: Vec<u16>,
     biome: u16,
     min_y: i32,
     height: usize,
@@ -114,11 +109,14 @@ impl NoiseGenerator {
         let biomes = data
             .build_biome_source(generator.seed())
             .map_err(|err| err.to_string())?;
+        let states = generator
+            .material()
+            .blocks
+            .iter()
+            .map(|name| state_of(name))
+            .collect::<Result<Vec<u16>, String>>()?;
         Ok(NoiseGenerator {
-            stone: state_of("minecraft:stone")?,
-            water: state_of("minecraft:water")?,
-            lava: state_of("minecraft:lava")?,
-            bedrock: state_of("minecraft:bedrock")?,
+            states,
             biome: plains_biome_id().map_err(|err| err.to_string())? as u16,
             min_y: generator.min_y(),
             height: generator.height(),
@@ -128,26 +126,13 @@ impl NoiseGenerator {
         })
     }
 
-    fn block_state(&self, category: Category) -> u16 {
-        match category {
-            Category::Stone => self.stone,
-            Category::Water => self.water,
-            Category::Lava => self.lava,
-            Category::Air => 0,
-        }
-    }
-
     fn build_column(&self, terrain: &ChunkTerrain, biome_cells: &[u16]) -> ChunkColumn {
         let mut column = ChunkColumn::empty(self.biome);
         for lz in 0..16usize {
             for lx in 0..16usize {
                 for j in 0..self.height {
                     let y = self.min_y + j as i32;
-                    let state = if y == self.min_y {
-                        self.bedrock
-                    } else {
-                        self.block_state(terrain.category_at(lx, y, lz))
-                    };
+                    let state = self.states[terrain.block_id_at(lx, y, lz) as usize];
                     if state != 0 {
                         column.sections[j / 16].states[block_index(lx, j % 16, lz)] = state;
                     }
@@ -275,21 +260,47 @@ mod tests {
     }
 
     #[test]
-    fn noise_column_has_bedrock_floor_and_matches_fill() {
+    fn noise_column_matches_material_block_grid() {
+        use verdigris_worldgen::chunk_fill::CHUNK_WIDTH;
         let generator = Arc::new(WorldGenerator::new(DEFAULT_SEED).unwrap());
         let metrics = Arc::new(GenMetrics::default());
         let noise = NoiseGenerator::new(Arc::clone(&generator), metrics).unwrap();
         let column = noise.generate(-7, 0);
 
+        let mut terrain = generator.terrain();
+        generator.fill_chunk(-7, 0, &mut terrain).unwrap();
+        let states: Vec<u16> = generator
+            .material()
+            .blocks
+            .iter()
+            .map(|name| state_of(name).unwrap())
+            .collect();
+
+        let min_y = generator.min_y();
         let bedrock = state_of("minecraft:bedrock").unwrap();
-        for lz in 0..16usize {
-            for lx in 0..16usize {
-                assert_eq!(
-                    column.sections[0].states[block_index(lx, 0, lz)],
-                    bedrock,
-                    "bedrock forcé à y=-64"
-                );
+        for lz in 0..CHUNK_WIDTH {
+            for lx in 0..CHUNK_WIDTH {
+                for j in 0..generator.height() {
+                    let y = min_y + j as i32;
+                    let want = states[terrain.block_id_at(lx, y, lz) as usize];
+                    let got = column.sections[j / 16].states[block_index(lx, j % 16, lz)];
+                    if want != 0 {
+                        assert_eq!(got, want, "état incohérent en ({lx},{y},{lz})");
+                    }
+                }
             }
         }
+        let mut seen_bedrock = false;
+        for lz in 0..CHUNK_WIDTH {
+            for lx in 0..CHUNK_WIDTH {
+                if column.sections[0].states[block_index(lx, 0, lz)] == bedrock {
+                    seen_bedrock = true;
+                }
+            }
+        }
+        assert!(
+            seen_bedrock,
+            "au moins une colonne a de la bedrock en y=-64"
+        );
     }
 }

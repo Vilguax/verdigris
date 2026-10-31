@@ -11,6 +11,7 @@ pub mod gradient;
 pub mod hash;
 pub mod interval;
 pub mod lcg;
+pub mod material;
 pub mod normal_noise;
 pub mod octaves;
 pub mod registry;
@@ -29,6 +30,7 @@ pub use df::{
 };
 pub use gradient::GradientNoise;
 pub use interval::Interval;
+pub use material::{MaterialRules, build_bands, zoom_seed};
 pub use normal_noise::{NormalNoiseDef, Normalize};
 pub use octaves::{Octave, OctaveStack};
 pub use registry::{InstantiatedNoises, NoiseRegistry, WorldgenError, instantiate_all};

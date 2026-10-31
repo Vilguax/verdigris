@@ -7,6 +7,11 @@ use serde_json::{Map, Value};
 use crate::df::build::{Assets, BuildError, Builder};
 use crate::df::node::Node;
 use crate::df::volume::{Volume, VolumeContext, eval_volume_with};
+use crate::material::compile::Compiler;
+use crate::material::{
+    FrozenNoise, MatNoises, MaterialRules, Simplex, TemperatureModifier, build_bands, zoom_seed,
+};
+use crate::octaves::OctaveStack;
 use crate::registry::{NoiseRegistry, WorldgenError, worldgen_value};
 use crate::sources::{PositionalFactory, aquifer_factory, positional_factory};
 
@@ -15,6 +20,7 @@ pub enum DataError {
     Worldgen(WorldgenError),
     Build(BuildError),
     MissingSection(String),
+    Material(String),
 }
 
 impl fmt::Display for DataError {
@@ -23,6 +29,7 @@ impl fmt::Display for DataError {
             Self::Worldgen(e) => write!(f, "{e}"),
             Self::Build(e) => write!(f, "{e}"),
             Self::MissingSection(s) => write!(f, "missing worldgen section: {s}"),
+            Self::Material(s) => write!(f, "material rules error: {s}"),
         }
     }
 }
@@ -351,6 +358,177 @@ impl WorldgenData {
             min_y,
             height.max(0) as usize,
         ))
+    }
+
+    pub fn build_material_rules(&self, seed: i64) -> Result<MaterialRules, DataError> {
+        let assets = self.assets(seed)?;
+        let functions = self.density_functions()?;
+        let overworld = self.overworld()?;
+
+        let noise = overworld
+            .get("noise")
+            .and_then(Value::as_object)
+            .ok_or_else(|| DataError::MissingSection("noise_settings/noise".to_string()))?;
+        let read_i32 = |name: &str| -> Result<i32, DataError> {
+            noise
+                .get(name)
+                .and_then(Value::as_i64)
+                .and_then(|v| i32::try_from(v).ok())
+                .ok_or_else(|| DataError::MissingSection(format!("noise_settings/noise/{name}")))
+        };
+        let min_y = read_i32("min_y")?;
+        let height = read_i32("height")?;
+        let sea_level = overworld
+            .get("sea_level")
+            .and_then(Value::as_i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or(63);
+
+        let root_name = overworld
+            .get("material_rule")
+            .and_then(Value::as_str)
+            .ok_or_else(|| DataError::MissingSection("noise_settings/material_rule".to_string()))?
+            .to_string();
+
+        let rules = self
+            .root
+            .get("material_rule")
+            .and_then(Value::as_object)
+            .ok_or_else(|| DataError::MissingSection("material_rule".to_string()))?;
+        let conds = self
+            .root
+            .get("material_condition")
+            .and_then(Value::as_object)
+            .ok_or_else(|| DataError::MissingSection("material_condition".to_string()))?;
+
+        let biome_names = crate::biome::biome_names();
+
+        let mut compiler = Compiler::new(
+            rules,
+            conds,
+            &assets.noises,
+            &assets.factory,
+            biome_names,
+            sea_level,
+        );
+        let root = compiler
+            .compile_rule(&Value::String(root_name))
+            .map_err(|e| DataError::Material(e.to_string()))?;
+
+        let terracotta = compiler.block_idx("minecraft:terracotta");
+        let orange = compiler.block_idx("minecraft:orange_terracotta");
+        let yellow = compiler.block_idx("minecraft:yellow_terracotta");
+        let brown = compiler.block_idx("minecraft:brown_terracotta");
+        let red = compiler.block_idx("minecraft:red_terracotta");
+        let white = compiler.block_idx("minecraft:white_terracotta");
+        let light_gray = compiler.block_idx("minecraft:light_gray_terracotta");
+        let snow_block_idx = compiler.block_idx("minecraft:snow_block");
+        let packed_ice_idx = compiler.block_idx("minecraft:packed_ice");
+
+        let air_idx = compiler.air_idx();
+        let water_idx = compiler.water_idx();
+        let lava_idx = compiler.lava_idx();
+        let stone_idx = compiler.stone_idx();
+
+        let bands = build_bands(
+            assets.factory.from_hash_of("minecraft:clay_bands"),
+            terracotta,
+            orange,
+            yellow,
+            brown,
+            red,
+            white,
+            light_gray,
+        );
+
+        let blocks = compiler.blocks.clone();
+
+        let build_df = |key: &str| -> Result<Node, DataError> {
+            let mut b = Builder::new(functions, &assets);
+            Ok(b.build(&Value::String(key.to_string()))?)
+        };
+        let copper_density = build_df("minecraft:overworld/ore_vein/copper_density")?;
+        let iron_density = build_df("minecraft:overworld/ore_vein/iron_density")?;
+        let richness = build_df("minecraft:overworld/ore_vein/richness")?;
+        let gap = build_df("minecraft:overworld/ore_vein/gap")?;
+        let prelim_surface = build_df("minecraft:overworld/preliminary_surface_level")?;
+
+        let get_noise = |key: &str| -> Result<std::sync::Arc<OctaveStack>, DataError> {
+            assets
+                .noises
+                .get(key)
+                .cloned()
+                .ok_or_else(|| DataError::Material(format!("missing noise {key}")))
+        };
+        let noises = MatNoises {
+            surface: get_noise("minecraft:surface")?,
+            surface_secondary: get_noise("minecraft:surface_secondary")?,
+            clay_bands_offset: get_noise("minecraft:clay_bands_offset")?,
+            badlands_surface: get_noise("minecraft:badlands_surface")?,
+            badlands_pillar: get_noise("minecraft:badlands_pillar")?,
+            badlands_pillar_roof: get_noise("minecraft:badlands_pillar_roof")?,
+            iceberg_surface: get_noise("minecraft:iceberg_surface")?,
+            iceberg_pillar: get_noise("minecraft:iceberg_pillar")?,
+            iceberg_pillar_roof: get_noise("minecraft:iceberg_pillar_roof")?,
+        };
+
+        let ore_factory = assets
+            .factory
+            .from_hash_of("minecraft:ore")
+            .fork_positional();
+        let factory = assets.factory.clone();
+
+        let biome_map = self
+            .root
+            .get("biome")
+            .and_then(Value::as_object)
+            .ok_or_else(|| DataError::MissingSection("biome".to_string()))?;
+        let mut biome_temps = vec![(0.0f32, TemperatureModifier::None); biome_names.len()];
+        for (id, slot) in biome_temps.iter_mut().enumerate() {
+            if let Some(name) = biome_names.name_of(id as u16)
+                && let Some(b) = biome_map.get(name).and_then(Value::as_object)
+            {
+                let t0 = b.get("temperature").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                let modi = match b.get("temperature_modifier").and_then(Value::as_str) {
+                    Some("frozen") => TemperatureModifier::Frozen,
+                    _ => TemperatureModifier::None,
+                };
+                *slot = (t0, modi);
+            }
+        }
+
+        let biome_source = self.build_biome_source(seed)?;
+
+        Ok(MaterialRules {
+            root,
+            blocks,
+            air_idx,
+            water_idx,
+            lava_idx,
+            stone_idx,
+            copper_density,
+            iron_density,
+            richness,
+            gap,
+            prelim_surface,
+            ore_factory,
+            factory,
+            noises,
+            bands,
+            frozen: FrozenNoise::new(),
+            temp_simplex: Simplex::from_lcg(1234),
+            biome_temps,
+            zoom_seed: zoom_seed(seed),
+            biome_source,
+            min_y,
+            height: height.max(0) as usize,
+            sea_level,
+            eroded_badlands_id: biome_names.id_of("minecraft:eroded_badlands"),
+            frozen_ocean_id: biome_names.id_of("minecraft:frozen_ocean"),
+            deep_frozen_ocean_id: biome_names.id_of("minecraft:deep_frozen_ocean"),
+            snow_block_idx,
+            packed_ice_idx,
+        })
     }
 
     pub fn build_named(&self, key: &str, seed: i64) -> Result<(Node, usize), DataError> {
