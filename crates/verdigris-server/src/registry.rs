@@ -4,13 +4,75 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::UnboundedSender;
 use verdigris_protocol::{
-    EntitySnapshot, ListedPlayer, TrackedState, chunk_coord, frame_entity_pass,
+    EntityDataValue, EntitySnapshot, HumanoidArm, ListedPlayer, Pose, TrackedState, chunk_coord,
+    frame_entity_pass, set_entity_data_payload,
 };
 
 pub type OutboundSender = UnboundedSender<Arc<[u8]>>;
 
 pub const TRACK_RANGE_BLOCKS: f64 = 128.0;
 const SPECTATOR_GAME_MODE: i32 = 3;
+
+const META_FLAGS: u8 = 0;
+const META_POSE: u8 = 6;
+const META_HEALTH: u8 = 9;
+const META_ARM: u8 = 15;
+const META_SKIN: u8 = 16;
+const FULL_HEALTH: f32 = 20.0;
+const CROUCH_FLAG: u8 = 0x02;
+const SPRINT_FLAG: u8 = 0x08;
+
+#[derive(Debug, Clone, Copy)]
+struct PlayerMeta {
+    flags: u8,
+    pose: Pose,
+    arm: HumanoidArm,
+    skin: u8,
+    dirty: u32,
+}
+
+impl PlayerMeta {
+    fn new() -> Self {
+        PlayerMeta {
+            flags: 0,
+            pose: Pose::Standing,
+            arm: HumanoidArm::Right,
+            skin: 0,
+            dirty: 0,
+        }
+    }
+
+    fn non_default_entries(&self, out: &mut Vec<(u8, EntityDataValue)>) {
+        out.clear();
+        if self.flags != 0 {
+            out.push((META_FLAGS, EntityDataValue::Byte(self.flags as i8)));
+        }
+        if self.pose != Pose::Standing {
+            out.push((META_POSE, EntityDataValue::Pose(self.pose)));
+        }
+        out.push((META_HEALTH, EntityDataValue::Float(FULL_HEALTH)));
+        if self.arm != HumanoidArm::Right {
+            out.push((META_ARM, EntityDataValue::HumanoidArm(self.arm)));
+        }
+        out.push((META_SKIN, EntityDataValue::Byte(self.skin as i8)));
+    }
+
+    fn dirty_entries(&self, out: &mut Vec<(u8, EntityDataValue)>) {
+        out.clear();
+        if self.dirty & (1 << META_FLAGS) != 0 {
+            out.push((META_FLAGS, EntityDataValue::Byte(self.flags as i8)));
+        }
+        if self.dirty & (1 << META_POSE) != 0 {
+            out.push((META_POSE, EntityDataValue::Pose(self.pose)));
+        }
+        if self.dirty & (1 << META_ARM) != 0 {
+            out.push((META_ARM, EntityDataValue::HumanoidArm(self.arm)));
+        }
+        if self.dirty & (1 << META_SKIN) != 0 {
+            out.push((META_SKIN, EntityDataValue::Byte(self.skin as i8)));
+        }
+    }
+}
 
 static NEXT_ENTITY_ID: AtomicI32 = AtomicI32::new(1);
 
@@ -34,6 +96,7 @@ struct Slot {
     tracked: TrackedState,
     sent_chunks: HashSet<(i32, i32)>,
     observers: HashSet<i32>,
+    meta: PlayerMeta,
     sender: OutboundSender,
 }
 
@@ -56,7 +119,7 @@ pub struct RegisterSnapshot {
     pub other_senders: Vec<OutboundSender>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EntitySpawn {
     pub entity_id: i32,
     pub uuid: u128,
@@ -65,6 +128,7 @@ pub struct EntitySpawn {
     pub z: f64,
     pub yaw_byte: u8,
     pub pitch_byte: u8,
+    pub meta_payload: Vec<u8>,
 }
 
 pub struct ObserverActions {
@@ -72,6 +136,16 @@ pub struct ObserverActions {
     pub removed: Vec<i32>,
     pub entered: Vec<EntitySpawn>,
     pub moved: Vec<Arc<[u8]>>,
+}
+
+pub struct MetaUpdate {
+    pub payload: Vec<u8>,
+    pub targets: Vec<OutboundSender>,
+}
+
+pub struct TickOutput {
+    pub actions: Vec<ObserverActions>,
+    pub meta: Vec<MetaUpdate>,
 }
 
 pub struct Departure {
@@ -167,6 +241,7 @@ impl PlayerRegistry {
                 tracked: TrackedState::new(entity_id, &snapshot),
                 sent_chunks: HashSet::new(),
                 observers: HashSet::new(),
+                meta: PlayerMeta::new(),
                 sender,
             },
         );
@@ -243,6 +318,67 @@ impl PlayerRegistry {
         }
     }
 
+    pub fn set_appearance(&self, uuid: u128, skin: u8, arm: HumanoidArm) {
+        let mut slots = self.slots.lock().unwrap();
+        if let Some(slot) = slots.get_mut(&uuid) {
+            slot.meta.skin = skin;
+            slot.meta.arm = arm;
+        }
+    }
+
+    pub fn apply_crouch(&self, uuid: u128, shift: bool, flying: bool) {
+        let mut slots = self.slots.lock().unwrap();
+        if let Some(slot) = slots.get_mut(&uuid) {
+            let new_flags = if shift {
+                slot.meta.flags | CROUCH_FLAG
+            } else {
+                slot.meta.flags & !CROUCH_FLAG
+            };
+            if new_flags != slot.meta.flags {
+                slot.meta.flags = new_flags;
+                slot.meta.dirty |= 1 << META_FLAGS;
+            }
+            let new_pose = if shift && !flying {
+                Pose::Crouching
+            } else {
+                Pose::Standing
+            };
+            if new_pose != slot.meta.pose {
+                slot.meta.pose = new_pose;
+                slot.meta.dirty |= 1 << META_POSE;
+            }
+        }
+    }
+
+    pub fn apply_sprint(&self, uuid: u128, sprinting: bool) {
+        let mut slots = self.slots.lock().unwrap();
+        if let Some(slot) = slots.get_mut(&uuid) {
+            let new_flags = if sprinting {
+                slot.meta.flags | SPRINT_FLAG
+            } else {
+                slot.meta.flags & !SPRINT_FLAG
+            };
+            if new_flags != slot.meta.flags {
+                slot.meta.flags = new_flags;
+                slot.meta.dirty |= 1 << META_FLAGS;
+            }
+        }
+    }
+
+    pub fn apply_appearance_change(&self, uuid: u128, skin: u8, arm: HumanoidArm) {
+        let mut slots = self.slots.lock().unwrap();
+        if let Some(slot) = slots.get_mut(&uuid) {
+            if slot.meta.skin != skin {
+                slot.meta.skin = skin;
+                slot.meta.dirty |= 1 << META_SKIN;
+            }
+            if slot.meta.arm != arm {
+                slot.meta.arm = arm;
+                slot.meta.dirty |= 1 << META_ARM;
+            }
+        }
+    }
+
     pub fn update_sent_chunks(&self, uuid: u128, sent: &HashSet<(i32, i32)>) {
         let mut slots = self.slots.lock().unwrap();
         if let Some(slot) = slots.get_mut(&uuid) {
@@ -276,7 +412,7 @@ impl PlayerRegistry {
         (entries, senders)
     }
 
-    pub fn tick(&self, threshold: usize) -> Vec<ObserverActions> {
+    pub fn tick(&self, threshold: usize) -> TickOutput {
         let mut slots = self.slots.lock().unwrap();
 
         let ready: Vec<ReadyInfo> = slots
@@ -333,6 +469,7 @@ impl PlayerRegistry {
         }
 
         let mut actions = Vec::new();
+        let mut meta_scratch: Vec<(u8, EntityDataValue)> = Vec::new();
         for a in &ready {
             let mut removed = Vec::new();
             let mut entered = Vec::new();
@@ -352,6 +489,8 @@ impl PlayerRegistry {
                 } else if !was && now {
                     let b_slot = slots.get(&b.uuid).unwrap();
                     let (bx, by, bz) = b_slot.tracked.base_position();
+                    b_slot.meta.non_default_entries(&mut meta_scratch);
+                    let meta_payload = set_entity_data_payload(b.entity_id, &meta_scratch);
                     entered.push(EntitySpawn {
                         entity_id: b.entity_id,
                         uuid: b.uuid,
@@ -360,6 +499,7 @@ impl PlayerRegistry {
                         z: bz,
                         yaw_byte: b_slot.tracked.base_yaw_byte(),
                         pitch_byte: b_slot.tracked.base_pitch_byte(),
+                        meta_payload,
                     });
                 } else if was
                     && now
@@ -379,7 +519,34 @@ impl PlayerRegistry {
                 moved,
             });
         }
-        actions
+
+        let uuid_of: HashMap<i32, u128> = ready.iter().map(|r| (r.entity_id, r.uuid)).collect();
+        let mut meta = Vec::new();
+        for b in &ready {
+            let slot = slots.get(&b.uuid).unwrap();
+            if slot.meta.dirty == 0 {
+                continue;
+            }
+            slot.meta.dirty_entries(&mut meta_scratch);
+            let payload = set_entity_data_payload(b.entity_id, &meta_scratch);
+            let mut targets = vec![slot.sender.clone()];
+            let continuing = before
+                .get(&b.entity_id)
+                .zip(new_obs.get(&b.entity_id))
+                .map(|(was, now)| was.intersection(now).copied().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for observer_id in continuing {
+                if let Some(obs_uuid) = uuid_of.get(&observer_id)
+                    && let Some(obs_slot) = slots.get(obs_uuid)
+                {
+                    targets.push(obs_slot.sender.clone());
+                }
+            }
+            meta.push(MetaUpdate { payload, targets });
+            slots.get_mut(&b.uuid).unwrap().meta.dirty = 0;
+        }
+
+        TickOutput { actions, meta }
     }
 
     pub fn count(&self) -> usize {
@@ -468,7 +635,7 @@ mod tests {
         reg.activate(1);
         reg.activate(2);
 
-        let actions = reg.tick(256);
+        let actions = reg.tick(256).actions;
         assert_eq!(actions.len(), 2, "les deux joueurs voient l'autre entrer");
         for action in &actions {
             assert_eq!(action.entered.len(), 1);
@@ -478,7 +645,7 @@ mod tests {
             assert_eq!((spawn.x, spawn.y, spawn.z), (0.5, -60.0, 0.5));
         }
 
-        let again = reg.tick(256);
+        let again = reg.tick(256).actions;
         assert!(
             again.iter().all(|a| a.entered.is_empty()),
             "pas de ré-apparition une fois déjà observé"
@@ -499,7 +666,7 @@ mod tests {
         reg.tick(256);
 
         reg.set_position(2, 400.0, -60.0, 0.5, true);
-        let actions = reg.tick(256);
+        let actions = reg.tick(256).actions;
         let alice = actions
             .iter()
             .find(|a| a.removed == vec![11])
@@ -586,5 +753,113 @@ mod tests {
         let (header, footer) = reg.tab_strings();
         assert_eq!(header, "Verdigris");
         assert_eq!(footer, "1/20");
+    }
+
+    #[test]
+    fn crouch_while_flying_sets_flag_but_keeps_standing_pose() {
+        let reg = registry();
+        let (tx, _rx) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Verdi".to_owned(), 1, 0, tx);
+        reg.apply_crouch(1, true, true);
+        let slots = reg.slots.lock().unwrap();
+        let meta = slots.get(&1).unwrap().meta;
+        assert_eq!(meta.flags & CROUCH_FLAG, CROUCH_FLAG);
+        assert_eq!(meta.pose, Pose::Standing);
+        assert_ne!(meta.dirty & (1 << META_FLAGS), 0);
+        assert_eq!(meta.dirty & (1 << META_POSE), 0);
+    }
+
+    #[test]
+    fn crouch_on_ground_sets_crouching_pose() {
+        let reg = registry();
+        let (tx, _rx) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Verdi".to_owned(), 1, 0, tx);
+        reg.apply_crouch(1, true, false);
+        let slots = reg.slots.lock().unwrap();
+        let meta = slots.get(&1).unwrap().meta;
+        assert_eq!(meta.pose, Pose::Crouching);
+        assert_ne!(meta.dirty & (1 << META_POSE), 0);
+    }
+
+    #[test]
+    fn sprint_toggles_flag_and_marks_dirty() {
+        let reg = registry();
+        let (tx, _rx) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Verdi".to_owned(), 1, 0, tx);
+        reg.apply_sprint(1, true);
+        {
+            let slots = reg.slots.lock().unwrap();
+            assert_eq!(slots.get(&1).unwrap().meta.flags & SPRINT_FLAG, SPRINT_FLAG);
+        }
+        reg.apply_sprint(1, false);
+        let slots = reg.slots.lock().unwrap();
+        assert_eq!(slots.get(&1).unwrap().meta.flags & SPRINT_FLAG, 0);
+    }
+
+    #[test]
+    fn spawn_meta_defaults_to_health_and_skin() {
+        let reg = registry();
+        let (tx_a, _rx_a) = unbounded_channel();
+        let (tx_b, _rx_b) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
+        reg.register(2, 11, (0.5, -60.0, 0.5), "Bob".to_owned(), 1, 0, tx_b);
+        reg.update_sent_chunks(1, &full_square((0, 0)));
+        reg.update_sent_chunks(2, &full_square((0, 0)));
+        reg.activate(1);
+        reg.activate(2);
+        let actions = reg.tick(256).actions;
+        let spawn = &actions
+            .iter()
+            .find(|a| a.entered.iter().any(|e| e.entity_id == 11))
+            .unwrap()
+            .entered[0];
+        assert_eq!(
+            spawn.meta_payload,
+            vec![
+                0x0B, 0x09, 0x03, 0x41, 0xA0, 0x00, 0x00, 0x10, 0x00, 0x00, 0xFF
+            ]
+        );
+    }
+
+    #[test]
+    fn tick_emits_dirty_meta_to_self_and_observers_then_clears() {
+        let reg = registry();
+        let (tx_a, _rx_a) = unbounded_channel();
+        let (tx_b, _rx_b) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
+        reg.register(2, 11, (0.5, -60.0, 0.5), "Bob".to_owned(), 1, 0, tx_b);
+        reg.update_sent_chunks(1, &full_square((0, 0)));
+        reg.update_sent_chunks(2, &full_square((0, 0)));
+        reg.activate(1);
+        reg.activate(2);
+        reg.tick(256);
+
+        reg.apply_sprint(2, true);
+        let output = reg.tick(256);
+        assert_eq!(output.meta.len(), 1, "une seule entité a changé");
+        let update = &output.meta[0];
+        assert_eq!(
+            update.targets.len(),
+            2,
+            "Bob lui-même et Alice observatrice"
+        );
+        assert_eq!(update.payload, vec![0x0B, 0x00, 0x00, 0x08, 0xFF]);
+        assert_eq!(reg.slots.lock().unwrap().get(&2).unwrap().meta.dirty, 0);
+
+        let again = reg.tick(256);
+        assert!(again.meta.is_empty(), "plus rien de sale au tick suivant");
+    }
+
+    #[test]
+    fn set_appearance_does_not_mark_dirty() {
+        let reg = registry();
+        let (tx, _rx) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Verdi".to_owned(), 1, 0, tx);
+        reg.set_appearance(1, 0x7F, HumanoidArm::Left);
+        let slots = reg.slots.lock().unwrap();
+        let meta = slots.get(&1).unwrap().meta;
+        assert_eq!(meta.skin, 0x7F);
+        assert_eq!(meta.arm, HumanoidArm::Left);
+        assert_eq!(meta.dirty, 0);
     }
 }

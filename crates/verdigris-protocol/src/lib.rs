@@ -4,6 +4,7 @@ pub mod chunk;
 pub mod chunkfile;
 pub mod clientbound;
 pub mod config;
+pub mod entitydata;
 pub mod error;
 pub mod framing;
 pub mod gamemode;
@@ -71,6 +72,10 @@ pub use config::{
     MAX_KNOWN_PACKS, client_has_core, decode_known_packs, known_packs_payload, packet_ids,
     registry_data_payload, server_known_pack, update_tags_payload,
 };
+pub use entitydata::{
+    EntityDataValue, HumanoidArm, Pose, append_entity_data_entries, set_entity_data_payload,
+    write_set_entity_data,
+};
 pub use error::ProtocolError;
 pub use framing::{
     MAX_UNCOMPRESSED_LEN, decode_compressed_frame, decode_frame, encode_compressed_frame,
@@ -98,12 +103,13 @@ pub use placement_tables::{
 };
 pub use play::{
     ABORT_DESTROY_BLOCK, AIR_STATE, AcceptTeleportation, BlockPos, CHANGE_DESTROY_DIRECTION,
-    ChunkBatchReceived, GAME_EVENT_WAIT_FOR_CHUNKS, ItemStack, KeepAlive, MovePlayerPos,
-    MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PickItemFromBlock, PlayError, PlayerAction,
-    PlayerCommand, PlayerInput, START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, SetCarriedItem,
-    SetCreativeModeSlot, UseItem, UseItemOn, block_changed_ack_payload, block_update_payload,
-    chunk_batch_finished_payload, chunk_batch_start_payload, container_set_slot_payload,
-    decode_accept_teleportation, decode_chunk_batch_received, decode_keep_alive,
+    ChunkBatchReceived, ClientInformation, GAME_EVENT_WAIT_FOR_CHUNKS, ItemStack, KeepAlive,
+    MAIN_HAND_LEFT, MAIN_HAND_RIGHT, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
+    MovePlayerStatus, PickItemFromBlock, PlayError, PlayerAction, PlayerCommand, PlayerInput,
+    START_DESTROY_BLOCK, STOP_DESTROY_BLOCK, SetCarriedItem, SetCreativeModeSlot, UseItem,
+    UseItemOn, block_changed_ack_payload, block_update_payload, chunk_batch_finished_payload,
+    chunk_batch_start_payload, container_set_slot_payload, decode_accept_teleportation,
+    decode_chunk_batch_received, decode_client_information, decode_keep_alive,
     decode_move_player_pos, decode_move_player_pos_rot, decode_move_player_rot,
     decode_move_player_status, decode_pick_item_from_block, decode_player_abilities,
     decode_player_action, decode_player_command, decode_player_input, decode_player_loaded,

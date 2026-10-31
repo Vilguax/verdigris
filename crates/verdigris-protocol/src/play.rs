@@ -2,10 +2,12 @@ use crate::chunk::{ChunkColumn, write_chunk_payload};
 use crate::error::ProtocolError;
 use crate::network::network_data;
 use crate::primitives::{
-    read_f32, read_f64, read_i64, read_u16, write_f32, write_f64, write_i32, write_i64,
-    write_string,
+    read_f32, read_f64, read_i64, read_string, read_u16, write_f32, write_f64, write_i32,
+    write_i64, write_string,
 };
 use crate::varint::{read_var_int, write_var_int};
+
+pub const MAX_CLIENT_LOCALE_LEN: usize = 16;
 
 pub const SECTION_COUNT: usize = 24;
 pub const EMPTY_CHUNK_DATA_LEN: usize = SECTION_COUNT * 8;
@@ -61,6 +63,7 @@ pub mod packet_ids {
         pub const SET_CARRIED_ITEM: i32 = 0x36;
         pub const SET_CREATIVE_MODE_SLOT: i32 = 0x39;
         pub const PICK_ITEM_FROM_BLOCK: i32 = 0x24;
+        pub const CLIENT_INFORMATION: i32 = 0x0E;
     }
 }
 
@@ -518,6 +521,47 @@ pub fn decode_player_command(body: &[u8]) -> Result<PlayerCommand, ProtocolError
     })
 }
 
+pub const MAIN_HAND_LEFT: i32 = 0;
+pub const MAIN_HAND_RIGHT: i32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientInformation {
+    pub lang: String,
+    pub view_distance: i8,
+    pub chat_visibility: i32,
+    pub chat_colors: bool,
+    pub model_customisation: u8,
+    pub main_hand: i32,
+    pub text_filtering: bool,
+    pub allows_listing: bool,
+    pub particle_status: i32,
+}
+
+pub fn decode_client_information(body: &[u8]) -> Result<ClientInformation, ProtocolError> {
+    let mut cursor = body;
+    let lang = take_string(&mut cursor, MAX_CLIENT_LOCALE_LEN)?;
+    let view_distance = take_u8(&mut cursor)? as i8;
+    let chat_visibility = take_var_int(&mut cursor)?;
+    let chat_colors = take_bool(&mut cursor)?;
+    let model_customisation = take_u8(&mut cursor)?;
+    let main_hand = take_var_int(&mut cursor)?;
+    let text_filtering = take_bool(&mut cursor)?;
+    let allows_listing = take_bool(&mut cursor)?;
+    let particle_status = take_var_int(&mut cursor)?;
+    ensure_consumed(cursor)?;
+    Ok(ClientInformation {
+        lang,
+        view_distance,
+        chat_visibility,
+        chat_colors,
+        model_customisation,
+        main_hand,
+        text_filtering,
+        allows_listing,
+        particle_status,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockPos {
     pub x: i32,
@@ -611,6 +655,16 @@ fn take_i16(cursor: &mut &[u8]) -> Result<i16, ProtocolError> {
 
 fn take_bool(cursor: &mut &[u8]) -> Result<bool, ProtocolError> {
     Ok(take_u8(cursor)? != 0)
+}
+
+fn take_string(cursor: &mut &[u8], max_len: usize) -> Result<String, ProtocolError> {
+    match read_string(cursor, max_len)? {
+        Some((value, consumed)) => {
+            *cursor = &cursor[consumed..];
+            Ok(value)
+        }
+        None => Err(ProtocolError::UnexpectedEof),
+    }
 }
 
 fn skip_bytes(cursor: &mut &[u8], count: usize) -> Result<(), ProtocolError> {
@@ -996,6 +1050,57 @@ mod tests {
                 action: 0,
                 data: 0,
             }
+        );
+    }
+
+    #[test]
+    fn decode_client_information_round_trip() {
+        let mut body = Vec::new();
+        write_string("fr_fr", &mut body);
+        body.push(0x0A);
+        write_var_int(0, &mut body);
+        body.push(0x01);
+        body.push(0x7F);
+        write_var_int(1, &mut body);
+        body.push(0x00);
+        body.push(0x01);
+        write_var_int(0, &mut body);
+        assert_eq!(
+            decode_client_information(&body).unwrap(),
+            ClientInformation {
+                lang: "fr_fr".to_owned(),
+                view_distance: 10,
+                chat_visibility: 0,
+                chat_colors: true,
+                model_customisation: 0x7F,
+                main_hand: 1,
+                text_filtering: false,
+                allows_listing: true,
+                particle_status: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_client_information_left_hand_and_trailing_rejected() {
+        let mut body = Vec::new();
+        write_string("en_us", &mut body);
+        body.push(0x08);
+        write_var_int(0, &mut body);
+        body.push(0x00);
+        body.push(0x00);
+        write_var_int(MAIN_HAND_LEFT, &mut body);
+        body.push(0x00);
+        body.push(0x01);
+        write_var_int(0, &mut body);
+        let info = decode_client_information(&body).unwrap();
+        assert_eq!(info.main_hand, MAIN_HAND_LEFT);
+        assert_eq!(info.model_customisation, 0x00);
+
+        body.push(0xFF);
+        assert_eq!(
+            decode_client_information(&body),
+            Err(ProtocolError::TrailingBytes)
         );
     }
 

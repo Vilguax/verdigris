@@ -1,13 +1,14 @@
 use crate::error::ProtocolError;
 use crate::play::{
-    AcceptTeleportation, ChunkBatchReceived, KeepAlive, MovePlayerPos, MovePlayerPosRot,
-    MovePlayerRot, MovePlayerStatus, PickItemFromBlock, PlayerAction, PlayerCommand, PlayerInput,
-    SetCarriedItem, SetCreativeModeSlot, UseItem, UseItemOn, decode_accept_teleportation,
-    decode_chunk_batch_received, decode_keep_alive, decode_move_player_pos,
-    decode_move_player_pos_rot, decode_move_player_rot, decode_move_player_status,
-    decode_pick_item_from_block, decode_player_abilities, decode_player_action,
-    decode_player_command, decode_player_input, decode_player_loaded, decode_set_carried_item,
-    decode_set_creative_mode_slot, decode_use_item, decode_use_item_on, packet_ids as play_ids,
+    AcceptTeleportation, ChunkBatchReceived, ClientInformation, KeepAlive, MovePlayerPos,
+    MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PickItemFromBlock, PlayerAction,
+    PlayerCommand, PlayerInput, SetCarriedItem, SetCreativeModeSlot, UseItem, UseItemOn,
+    decode_accept_teleportation, decode_chunk_batch_received, decode_client_information,
+    decode_keep_alive, decode_move_player_pos, decode_move_player_pos_rot, decode_move_player_rot,
+    decode_move_player_status, decode_pick_item_from_block, decode_player_abilities,
+    decode_player_action, decode_player_command, decode_player_input, decode_player_loaded,
+    decode_set_carried_item, decode_set_creative_mode_slot, decode_use_item, decode_use_item_on,
+    packet_ids as play_ids,
 };
 use crate::primitives::{read_i64, read_string, read_u16};
 use crate::varint::read_var_int;
@@ -64,6 +65,7 @@ pub enum Serverbound {
     PlaySetCarriedItem(SetCarriedItem),
     PlaySetCreativeModeSlot(SetCreativeModeSlot),
     PlayPickItemFromBlock(PickItemFromBlock),
+    PlayClientInformation(ClientInformation),
     PlayIgnored { id: i32 },
 }
 
@@ -210,6 +212,10 @@ fn decode_play(id: i32, body: &[u8]) -> Result<Serverbound, ProtocolError> {
     } else if id == play_ids::serverbound::PICK_ITEM_FROM_BLOCK {
         Ok(Serverbound::PlayPickItemFromBlock(
             decode_pick_item_from_block(body)?,
+        ))
+    } else if id == play_ids::serverbound::CLIENT_INFORMATION {
+        Ok(Serverbound::PlayClientInformation(
+            decode_client_information(body)?,
         ))
     } else {
         Ok(Serverbound::PlayIgnored { id })

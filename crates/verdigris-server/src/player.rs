@@ -317,6 +317,9 @@ pub struct PlayerState {
     pub yaw: f32,
     pub pitch: f32,
     pub sneaking: bool,
+    pub skin: u8,
+    pub main_hand_left: bool,
+    pub view_distance: i8,
     pub inventory: Inventory,
     pub container_state_id: i32,
 }
@@ -336,6 +339,9 @@ impl PlayerState {
             yaw: 0.0,
             pitch: 0.0,
             sneaking: false,
+            skin: 0,
+            main_hand_left: false,
+            view_distance: 0,
             inventory: Inventory::new(),
             container_state_id: 0,
         }
@@ -724,6 +730,9 @@ impl PlayerState {
             yaw: 0.0,
             pitch: 0.0,
             sneaking: false,
+            skin: 0,
+            main_hand_left: false,
+            view_distance: 0,
             inventory,
             container_state_id: 0,
         }

@@ -1646,8 +1646,11 @@ async fn read_spawn_bundle(client: &mut TcpStream, buf: &mut Vec<u8>) -> AddedEn
     assert_eq!(data_id, 0x65, "puis set_entity_data 0x65");
     let mut expected = Vec::new();
     write_var_int(added.entity_id, &mut expected);
-    expected.extend_from_slice(&[0x09, 0x03, 0x41, 0xA0, 0x00, 0x00, 0xFF]);
-    assert_eq!(data_body, expected, "santé 20.0 minimale");
+    expected.extend_from_slice(&[0x09, 0x03, 0x41, 0xA0, 0x00, 0x00, 0x10, 0x00, 0x00, 0xFF]);
+    assert_eq!(
+        data_body, expected,
+        "santé 20.0 et apparence du skin par défaut"
+    );
     let (close_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(close_id, 0x00, "le bundle se referme par un délimiteur");
     added
@@ -1674,6 +1677,218 @@ async fn consume_world_capturing_entity_id(client: &mut TcpStream, buf: &mut Vec
     let (batch_finished_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(batch_finished_id, 0x0B);
     entity_id
+}
+
+fn compressed_client_information_frame(skin: u8, main_hand: i32) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x00, &mut body);
+    write_string("en_us", &mut body);
+    body.push(10);
+    write_var_int(0, &mut body);
+    body.push(1);
+    body.push(skin);
+    write_var_int(main_hand, &mut body);
+    body.push(0);
+    body.push(1);
+    write_var_int(0, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+fn compressed_player_command_frame(entity_id: i32, action: i32, data: i32) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x2A, &mut body);
+    write_var_int(entity_id, &mut body);
+    write_var_int(action, &mut body);
+    write_var_int(data, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+async fn drive_to_play_with_skin(client: &mut TcpStream, buf: &mut Vec<u8>, name: &str, skin: u8) {
+    drive_to_login_acknowledged(client, buf, name).await;
+
+    client
+        .write_all(&compressed_client_information_frame(skin, 1))
+        .await
+        .unwrap();
+
+    let (known_packs_id, known_packs_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(known_packs_id, 0x0F);
+    assert_core_known_packs(&known_packs_body);
+
+    client
+        .write_all(&compressed_known_packs_frame(&[(
+            "minecraft",
+            "core",
+            "26.3",
+        )]))
+        .await
+        .unwrap();
+
+    for _ in 0..verdigris_protocol::network::network_data().registries.len() {
+        let (registry_id, _) = read_one_compressed_frame(client, buf).await;
+        assert_eq!(registry_id, 0x07);
+    }
+
+    let (tags_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(tags_id, 0x0E);
+
+    let (finish_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(finish_id, 0x03);
+
+    client
+        .write_all(&compressed_finish_configuration_frame())
+        .await
+        .unwrap();
+}
+
+fn parse_set_entity_data(body: &[u8]) -> (i32, Vec<(u8, i64)>) {
+    let (entity_id, used) = read_var_int(body).unwrap().unwrap();
+    let mut off = used;
+    let mut entries = Vec::new();
+    loop {
+        let index = body[off];
+        off += 1;
+        if index == 0xFF {
+            break;
+        }
+        let serializer = body[off];
+        off += 1;
+        let value = match serializer {
+            0 => {
+                let v = body[off] as i8 as i64;
+                off += 1;
+                v
+            }
+            3 => {
+                off += 4;
+                0
+            }
+            8 => {
+                let v = body[off] as i64;
+                off += 1;
+                v
+            }
+            1 | 20 | 42 => {
+                let (v, consumed) = read_var_int(&body[off..]).unwrap().unwrap();
+                off += consumed;
+                v as i64
+            }
+            other => panic!("sérialiseur inattendu {other}"),
+        };
+        entries.push((index, value));
+    }
+    (entity_id, entries)
+}
+
+async fn read_until_set_entity_data(
+    client: &mut TcpStream,
+    buf: &mut Vec<u8>,
+) -> (i32, Vec<(u8, i64)>) {
+    loop {
+        let (id, body) = read_one_compressed_frame(client, buf).await;
+        if id == 0x65 {
+            return parse_set_entity_data(&body);
+        }
+    }
+}
+
+async fn read_spawn_bundle_with_meta(
+    client: &mut TcpStream,
+    buf: &mut Vec<u8>,
+) -> (AddedEntity, Vec<(u8, i64)>) {
+    let (open_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(open_id, 0x00, "ouverture du bundle d'apparition");
+    let (add_id, add_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(add_id, 0x01, "add_entity 0x01");
+    let added = parse_add_entity(&add_body);
+    let (data_id, data_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(data_id, 0x65, "set_entity_data 0x65");
+    let (entity_id, entries) = parse_set_entity_data(&data_body);
+    assert_eq!(entity_id, added.entity_id);
+    let (close_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(close_id, 0x00, "fermeture du bundle");
+    (added, entries)
+}
+
+#[tokio::test]
+async fn entity_metadata_skin_crouch_sprint_over_tcp() {
+    let addr = spawn_server().await;
+
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    let _alice_local = consume_world_capturing_entity_id(&mut alice, &mut buf_a).await;
+    let (info_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(info_id, 0x47);
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_with_skin(&mut bob, &mut buf_b, "Bob", 0x7F).await;
+    let bob_local = consume_world_capturing_entity_id(&mut bob, &mut buf_b).await;
+    let (info_id, _) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
+    assert_eq!(info_id, 0x47);
+    let (tab_id, _) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
+    assert_eq!(tab_id, 0x7D);
+    let _alice_seen = read_spawn_bundle_with_meta(&mut bob, &mut buf_b).await;
+
+    let (add_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(add_id, 0x47, "Alice reçoit l'ajout de Bob");
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let (bob_seen, bob_meta) = read_spawn_bundle_with_meta(&mut alice, &mut buf_a).await;
+    assert_eq!(bob_seen.entity_id, bob_local);
+    assert!(
+        bob_meta.contains(&(16, 0x7F)),
+        "le skin 0x7F de Bob est annoncé à l'apparition: {bob_meta:?}"
+    );
+
+    bob.write_all(&compressed_player_input_frame(0x20))
+        .await
+        .unwrap();
+    let (eid, entries) = read_until_set_entity_data(&mut alice, &mut buf_a).await;
+    assert_eq!(eid, bob_local);
+    assert!(
+        entries.contains(&(0, 0x02)),
+        "accroupi: flags 0x02 attendu dans {entries:?}"
+    );
+    assert!(
+        entries.contains(&(6, 5)),
+        "accroupi: pose CROUCHING 5 attendue dans {entries:?}"
+    );
+
+    let (self_eid, self_entries) = read_until_set_entity_data(&mut bob, &mut buf_b).await;
+    assert_eq!(self_eid, bob_local, "Bob reçoit sa propre métadonnée");
+    assert!(
+        self_entries.contains(&(6, 5)),
+        "Bob se voit accroupi: {self_entries:?}"
+    );
+
+    bob.write_all(&compressed_player_input_frame(0x00))
+        .await
+        .unwrap();
+    let (eid, entries) = read_until_set_entity_data(&mut alice, &mut buf_a).await;
+    assert_eq!(eid, bob_local);
+    assert!(
+        entries.contains(&(0, 0x00)),
+        "relâché: flags 0 attendu dans {entries:?}"
+    );
+    assert!(
+        entries.contains(&(6, 0)),
+        "relâché: pose STANDING 0 attendue dans {entries:?}"
+    );
+
+    bob.write_all(&compressed_player_command_frame(bob_local, 1, 0))
+        .await
+        .unwrap();
+    let (eid, entries) = read_until_set_entity_data(&mut alice, &mut buf_a).await;
+    assert_eq!(eid, bob_local);
+    assert!(
+        entries.contains(&(0, 0x08)),
+        "sprint: flags 0x08 attendu dans {entries:?}"
+    );
 }
 
 #[tokio::test]
