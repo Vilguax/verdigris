@@ -2,6 +2,7 @@
 
 pub mod aquifer;
 pub mod arith;
+pub mod biome;
 pub mod blended;
 pub mod chunk_fill;
 pub mod data;
@@ -18,6 +19,7 @@ pub mod strict_json;
 pub mod xoroshiro;
 
 pub use aquifer::{AquiferFunctions, AquiferMode, AquiferScratch, Filled};
+pub use biome::{BiomeNames, BiomeSource, BiomeTree, SearchState, biome_names};
 pub use blended::{BlendedParams, OldBlendedNoise};
 pub use chunk_fill::{Category, ChunkTerrain, WorldGenerator, category_for};
 pub use data::{Aquifers, DataError, Router, WorldDensity, WorldgenData};
