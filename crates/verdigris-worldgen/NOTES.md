@@ -543,3 +543,108 @@ monomorphisées, pas de `Vec` par case ; le seul `Vec` par carve canyon est la t
 de 376 f32, une fois par tunnel). Méthodo à relever : même zone, graine 20261029, N
 chunks, moyenne/médiane, avant/après ; validation d'exactitude par l'oracle, pas par le
 temps.
+
+# Notes — décoration (features et placed features, module `feature`)
+
+## Générateur R (spec 09 §3)
+`FeatureRng` enveloppe le Xoroshiro existant mais expose l'interface générique
+`java.util.Random` : `next(bits)` = `xoroshiro.nextLong() >>> (64 − bits)` (bits
+hauts), puis `next_int`, `next_long`, `next_float`, `next_double`, `next_int_bounded`,
+`next_gaussian` dérivent de `next(bits)` par l'algorithme générique, PAS par les
+méthodes natives du Xoroshiro. Conséquences vérifiées bit à bit (§11.2, graine 0) :
+`next_long() = ((long)next(32) << 32) + next(32)` (≠ nextLong brut), `next_float() =
+next(24)·2⁻²⁴`, `next_double() = ((next(26) << 27) + next(27))·2⁻⁵³`. La séquence
+testée réensemence à chaque primitive (`next_long` puis `next_float` puis `next_double`
+enchaînés) donne mantisses entières 4214372 (float) et 1054967193155086 (double) ;
+testées en entier pour éviter `excessive_precision`. `set_seed` NE vide PAS le tampon
+gaussien (§3.5). Graine de population `set_decoration_seed` : `D = (minX·(l|1) +
+minZ·(m|1)) ^ graine` ; en (0,0) `D = graine` (§11.1). Graine de feature `D + i +
+10000·k` (§3.3), `i` = position dans la liste triée de l'étape.
+
+## Liste globale (§2.2/§2.5)
+`order::build_order` reproduit le tri topologique vanilla (FeatureData `(étape,
+index)`, index d'apparition global, arêtes consécutives dans la liste aplatie d'un
+biome, DFS post-ordre sur clés triées, inversion, découpage par étape, 11 étapes de
+décoration, cycle → `Err`). L'ordre des biomes qui pilote le tri (et donc les index
+globaux `i`) est l'ordre des biomes possibles de l'overworld, pas l'ordre alphabétique
+du registre : `overworld_biome_order` prend les biomes distincts dans leur ordre de
+PREMIÈRE apparition dans `biome_entries()` (liste de paramètres climatiques overworld),
+ce qui reproduit `possibleBiomes()` de la source de biomes utilisée par le trieur
+vanilla. 56 biomes distincts, 171 entrées de placed features, 11 étapes : asserté
+exactement (`embedded_global_order_matches_2_5_counts`). L'erreur précédente pilotait
+le tri par les clés triées (BTreeMap alphabétique) de `biome_features`.
+
+## Types 26.3 et règle §r (CORR 1/4)
+Cinq espaces de noms disjoints avec liste écrite dans le code : placement_modifier
+(18), block_state_provider, block_predicate (`type`), rule_test (`predicate_type`),
+feature (compositions implémentées, le reste en feuille brute). La règle §r rejette
+tout type absent de la liste de SON sous-système, à l'endroit syntaxique où il est
+parsé : les modificateurs de placement (`placed_feature.placement`) et le prédicat de
+`block_predicate_filter` sont validés au chargement (erreur explicite sur type
+inconnu) ; `validate_rule_test` couvre les tests de règle. La liste feature n'est pas
+exhaustivement transcrite : toute feature non-composition est chargée en feuille brute
+(H5), donc le chargement ne rejette jamais un type de feature réel (critère 1) ; §o
+est un test de complétude des listes placement/provider/predicate contre les données.
+
+## Features connues non implémentées (H5)
+Les features qui posent des blocs (ore, disk, tree, lake…) sont chargées (config JSON
+brute conservée) et exécutées comme échec sans pose : `place_feature` d'une feuille
+enregistre la position atteinte dans le contexte (visibilité des tests) et renvoie
+`false`. Les compositions (`no_op`, `sequence`, `overlay`, `random_selector`,
+`simple_random_selector`, `weighted_random_selector`, `random_boolean_selector`) sont
+implémentées : elles tirent leur propre aléa (sélecteurs) puis descendent dans leurs
+enfants, sans rien poser. `sequence` s'arrête au premier enfant qui renvoie `false`
+(donc dès la première feuille, les enfants suivants ne tirent pas), `overlay` exécute
+tous ses enfants et réussit si l'un réussit (§9.1, testé par
+`sequence_stops_at_first_failure_overlay_runs_all`). Comme chaque placed feature de
+1er niveau réensemence sa graine, l'aléa interne non tiré des feuilles n'affecte pas
+les autres features ; les vecteurs §11.2 portent sur les tirages des modificateurs et
+les graines, exacts. `set_feature_seed` = `set_seed(D + i + 10000·k)` vérifié
+(`feature_seed_matches_formula_3_3`, 4× `next_int(16)`).
+
+## Moteur de placement (§4.1/§9.1) et ordre des tirages
+Parcours en profondeur (équivalent au flatMap paresseux de vanilla) : chaque position
+issue du modificateur k traverse tous les modificateurs suivants avant la position
+suivante. `count` tire une fois puis réplique, `in_square` tire 2× `next_int(16)`,
+`height_range` tire via le fournisseur de hauteur (ancrages résolus min_y=−64,
+height=384), `offset` tire x/y/z, `rarity_filter`/`random_chance` tirent un `next_float`.
+Les filtres sans tirage (`biome`, `heightmap`, `block_predicate_filter`) laissent passer
+ou coupent. `heightmap`/`block_predicate_filter` lisent la région ; toute erreur de
+lecture (distance chunk > 8, etc.) remonte en `Err` jusqu'à `decorate_chunk`.
+
+## Contexte réutilisable (§g)
+Le parcours est par visiteur récursif : aucune allocation par position (pas de `Vec`
+intermédiaire par modificateur). `DecorationContext` porte un unique tampon de
+positions atteintes, vidé (jamais rétréci) au début de chaque `decorate_chunk` ; sa
+capacité est inchangée au 2ᵉ passage (test). Les modificateurs et compositions sont
+précompilés une fois (`Decoration::build`), pas reparsés par position.
+
+## INCERTAIN / reportés
+- §2.5 : comptes exacts (56 biomes, 171 entrées, 11 étapes) assertés et ordre des
+  biomes conforme (ordre des paramètres overworld = `possibleBiomes` vanilla) ; la
+  table littérale index-par-index n'est pas dans le matériel, mais la liste est dérivée
+  de façon déterministe de la même source de biomes et du même trieur que vanilla.
+- `next_int_bounded(n)` renvoie 0 si `n <= 0` au lieu de paniquer : une plage dégénérée
+  (ex. uniforme `min > max`) ne fait plus paniquer la génération ; pour `n > 0` le
+  comportement (et les vecteurs §11.2) est inchangé.
+- `very_biased_to_bottom` : formule `i + nextInt(nextInt(span) + inner + 1)`,
+  non confrontée ; marquée à revérifier.
+- `trapezoid` (hauteur/entier) : pas de court-circuit `plateau ≥ étendue` ; min=max=0
+  consomme 2 tirages et vaut 0 (§11.1, tranché par le plan, CORR 3).
+- Filtre `biome` du moteur : conservé comme laisser-passer au niveau du modificateur ;
+  l'activation par biome candidat est appliquée au niveau de la boucle d'étape
+  (`decorate_chunk` prend l'ensemble des biomes candidats des 9 chunks). Comme aucune
+  feuille ne pose, l'absence de filtrage fin par position n'a pas d'effet visible.
+- `count_on_every_layer`, `noise_threshold_count`, `noise_based_count`,
+  `environment_scan`, `surface_*_filter`, `randomly_selected`, `cuboid`,
+  `fixed_placement`, `carving_mask` : chargés et validés (§r) mais exécutés en
+  laisser-passer sans tirage (approximation) ; à implémenter avec leur aléa propre.
+- Empaquetage des faces de `physics.json` : bit `(index_face · 6 + index_direction)` ;
+  convention retenue faute de vecteur de contrôle, à confronter si un prédicat de face
+  diverge.
+- `would_survive`, `matching_fluids`, `solid`, `has_sturdy_face` : prédicats présents,
+  évaluation fine reportée (laisser-passer après lecture de la région) ; `all_of`/
+  `any_of`/`not`/`true`/`inside_world_bounds` exacts.
+- Extraction d'états §s : au chargement, seuls les états des fournisseurs de 1er niveau
+  sont internés dans la palette (non bloquant) ; l'extraction récursive intégrale des
+  configs de feuilles brutes est reportée (les feuilles ne posent pas).
