@@ -21,7 +21,7 @@ pub use generator::{
 pub use level::{LEVEL_FILE, LevelConfig, LevelError, ensure as ensure_level, level_path};
 pub use player::{GAMEMODE_ENV, PlayerState, read_gamemode, resolve_gamemode};
 pub use registry::PlayerRegistry;
-use registry::{EntitySpawn, OutboundSender, allocate_entity_id};
+use registry::{EntitySpawn, Outbound, OutboundSender, allocate_entity_id};
 pub use storage::{
     CHUNKS_SUBDIR, ChunkStore, DEFAULT_WORLD_DIR, DiskLoader, LoadOutcome, REJECTED_SUFFIX,
     WORLD_ENV, world_dir,
@@ -36,24 +36,26 @@ use tracing_subscriber::EnvFilter;
 
 use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
-    Arg, COMPRESSION_THRESHOLD, Component, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS,
-    HumanoidArm, Intent, ItemStack, ListedPlayer, MAIN_HAND_LEFT, MovePlayerPos, MovePlayerPosRot,
-    MovePlayerRot, MovePlayerStatus, PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID,
-    SWING_DURATION, SWING_WHACK, Serverbound, State, StatusInfo, World, add_entity_payload,
+    Arg, CHAT_TYPE_CHAT_HOLDER, COMPRESSION_THRESHOLD, Chat, Component, Content, EncodeError,
+    FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, HumanoidArm, Intent, ItemStack, ListedPlayer,
+    MAIN_HAND_LEFT, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus,
+    PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID, SWING_DURATION, SWING_WHACK,
+    Serverbound, State, StatusInfo, Style, TickThrottler, World, add_entity_payload,
     block_changed_ack_payload, block_update_payload, build_compressed_packet, build_packet,
     bundle_delimiter_payload, chunk_batch_finished_payload, chunk_batch_start_payload, chunk_coord,
     chunks_to_forget, chunks_to_load, client_has_core, config_disconnect_payload,
     container_set_slot_payload, decode_client_information, decode_compressed_frame, decode_frame,
     decode_known_packs, decode_serverbound, forget_level_chunk_payload, game_event_payload,
     keep_alive_payload, known_packs_payload, login_disconnect_payload, login_play_payload,
-    login_success_payload, network_data, offline_uuid, packet_ids, player_abilities_payload,
-    player_info_remove_payload, player_info_update_gamemode_payload,
-    player_info_update_init_payload, player_info_update_latency_payload, player_position_payload,
-    pong_payload, random_session_id, read_var_int, registry_data_payload, remove_entities_payload,
-    server_known_pack, set_chunk_cache_center_payload, set_compression_payload,
-    set_equipment_payload, set_held_slot_payload, status_json, status_response_payload,
-    swing_animation_payload, system_chat_payload, tab_list_payload, update_tags_payload,
-    validate_name, write_chunk_payload,
+    login_success_payload, network_data, normalize_chat, offline_uuid, packet_ids,
+    player_abilities_payload, player_chat_tail, player_info_remove_payload,
+    player_info_update_gamemode_payload, player_info_update_init_payload,
+    player_info_update_latency_payload, player_position_payload, pong_payload, random_session_id,
+    read_var_int, registry_data_payload, remove_entities_payload, server_known_pack,
+    set_chunk_cache_center_payload, set_compression_payload, set_equipment_payload,
+    set_held_slot_payload, status_json, status_response_payload, swing_animation_payload,
+    system_chat_payload, tab_list_payload, update_tags_payload, validate_chat_content,
+    validate_name, write_chunk_payload, write_nbt, write_var_int,
 };
 use verdigris_protocol::{GAME_VERSION, WORLD_MAX_Y, WORLD_MIN_Y, is_air, is_fluid};
 
@@ -84,6 +86,8 @@ pub const REASON_CONNECTION_LOST: &str = "Connexion interrompue";
 pub const REASON_INVALID_SEQUENCE: &str = "séquence d'interaction négative";
 pub const REASON_READ_TIMEOUT: &str = "Délai de lecture dépassé";
 pub const REASON_KEEP_ALIVE_TIMEOUT: &str = "keep alive délai dépassé";
+pub const DISCONNECT_ILLEGAL_CHARACTERS: &str = "multiplayer.disconnect.illegal_characters";
+pub const DISCONNECT_SPAM: &str = "disconnect.spam";
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -207,7 +211,7 @@ fn frame_arc(id: i32, payload: &[u8]) -> Option<Arc<[u8]>> {
 
 fn push_frame(senders: &[OutboundSender], frame: &Arc<[u8]>) {
     for sender in senders {
-        let _ = sender.send(Arc::clone(frame));
+        let _ = sender.send(Outbound::Frame(Arc::clone(frame)));
     }
 }
 
@@ -267,7 +271,7 @@ fn spawn_bundle(spawn: &EntitySpawn) -> Vec<Arc<[u8]>> {
 
 fn push_bundle(sender: &OutboundSender, frames: &[Arc<[u8]>]) {
     for frame in frames {
-        let _ = sender.send(Arc::clone(frame));
+        let _ = sender.send(Outbound::Frame(Arc::clone(frame)));
     }
 }
 
@@ -289,7 +293,7 @@ pub fn broadcast_gamemode_change(registry: &Arc<PlayerRegistry>, uuid: u128, mod
                 &remove_entities_payload(&actions.removed),
             )
         {
-            let _ = actions.sender.send(frame);
+            let _ = actions.sender.send(Outbound::Frame(frame));
         }
         for spawn in &actions.entered {
             push_bundle(&actions.sender, &spawn_bundle(spawn));
@@ -306,13 +310,13 @@ fn run_entity_tick(registry: &Arc<PlayerRegistry>, threshold: usize) {
                 &remove_entities_payload(&actions.removed),
             )
         {
-            let _ = actions.sender.send(frame);
+            let _ = actions.sender.send(Outbound::Frame(frame));
         }
         for spawn in &actions.entered {
             push_bundle(&actions.sender, &spawn_bundle(spawn));
         }
         for frame in &actions.moved {
-            let _ = actions.sender.send(Arc::clone(frame));
+            let _ = actions.sender.send(Outbound::Frame(Arc::clone(frame)));
         }
     }
     for update in &output.meta {
@@ -860,6 +864,11 @@ async fn dispatch(
         | Serverbound::PlayPickItemFromBlock(_)
         | Serverbound::PlayClientInformation(_)
         | Serverbound::PlayPunch
+        | Serverbound::PlayChat(_)
+        | Serverbound::PlayChatCommand(_)
+        | Serverbound::PlayChatCommandSigned(_)
+        | Serverbound::PlayChatAck(_)
+        | Serverbound::PlayChatSessionUpdate
         | Serverbound::PlayIgnored { .. } => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
         }
@@ -1297,7 +1306,7 @@ async fn enter_play(
     }
 
     let uuid = offline_uuid(&player.name);
-    let (tx, rx) = unbounded_channel::<Arc<[u8]>>();
+    let (tx, rx) = unbounded_channel::<Outbound>();
     let snapshot = registry.register(
         uuid,
         entity_id,
@@ -1511,10 +1520,19 @@ async fn update_chunks(
     false
 }
 
+const THROTTLE_TICK_INTERVAL: Duration = Duration::from_millis(50);
+
 enum PlayStep {
     Timer,
-    Outbound(Option<Arc<[u8]>>),
+    Throttle,
+    Outbound(Option<Outbound>),
     Read(std::io::Result<usize>),
+}
+
+struct ChatState {
+    next_chat_index: i32,
+    chat_throttler: TickThrottler,
+    command_throttler: TickThrottler,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1525,7 +1543,7 @@ async fn run_play(
     buf: &mut Vec<u8>,
     chunk: &mut [u8],
     keep_alive: KeepAliveConfig,
-    mut rx: UnboundedReceiver<Arc<[u8]>>,
+    mut rx: UnboundedReceiver<Outbound>,
     mut session: Session<'_>,
 ) {
     let threshold = match framing {
@@ -1539,6 +1557,13 @@ async fn run_play(
     let mut ka = KeepAliveState::new(Instant::now());
     let mut ticker = interval(keep_alive.check_period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut throttle_ticker = interval(THROTTLE_TICK_INTERVAL);
+    throttle_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut chat = ChatState {
+        next_chat_index: 0,
+        chat_throttler: TickThrottler::new(),
+        command_throttler: TickThrottler::new(),
+    };
 
     loop {
         loop {
@@ -1547,13 +1572,16 @@ async fn run_play(
                     buf.drain(..consumed);
                     match decode_serverbound(State::Play, &body) {
                         Ok(packet) => {
-                            if handle_play_packet(
+                            if dispatch_play_packet(
                                 stream,
                                 framing,
                                 *state,
+                                threshold,
                                 packet,
                                 &mut ka,
                                 &mut session,
+                                &mut chat,
+                                &mut rx,
                                 Instant::now(),
                             )
                             .await
@@ -1583,6 +1611,7 @@ async fn run_play(
 
         let step = tokio::select! {
             _ = ticker.tick() => PlayStep::Timer,
+            _ = throttle_ticker.tick() => PlayStep::Throttle,
             outbound = rx.recv() => PlayStep::Outbound(outbound),
             read = stream.read(chunk) => PlayStep::Read(read),
         };
@@ -1593,8 +1622,15 @@ async fn run_play(
                     return;
                 }
             }
-            PlayStep::Outbound(Some(bytes)) => {
-                if stream.write_all(&bytes).await.is_err() {
+            PlayStep::Throttle => {
+                chat.chat_throttler.tick();
+                chat.command_throttler.tick();
+            }
+            PlayStep::Outbound(Some(outbound)) => {
+                if write_outbound(stream, threshold, &mut chat.next_chat_index, outbound)
+                    .await
+                    .is_err()
+                {
                     disconnect(stream, framing, *state, REASON_CONNECTION_LOST).await;
                     return;
                 }
@@ -1612,6 +1648,253 @@ async fn run_play(
             }
         }
     }
+}
+
+fn encode_player_chat(next_chat_index: &mut i32, tail: &[u8], threshold: usize) -> Option<Vec<u8>> {
+    let mut payload = Vec::with_capacity(tail.len() + 5);
+    write_var_int(*next_chat_index, &mut payload);
+    payload.extend_from_slice(tail);
+    match build_compressed_packet(play_cb::PLAYER_CHAT, &payload, threshold) {
+        Ok(frame) => {
+            *next_chat_index += 1;
+            Some(frame)
+        }
+        Err(err) => {
+            warn!("player_chat non encodable: {err}");
+            None
+        }
+    }
+}
+
+async fn write_outbound(
+    stream: &mut TcpStream,
+    threshold: usize,
+    next_chat_index: &mut i32,
+    outbound: Outbound,
+) -> std::io::Result<()> {
+    match outbound {
+        Outbound::Frame(bytes) => stream.write_all(&bytes).await,
+        Outbound::PlayerChat(tail) => match encode_player_chat(next_chat_index, &tail, threshold) {
+            Some(frame) => stream.write_all(&frame).await,
+            None => Ok(()),
+        },
+    }
+}
+
+fn translate_disconnect_payload(key: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_nbt(&mut payload, &Component::translate(key));
+    payload
+}
+
+async fn shutdown_play(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    threshold: usize,
+    next_chat_index: &mut i32,
+    rx: &mut UnboundedReceiver<Outbound>,
+    reason_key: &str,
+) {
+    info!(reason = reason_key, "déconnexion en jeu");
+    while let Ok(outbound) = rx.try_recv() {
+        if write_outbound(stream, threshold, next_chat_index, outbound)
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let payload = translate_disconnect_payload(reason_key);
+    let deadline = Instant::now() + CLOSE_BUDGET;
+    let sent = timeout_at(deadline, async {
+        write_packet(
+            stream,
+            framing,
+            State::Play,
+            packet_ids::play::DISCONNECT,
+            &payload,
+        )
+        .await?;
+        stream.flush().await.map_err(WriteError::Io)?;
+        Ok::<(), WriteError>(())
+    })
+    .await;
+    if let Ok(Err(err)) = sent {
+        warn!("disconnect en jeu échoué: {err}");
+    }
+    let _ = timeout_at(deadline, stream.shutdown()).await;
+    drain(stream, deadline).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_play_packet(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    threshold: usize,
+    packet: Serverbound,
+    ka: &mut KeepAliveState,
+    session: &mut Session<'_>,
+    chat: &mut ChatState,
+    rx: &mut UnboundedReceiver<Outbound>,
+    now: Instant,
+) -> bool {
+    match packet {
+        Serverbound::PlayChat(message) => {
+            handle_chat(stream, framing, threshold, *message, session, chat, rx).await
+        }
+        Serverbound::PlayChatCommand(command) => {
+            handle_command(stream, framing, threshold, &command, session, chat, rx).await
+        }
+        Serverbound::PlayChatCommandSigned(signed) => {
+            handle_command(
+                stream,
+                framing,
+                threshold,
+                &signed.command,
+                session,
+                chat,
+                rx,
+            )
+            .await
+        }
+        Serverbound::PlayChatAck(_) | Serverbound::PlayChatSessionUpdate => false,
+        other => handle_play_packet(stream, framing, state, other, ka, session, now).await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_chat(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    threshold: usize,
+    message: Chat,
+    session: &Session<'_>,
+    chat: &mut ChatState,
+    rx: &mut UnboundedReceiver<Outbound>,
+) -> bool {
+    if validate_chat_content(&message.message).is_err() {
+        shutdown_play(
+            stream,
+            framing,
+            threshold,
+            &mut chat.next_chat_index,
+            rx,
+            DISCONNECT_ILLEGAL_CHARACTERS,
+        )
+        .await;
+        return true;
+    }
+
+    let normalized = normalize_chat(&message.message);
+    if normalized.is_empty() {
+        return false;
+    }
+
+    let over_threshold = chat.chat_throttler.increment();
+
+    let name = Component::text(&session.player.name);
+    let mut tail = Vec::new();
+    player_chat_tail(
+        &mut tail,
+        session.uuid,
+        normalized,
+        message.timestamp,
+        message.salt,
+        CHAT_TYPE_CHAT_HOLDER,
+        &name,
+        None,
+    );
+    let tail: Arc<[u8]> = Arc::from(tail.into_boxed_slice());
+    for sender in session.registry.chat_targets() {
+        let _ = sender.send(Outbound::PlayerChat(Arc::clone(&tail)));
+    }
+
+    if over_threshold {
+        shutdown_play(
+            stream,
+            framing,
+            threshold,
+            &mut chat.next_chat_index,
+            rx,
+            DISCONNECT_SPAM,
+        )
+        .await;
+        return true;
+    }
+
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_command(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    threshold: usize,
+    command: &str,
+    session: &Session<'_>,
+    chat: &mut ChatState,
+    rx: &mut UnboundedReceiver<Outbound>,
+) -> bool {
+    if validate_chat_content(command).is_err() {
+        shutdown_play(
+            stream,
+            framing,
+            threshold,
+            &mut chat.next_chat_index,
+            rx,
+            DISCONNECT_ILLEGAL_CHARACTERS,
+        )
+        .await;
+        return true;
+    }
+
+    let over_threshold = chat.command_throttler.increment();
+
+    if execute_command(stream, framing, session, command).await {
+        return true;
+    }
+
+    if over_threshold {
+        shutdown_play(
+            stream,
+            framing,
+            threshold,
+            &mut chat.next_chat_index,
+            rx,
+            DISCONNECT_SPAM,
+        )
+        .await;
+        return true;
+    }
+
+    false
+}
+
+async fn execute_command(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &Session<'_>,
+    command: &str,
+) -> bool {
+    debug!(player = %session.player.name, command, "commande reçue");
+    let failure = Component {
+        content: Content::Text(String::new()),
+        style: Style {
+            color: Some("red".to_owned()),
+            ..Style::default()
+        },
+        extra: vec![Component::translate("command.unknown.command")],
+    };
+    write_packet(
+        stream,
+        framing,
+        State::Play,
+        play_cb::SYSTEM_CHAT,
+        &system_chat_payload(&failure, false),
+    )
+    .await
+    .is_err()
 }
 
 async fn run_keep_alive_action(
@@ -2104,15 +2387,23 @@ async fn drain(stream: &mut TcpStream, deadline: Instant) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Arc, PLAY_THRESHOLD, PlayerRegistry, World, broadcast_gamemode_change, broadcast_latency,
-        build_env_filter, spawn_position,
+        Arc, Outbound, PLAY_THRESHOLD, PlayerRegistry, World, broadcast_gamemode_change,
+        broadcast_latency, build_env_filter, spawn_position,
     };
     use tokio::sync::mpsc::unbounded_channel;
     use verdigris_protocol::{
         decode_compressed_frame, play::packet_ids::clientbound as play_cb, read_var_int,
     };
 
-    fn action_byte(frame: &Arc<[u8]>) -> (i32, u8) {
+    fn frame_bytes(outbound: Outbound) -> Arc<[u8]> {
+        match outbound {
+            Outbound::Frame(bytes) => bytes,
+            Outbound::PlayerChat(_) => panic!("attendu une trame, obtenu un player_chat"),
+        }
+    }
+
+    fn action_byte(outbound: Outbound) -> (i32, u8) {
+        let frame = frame_bytes(outbound);
         let (body, _) = decode_compressed_frame(&frame[..], PLAY_THRESHOLD)
             .unwrap()
             .unwrap();
@@ -2169,8 +2460,8 @@ mod tests {
     #[test]
     fn gamemode_change_broadcasts_only_its_action_to_all() {
         let registry = Arc::new(PlayerRegistry::new("Verdigris", 20));
-        let (tx_a, mut rx_a) = unbounded_channel::<Arc<[u8]>>();
-        let (tx_b, mut rx_b) = unbounded_channel::<Arc<[u8]>>();
+        let (tx_a, mut rx_a) = unbounded_channel::<Outbound>();
+        let (tx_b, mut rx_b) = unbounded_channel::<Outbound>();
         registry.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
         registry.register(2, 11, (1.5, -60.0, 2.5), "Bob".to_owned(), 0, 0, tx_b);
 
@@ -2178,21 +2469,21 @@ mod tests {
 
         let frame_a = rx_a.try_recv().expect("Alice reçoit la diffusion");
         let frame_b = rx_b.try_recv().expect("Bob reçoit la diffusion");
-        assert_eq!(action_byte(&frame_a), (play_cb::PLAYER_INFO_UPDATE, 0x04));
-        assert_eq!(action_byte(&frame_b), (play_cb::PLAYER_INFO_UPDATE, 0x04));
+        assert_eq!(action_byte(frame_a), (play_cb::PLAYER_INFO_UPDATE, 0x04));
+        assert_eq!(action_byte(frame_b), (play_cb::PLAYER_INFO_UPDATE, 0x04));
     }
 
     #[test]
     fn latency_broadcast_uses_the_latency_action() {
         let registry = Arc::new(PlayerRegistry::new("Verdigris", 20));
-        let (tx_a, mut rx_a) = unbounded_channel::<Arc<[u8]>>();
+        let (tx_a, mut rx_a) = unbounded_channel::<Outbound>();
         registry.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
         registry.set_latency(1, 42);
 
         broadcast_latency(&registry);
 
         let frame = rx_a.try_recv().expect("latence diffusée au joueur");
-        assert_eq!(action_byte(&frame), (play_cb::PLAYER_INFO_UPDATE, 0x10));
+        assert_eq!(action_byte(frame), (play_cb::PLAYER_INFO_UPDATE, 0x10));
     }
 
     #[test]

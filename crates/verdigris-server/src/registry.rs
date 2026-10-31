@@ -8,7 +8,13 @@ use verdigris_protocol::{
     chunk_coord, frame_entity_pass, set_entity_data_payload,
 };
 
-pub type OutboundSender = UnboundedSender<Arc<[u8]>>;
+#[derive(Debug, Clone)]
+pub enum Outbound {
+    Frame(Arc<[u8]>),
+    PlayerChat(Arc<[u8]>),
+}
+
+pub type OutboundSender = UnboundedSender<Outbound>;
 
 pub const TRACK_RANGE_BLOCKS: f64 = 128.0;
 const SPECTATOR_GAME_MODE: i32 = 3;
@@ -744,6 +750,15 @@ impl PlayerRegistry {
         }
 
         TickOutput { actions, meta }
+    }
+
+    pub fn chat_targets(&self) -> Vec<OutboundSender> {
+        self.slots
+            .lock()
+            .unwrap()
+            .values()
+            .map(|slot| slot.sender.clone())
+            .collect()
     }
 
     pub fn count(&self) -> usize {

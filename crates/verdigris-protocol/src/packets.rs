@@ -1,14 +1,16 @@
 use crate::error::ProtocolError;
 use crate::play::{
-    AcceptTeleportation, ChunkBatchReceived, ClientInformation, KeepAlive, MovePlayerPos,
-    MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PickItemFromBlock, PlayerAction,
-    PlayerCommand, PlayerInput, SetCarriedItem, SetCreativeModeSlot, UseItem, UseItemOn,
-    decode_accept_teleportation, decode_chunk_batch_received, decode_client_information,
-    decode_keep_alive, decode_move_player_pos, decode_move_player_pos_rot, decode_move_player_rot,
-    decode_move_player_status, decode_pick_item_from_block, decode_player_abilities,
-    decode_player_action, decode_player_command, decode_player_input, decode_player_loaded,
-    decode_punch, decode_set_carried_item, decode_set_creative_mode_slot, decode_use_item,
-    decode_use_item_on, packet_ids as play_ids,
+    AcceptTeleportation, Chat, ChatCommandSigned, ChunkBatchReceived, ClientInformation, KeepAlive,
+    MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PickItemFromBlock,
+    PlayerAction, PlayerCommand, PlayerInput, SetCarriedItem, SetCreativeModeSlot, UseItem,
+    UseItemOn, decode_accept_teleportation, decode_chat, decode_chat_ack, decode_chat_command,
+    decode_chat_command_signed, decode_chat_session_update, decode_chunk_batch_received,
+    decode_client_information, decode_keep_alive, decode_move_player_pos,
+    decode_move_player_pos_rot, decode_move_player_rot, decode_move_player_status,
+    decode_pick_item_from_block, decode_player_abilities, decode_player_action,
+    decode_player_command, decode_player_input, decode_player_loaded, decode_punch,
+    decode_set_carried_item, decode_set_creative_mode_slot, decode_use_item, decode_use_item_on,
+    packet_ids as play_ids,
 };
 use crate::primitives::{read_i64, read_string, read_u16};
 use crate::varint::read_var_int;
@@ -67,6 +69,11 @@ pub enum Serverbound {
     PlayPickItemFromBlock(PickItemFromBlock),
     PlayClientInformation(ClientInformation),
     PlayPunch,
+    PlayChat(Box<Chat>),
+    PlayChatCommand(String),
+    PlayChatCommandSigned(ChatCommandSigned),
+    PlayChatAck(i32),
+    PlayChatSessionUpdate,
     PlayIgnored { id: i32 },
 }
 
@@ -221,6 +228,19 @@ fn decode_play(id: i32, body: &[u8]) -> Result<Serverbound, ProtocolError> {
     } else if id == play_ids::serverbound::PUNCH {
         decode_punch(body)?;
         Ok(Serverbound::PlayPunch)
+    } else if id == play_ids::serverbound::CHAT {
+        Ok(Serverbound::PlayChat(Box::new(decode_chat(body)?)))
+    } else if id == play_ids::serverbound::CHAT_COMMAND {
+        Ok(Serverbound::PlayChatCommand(decode_chat_command(body)?))
+    } else if id == play_ids::serverbound::CHAT_COMMAND_SIGNED {
+        Ok(Serverbound::PlayChatCommandSigned(
+            decode_chat_command_signed(body)?,
+        ))
+    } else if id == play_ids::serverbound::CHAT_ACK {
+        Ok(Serverbound::PlayChatAck(decode_chat_ack(body)?))
+    } else if id == play_ids::serverbound::CHAT_SESSION_UPDATE {
+        decode_chat_session_update(body)?;
+        Ok(Serverbound::PlayChatSessionUpdate)
     } else {
         Ok(Serverbound::PlayIgnored { id })
     }
@@ -602,6 +622,45 @@ mod tests {
         assert_eq!(
             decode_serverbound(State::Play, &body),
             Err(ProtocolError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn decode_play_chat_dispatches() {
+        let mut body = Vec::new();
+        write_var_int(0x09, &mut body);
+        write_string("hi", &mut body);
+        write_i64(0, &mut body);
+        write_i64(0, &mut body);
+        body.push(0x00);
+        body.push(0x00);
+        body.extend_from_slice(&[0x00, 0x00, 0x00]);
+        body.push(0x01);
+        match decode_serverbound(State::Play, &body).unwrap() {
+            Serverbound::PlayChat(chat) => assert_eq!(chat.message, "hi"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_play_chat_ack_and_session_update_dispatch() {
+        let mut ack = Vec::new();
+        write_var_int(0x06, &mut ack);
+        write_var_int(3, &mut ack);
+        assert_eq!(
+            decode_serverbound(State::Play, &ack).unwrap(),
+            Serverbound::PlayChatAck(3)
+        );
+
+        let mut session = Vec::new();
+        write_var_int(0x0A, &mut session);
+        session.extend_from_slice(&[0u8; 16]);
+        write_i64(0, &mut session);
+        write_var_int(0, &mut session);
+        write_var_int(0, &mut session);
+        assert_eq!(
+            decode_serverbound(State::Play, &session).unwrap(),
+            Serverbound::PlayChatSessionUpdate
         );
     }
 
