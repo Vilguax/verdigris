@@ -8,7 +8,9 @@ use verdigris_protocol::{
     ChunkColumn, ChunkGenerator, FlatGenerator, biome_index, block_index, default_state_of_name,
     plains_biome_id,
 };
-use verdigris_worldgen::{BiomeSource, ChunkTerrain, SearchState, WorldGenerator, WorldgenData};
+use verdigris_worldgen::{
+    AquiferMode, BiomeSource, ChunkTerrain, SearchState, WorldGenerator, WorldgenData,
+};
 
 pub const GENERATOR_ENV: &str = "VERDIGRIS_GENERATOR";
 pub const SEED_ENV: &str = "VERDIGRIS_SEED";
@@ -215,7 +217,10 @@ impl GeneratorSetup {
         match kind {
             GeneratorKind::Flat => Ok(GeneratorSetup::Flat),
             GeneratorKind::Noise => {
-                let generator = Arc::new(WorldGenerator::new(seed).map_err(|err| err.to_string())?);
+                let generator = Arc::new(
+                    WorldGenerator::with_options(seed, AquiferMode::Noise, true)
+                        .map_err(|err| err.to_string())?,
+                );
                 Ok(GeneratorSetup::Noise {
                     generator,
                     metrics: Arc::new(GenMetrics::default()),

@@ -1,9 +1,14 @@
 use crate::aquifer::{AquiferFunctions, AquiferMode, AquiferScratch, Filled};
 use crate::biome::SearchState;
+use crate::carver::CarverData;
+use crate::carver::apply::{CarveApplyCtx, CarveBlocks, CarveTarget, apply_carvers};
+use crate::carver::carve_chunk_mask_into;
+use crate::carver::mask::CarveMask;
 use crate::data::{DataError, WorldgenData};
 use crate::df::node::Node;
 use crate::df::volume::{Volume, VolumeContext, VolumeError, eval_volume_with};
 use crate::material::MaterialRules;
+use crate::registry::worldgen_value;
 
 pub const CHUNK_WIDTH: usize = 16;
 pub const LAVA_CEILING: i32 = -54;
@@ -31,14 +36,24 @@ pub struct WorldGenerator {
     seed: i64,
     min_y: i32,
     height: usize,
+    carvers: bool,
+    carver_data: Option<CarverData>,
+    uncarvable_mask: Vec<bool>,
+    dirt_idx: Option<u16>,
+    grass_idx: Option<u16>,
+    mycelium_idx: Option<u16>,
 }
 
 impl WorldGenerator {
     pub fn new(seed: i64) -> Result<Self, DataError> {
-        Self::with_mode(seed, AquiferMode::Noise)
+        Self::with_options(seed, AquiferMode::Noise, false)
     }
 
     pub fn with_mode(seed: i64, mode: AquiferMode) -> Result<Self, DataError> {
+        Self::with_options(seed, mode, false)
+    }
+
+    pub fn with_options(seed: i64, mode: AquiferMode, carvers: bool) -> Result<Self, DataError> {
         let data = WorldgenData::embedded()?;
         let world = data.build_world_density(seed)?;
         let material = data.build_material_rules(seed)?;
@@ -63,6 +78,30 @@ impl WorldGenerator {
         if matches!(mode, AquiferMode::Noise) && aquifers.is_none() {
             return Err(DataError::MissingSection("aquifers".to_string()));
         }
+        let find = |name: &str| -> Option<u16> {
+            material
+                .blocks
+                .iter()
+                .position(|n| n == name)
+                .map(|i| i as u16)
+        };
+        let (dirt_idx, grass_idx, mycelium_idx) = if carvers {
+            (
+                find("minecraft:dirt"),
+                find("minecraft:grass_block"),
+                find("minecraft:mycelium"),
+            )
+        } else {
+            (None, None, None)
+        };
+        let (carver_data, uncarvable_mask) = if carvers {
+            let cd = CarverData::from_worldgen(worldgen_value())
+                .map_err(|e| DataError::MissingSection(format!("carver: {e}")))?;
+            let mask = cd.uncarvable_mask(&material.blocks);
+            (Some(cd), mask)
+        } else {
+            (None, Vec::new())
+        };
         Ok(Self {
             final_density,
             aquifers,
@@ -71,7 +110,17 @@ impl WorldGenerator {
             seed,
             min_y,
             height: height.max(0) as usize,
+            carvers,
+            carver_data,
+            uncarvable_mask,
+            dirt_idx,
+            grass_idx,
+            mycelium_idx,
         })
+    }
+
+    pub fn carvers_enabled(&self) -> bool {
+        self.carvers
     }
 
     pub fn material(&self) -> &MaterialRules {
@@ -146,6 +195,46 @@ impl WorldGenerator {
             }
         }
         self.material.apply(cx, cz, out)?;
+
+        if self.carvers
+            && matches!(self.mode, AquiferMode::Noise)
+            && let (Some(data), Some(funcs)) = (&self.carver_data, &self.aquifers)
+        {
+            carve_chunk_mask_into(
+                data,
+                &self.material.biome_source,
+                &mut out.bsearch,
+                self.seed,
+                cx,
+                cz,
+                &mut out.carve_mask,
+            );
+            let ctx = CarveApplyCtx {
+                mask: &out.carve_mask,
+                funcs,
+                uncarvable: &self.uncarvable_mask,
+                blocks: CarveBlocks {
+                    air: self.material.air_idx,
+                    water: self.material.water_idx,
+                    lava: self.material.lava_idx,
+                    dirt: self.dirt_idx,
+                    grass: self.grass_idx,
+                    mycelium: self.mycelium_idx,
+                },
+                cx,
+                cz,
+                min_y: self.min_y,
+                height: self.height,
+            };
+            let mut target = CarveTarget {
+                categories: &mut out.categories,
+                block_ids: &mut out.blocks,
+                post: &mut out.post,
+                surface: &mut out.ws,
+            };
+            apply_carvers(&mut out.aquifer, &mut target, &ctx);
+        }
+
         Ok(())
     }
 
@@ -200,7 +289,8 @@ pub struct ChunkTerrain {
     pub(crate) density: Vec<f32>,
     pub(crate) post: Vec<u64>,
     pub(crate) ctx: VolumeContext,
-    aquifer: AquiferScratch,
+    pub(crate) aquifer: AquiferScratch,
+    pub(crate) carve_mask: CarveMask,
     pub(crate) blocks: Vec<u16>,
     pub(crate) ore_copper: Vec<f32>,
     pub(crate) ore_iron: Vec<f32>,
@@ -222,6 +312,7 @@ impl ChunkTerrain {
             post: vec![0u64; len.div_ceil(64)],
             ctx: VolumeContext::new(),
             aquifer: AquiferScratch::new(),
+            carve_mask: CarveMask::new(),
             blocks: vec![0u16; len],
             ore_copper: Vec::with_capacity(len),
             ore_iron: Vec::with_capacity(len),

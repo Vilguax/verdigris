@@ -411,3 +411,135 @@ préservé) : `opt-level = 3` sur `verdigris-worldgen` et `verdigris-protocol` d
 `[profile.dev.package.*]` du `Cargo.toml` racine, dans la continuité du réglage déjà
 présent pour `flate2`/`miniz_oxide` (décodage zlib des binaires de test). La logique
 reste identique ; seul le codegen des caisses chaudes est optimisé pour les tests.
+
+# Notes — carvers de l'overworld (spec 08, module `carver`)
+
+## Spec 08 disponible (session 2026-10-31) — MISE À JOUR
+La spec salle blanche 08 est désormais accessible et fait foi. Les rejets précédents venaient d'un algorithme
+reconstruit de la prose (géométrie divergente partout). La géométrie du masque a été
+RÉIMPLÉMENTÉE à partir des §1 à §5 et verrouillée par les vecteurs §8.1 (table de sinus)
+et §8.2 (réensemencement, départs grotte/canyon, comptes de masque 111/1403/1122/3636/3237)
+dans `tests/carver_vectors.rs` et `carver/sincos.rs`. Vecteurs et porte oracle exécutés
+par le pilote externe : tous verts. Corrections clés vs la reconstruction précédente :
+- grotte `L = 112 − ni(28)` (range=4), plus 240 ;
+- table de sinus `T[k] = f32(sin(f64(k)/10430.378350470453))`, lookup
+  `tronc64(f64(a)×10430.378350470453) AND 65535`, empreinte SHA-256 §8.1 assertée ;
+- ellipsoïde §3.2 rejet rapide `δ = 16 + r_h×2`, saut de colonne `xd²+zd² ≥ 1` ;
+  atteinte §3.3 `R = f64(f32(f32(t+2)+16))` (f32 puis élargi) ;
+- prédicat grotte §4.6 `yd > p && (xd²+yd²+zd²) < 1` (le `−0.7` parasite retiré) ;
+- canyon §5.1/§5.3 `L = tronc(112×distance_factor)`, `r_v = (κ×base×y_scale)×U(0.75,1)`,
+  `r_h = base×horizontal_radius_factor`, table `FL` de 384 (gen_depth) entrées, prédicat
+  §5.4 diviseur 6.0 indice `FL[y+63]` ;
+- hauteurs de départ résolues avec `min_gen_y=−64`/top=319 (07 §2.6), pas les bornes du
+  masque ; cap `θ = nf × TAU`.
+Les points marqués INCERTAIN ci-dessous (spec §9) ne sont pas confrontables en session ;
+clause T3 : ne PAS ajuster le code pour forcer un vecteur ou l'oracle.
+
+## Porte oracle-carvers (clause T3)
+`tests/oracle_carvers.rs::carvers_match_oracle` exige l'égalité exacte des identifiants
+sur 48 chunks, avec diagnostics (écarts par paire attendu/obtenu, premières positions).
+Active et verte : 0 écart sur 48 chunks. Contrôle négatif : la même porte avec carvers
+désactivés relève 46543 écarts, la porte mesure donc bien le creusement.
+Clause T3 : ne tweak AUCUNE constante du carver pour chasser l'oracle.
+
+## H1 — données en lecture seule
+`worldgen.json` porte déjà `carver.{cave,cave_extra_underground,canyon,nether_cave}`
+et le champ `carvers` par biome (overworld : liste des 3). `network.json` porte le tag
+`minecraft:uncarvable` = ids [36] = `minecraft:bedrock` (résolu via `blocks.json`).
+Aucune écriture, aucun `build.rs`. `CarverData::from_worldgen` lit le `Value`
+embarqué ; `network.json`/`blocks.json` sont `include_str!` dans `carver/mod.rs`.
+
+## H2 — résolveur de biomes threadé
+`carve_chunk_mask_into(data, biomes, state, seed, cx, cz, mask)` prend le
+`BiomeSource` déjà construit (réutilisé depuis `MaterialRules.biome_source`). Pour
+chaque chunk source (rayon 8), la liste `carvers` est lue en POINT via
+`BiomeSource::biome_at_point(state, 16·sx, 0, 16·sz)` (06 §1.7 : quart `fromBlock`).
+Le court-circuit vanilla (toutes les listes overworld identiques) est permis mais non
+pris : le chemin générique par biome tourne toujours (correct datapack).
+
+## H3 — réutilisation de l'aquifère du remplissage
+Le creusement n'instancie aucun aquifère. `carver::apply::apply_carvers` rappelle
+`AquiferScratch::decide(funcs, x, y, z, 0.0)` sur l'instance `out.aquifer` déjà
+`prepare`-ée par `fill_chunk` (mode Noise). `Filled::Nothing` => case non creusée ;
+`Air/Water/Lava` => bloc posé, bit `post` mis si `φ` et fluide. C'est l'équivalent
+de `aquifer.computeSubstance(ctx, 0.0)` de vanilla. Le creusement est intégré en fin
+de `fill_chunk` précisément pour réutiliser ce contexte sans ré-exposer l'aquifère.
+
+## H4 — option générateur
+`WorldGenerator::with_options(seed, mode, carvers)`. `new()`/`with_mode()` gardent
+`carvers=false` : oracle-1a/1b/biomes/matériaux et les tests serveur passent par elles
+et restent inchangés (T2). Le serveur (`GeneratorSetup::build` Noise) construit avec
+`carvers=true` (défaut-on, E1). Le creusement n'est actif qu'en mode `Noise` (aquifère
+préparé requis).
+
+## Masque (D1)
+`carver/mask.rs` : bitset 16×16×376, Y_min=−63, Y_max=312, index
+`(y−Y_min)+(lz+16·lx)·376` (ordre colonne lx extérieur, lz intérieur). Ces bornes
+sont figées par le plan (la couche bedrock −64 est hors creusement). La table FL du
+canyon (§5.2) est indexée `y−Y_min` = `y+63`, sans `ni` pour j=0, resample si
+`ni(width_smoothness)==0`.
+
+## RNG (§2.1) et table de sinus (§3.1)
+`seed_large_feature(S+i, sx, sz)` = LCG(S+i) -> a=nextLong, b=nextLong,
+g = (sx·a) ^ (sz·b) ^ (S+i) (i64 wrapping) -> LCG(g). `is_start` = `nextFloat ≤ probability`.
+Les tunnels se réensemencent par `nextLong` (nouveau LCG). Table de sinus (§3.1 exacte) :
+`T[k] = f32(sin(f64(k)/10430.378350470453))` ;
+`sin_t(a)=T[(f64(a)×10430.378350470453) as i64 & 65535]`,
+`cos_t(a)=T[(f64(a)×10430.378350470453 + 16384.0) as i64 & 65535]`. Les tests `carver/sincos.rs`
+assertent bit à bit les `T[k]` de §8.1 (0/1/100/12345/16384/32768/49152/65535), les `sin_t`/`cos_t`
+de §8.1, et l'empreinte SHA-256 `87a67a39…dac2` via un SHA-256 écrit dans le module de test
+(aucune dépendance ajoutée). Réserve §9#3 : l'empreinte est celle de la JVM 25 ; si le libm
+f64 de la plate-forme diffère d'un ULP, passer le test d'empreinte en `#[ignore]` (les `T[k]`
+individuels restent les garde-fous durs).
+
+## Algorithme — résolu par la spec §4/§5 (plus de guess)
+- Longueur grotte `L = 112 − ni(28)` (§4.1), canyon `L = tronc(112×distance_factor)` (§5.1).
+- `get_thickness` : `thickness.sample` (2 nf) puis si `weird_thickness_bias && ni(10)==0`,
+  `t = t × f32(f32(f32(n1×n2)×3)+1)` avec 2 nouveaux nf (§4.1).
+- `start_vertical_radius_multiplier` = e_0, échelle verticale du 1er tunnel (vanilla 1.0,
+  pas de tirage, §4.1 pt 6 / §4.5) ; branches e=1.0.
+- Bifurcation §4.4 : gauche `g1=nextLong`, `t1=f32(f32(nf×0.5)+0.5)` puis droite `g2`,`t2` ;
+  caps `θ∓π/2`, pente `φ/3`, pas initial s_b, e=1.0.
+- Canyon §5.3 : `r_h = base×horizontal_radius_factor` (1 nf), `r_v = (κ×base×y_scale)×U(0.75,1)`
+  (1 nf) ; distance_factor NE sert QU'À `L`. κ = D + C·μ (vanilla D=1,C=0 → κ=1). Prédicat §5.4
+  `(g²+h²)·FL[y+63] + d2²/6 < 1`. Table FL de 384 entrées (pas de ni pour j=0).
+- Constantes de marche confirmées §4.3/§5.3 (grotte pitch×0.92/0.7, ±0.1, dθ×0.9, dφ×0.75, 2/4 ;
+  canyon ×0.7, ±0.05, ×0.8/×0.5) et les littéraux f32 de §8.1.
+
+## §6 réapplication des matériaux de dessus — best-effort (07 §6 contexte réduit indisponible)
+`apply_carvers` suit l'ordre §1.5 : colonnes lx ext / lz int ; séries (suites maximales
+marquées) de la plus basse à la plus haute ; dans une série du haut vers le bas :
+- drapeau `reached_surface` (H) remis à faux AU DÉBUT DE CHAQUE SÉRIE, mis à vrai quand la
+  case creusée portait `grass_block` ou `mycelium` (avant l'aquifère) ; le bloc déclencheur
+  est mémorisé.
+- réapplication du matériau de dessus : quand H et que la case directement sous une
+  case creusée en air est `dirt`, cette dirt devient le bloc de surface mémorisé
+  (grass/mycelium) et repasse solide. Approximation fidèle au cas couvert par H (en
+  vanilla `reachedSurface` n'est posé que par grass/mycelium, donc `topMaterial` y
+  rend justement ce bloc) ; la règle biome-complète 07 §6 (contexte réduit) n'est pas
+  disponible, cette version ne couvre donc que la relocalisation du bloc de surface,
+  pas les surfaces spéciales (sable, badlands, etc.) qui ne posent pas H.
+- heightmap de surface : `ChunkTerrain.ws` (WORLD_SURFACE de travail) est recalculé
+  par colonne après creusement (premier non-air par le haut). Aucun tableau WG séparé
+  n'est matérialisé car aucun consommateur ne le lit encore ; `ws` porte l'info.
+- bit `post` (correction revue) : UNIQUEMENT posé si `φ` et fluide (§1.6). La branche
+  qui effaçait `post` sur une case air posée a été retirée (effacement non spécifié).
+
+## §8 vecteurs — transcrits (actifs)
+`tests/carver_vectors.rs` transcrit §8.2 en égalités bit à bit : table de réensemencement
+(a, b, g, premier nf) pour graines 0 et 20261029 ; départ grotte (−10,−5) i=0 (count N=7,
+x/y/z, m_h/m_v/p, θ/φ/t/L/graine) ; départ canyon (−5,−8) i=2 (x/y/z, θ/φ/t,
+distance_factor, L, graine, FL[0..3]) ; comptes de masque 111 (grotte), 1403 (canyon),
+1122/3636/3237 (chunks complets). §8.1 est dans `carver/sincos.rs`. Tous ACTIFS ; un vecteur
+qui résisterait après relecture => `#[ignore = "raison"]` (H5/T3), jamais d'ajustement du code.
+
+## Perf (E2)
+Mesure indicative (release, graine 20261029, 48 chunks de la porte oracle, temps total du
+test chargement compris) : 21,6 s avec carvers, 21,2 s sans, soit environ 8 ms par chunk
+pour le masque et son application. Critère structurel : masque fonction
+des seules sources, table de sinus et bitset préalloués (OnceLock / champ réutilisé de
+`ChunkTerrain`), aucune allocation par bloc dans `ellipsoid`/`apply_carvers` (closures
+monomorphisées, pas de `Vec` par case ; le seul `Vec` par carve canyon est la table FL
+de 376 f32, une fois par tunnel). Méthodo à relever : même zone, graine 20261029, N
+chunks, moyenne/médiane, avant/après ; validation d'exactitude par l'oracle, pas par le
+temps.
