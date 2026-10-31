@@ -1,7 +1,9 @@
 use crate::aquifer::{AquiferFunctions, AquiferMode, AquiferScratch, Filled};
+use crate::biome::SearchState;
 use crate::data::{DataError, WorldgenData};
 use crate::df::node::Node;
 use crate::df::volume::{Volume, VolumeContext, VolumeError, eval_volume_with};
+use crate::material::MaterialRules;
 
 pub const CHUNK_WIDTH: usize = 16;
 pub const LAVA_CEILING: i32 = -54;
@@ -24,6 +26,7 @@ impl Category {
 pub struct WorldGenerator {
     final_density: Node,
     aquifers: Option<AquiferFunctions>,
+    material: MaterialRules,
     mode: AquiferMode,
     seed: i64,
     min_y: i32,
@@ -38,6 +41,7 @@ impl WorldGenerator {
     pub fn with_mode(seed: i64, mode: AquiferMode) -> Result<Self, DataError> {
         let data = WorldgenData::embedded()?;
         let world = data.build_world_density(seed)?;
+        let material = data.build_material_rules(seed)?;
         let crate::data::WorldDensity {
             final_density,
             aquifers,
@@ -62,11 +66,16 @@ impl WorldGenerator {
         Ok(Self {
             final_density,
             aquifers,
+            material,
             mode,
             seed,
             min_y,
             height: height.max(0) as usize,
         })
+    }
+
+    pub fn material(&self) -> &MaterialRules {
+        &self.material
     }
 
     pub fn seed(&self) -> i64 {
@@ -136,6 +145,7 @@ impl WorldGenerator {
                 }
             }
         }
+        self.material.apply(cx, cz, out)?;
         Ok(())
     }
 
@@ -186,11 +196,19 @@ pub fn category_for(density: f32, y: i32) -> Category {
 pub struct ChunkTerrain {
     min_y: i32,
     height: usize,
-    categories: Vec<Category>,
-    density: Vec<f32>,
-    post: Vec<u64>,
-    ctx: VolumeContext,
+    pub(crate) categories: Vec<Category>,
+    pub(crate) density: Vec<f32>,
+    pub(crate) post: Vec<u64>,
+    pub(crate) ctx: VolumeContext,
     aquifer: AquiferScratch,
+    pub(crate) blocks: Vec<u16>,
+    pub(crate) ore_copper: Vec<f32>,
+    pub(crate) ore_iron: Vec<f32>,
+    pub(crate) ore_rich: Vec<f32>,
+    pub(crate) biome_grids: Vec<u16>,
+    pub(crate) ws: Vec<i32>,
+    pub(crate) bn: Vec<i32>,
+    pub(crate) bsearch: SearchState,
 }
 
 impl ChunkTerrain {
@@ -204,6 +222,14 @@ impl ChunkTerrain {
             post: vec![0u64; len.div_ceil(64)],
             ctx: VolumeContext::new(),
             aquifer: AquiferScratch::new(),
+            blocks: vec![0u16; len],
+            ore_copper: Vec::with_capacity(len),
+            ore_iron: Vec::with_capacity(len),
+            ore_rich: Vec::with_capacity(len),
+            biome_grids: Vec::new(),
+            ws: vec![0i32; CHUNK_WIDTH * CHUNK_WIDTH],
+            bn: vec![0i32; height],
+            bsearch: SearchState::new(),
         }
     }
 
@@ -211,6 +237,25 @@ impl ChunkTerrain {
         if self.min_y != min_y || self.height != height {
             *self = ChunkTerrain::new(min_y, height);
         }
+    }
+
+    pub(crate) fn ensure_material(&mut self, min_y: i32, height: usize) {
+        self.ensure(min_y, height);
+        let len = CHUNK_WIDTH * height * CHUNK_WIDTH;
+        if self.blocks.len() != len {
+            self.blocks = vec![0u16; len];
+        }
+        if self.bn.len() != height {
+            self.bn = vec![0i32; height];
+        }
+    }
+
+    pub fn block_id_at(&self, lx: usize, y: i32, lz: usize) -> u16 {
+        self.blocks[self.index(lx, y, lz)]
+    }
+
+    pub fn blocks(&self) -> &[u16] {
+        &self.blocks
     }
 
     pub fn min_y(&self) -> i32 {
