@@ -21,7 +21,10 @@ pub use generator::{
 pub use level::{LEVEL_FILE, LevelConfig, LevelError, ensure as ensure_level, level_path};
 pub use player::{GAMEMODE_ENV, PlayerState, read_gamemode, resolve_gamemode};
 pub use registry::PlayerRegistry;
-use registry::{EntitySpawn, Outbound, OutboundSender, PlayerHandle, allocate_entity_id};
+use registry::{
+    ControlMsg, EntitySpawn, GamemodeDecision, ObserverActions, Outbound, OutboundSender,
+    PlayerHandle, allocate_entity_id,
+};
 pub use storage::{
     CHUNKS_SUBDIR, ChunkStore, DEFAULT_WORLD_DIR, DiskLoader, LoadOutcome, REJECTED_SUFFIX,
     WORLD_ENV, world_dir,
@@ -38,28 +41,28 @@ use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
     Arg, CHAT_TYPE_CHAT_HOLDER, CHAT_TYPE_MSG_INCOMING_HOLDER, CHAT_TYPE_MSG_OUTGOING_HOLDER,
     CHAT_TYPE_SAY_HOLDER, COMPRESSION_THRESHOLD, Chat, Component, Content, EncodeError,
-    FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, HumanoidArm, Intent, ItemStack, ListedPlayer,
-    MAIN_HAND_LEFT, MAX_SUGGESTION_LEN_DEFAULT, MAX_SUGGESTION_LEN_OP, MAX_SUGGESTIONS,
-    MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus, PLAYER_ENTITY_TYPE,
-    PROTOCOL_VERSION, SET_COMPRESSION_ID, SWING_DURATION, SWING_WHACK, Serverbound, State,
-    StatusInfo, Style, TickThrottler, World, add_entity_payload, argument_error_component,
-    block_changed_ack_payload, block_update_payload, build_compressed_packet, build_packet,
-    bundle_delimiter_payload, chunk_batch_finished_payload, chunk_batch_start_payload, chunk_coord,
-    chunks_to_forget, chunks_to_load, client_has_core, command_usage, command_usages,
-    command_visible, commands_payload, config_disconnect_payload, container_set_slot_payload,
-    decode_client_information, decode_compressed_frame, decode_frame, decode_known_packs,
-    decode_serverbound, entity_event_permission_payload, forget_level_chunk_payload,
-    game_event_payload, keep_alive_payload, known_packs_payload, login_disconnect_payload,
-    login_play_payload, login_success_payload, network_data, normalize_chat, offline_uuid,
-    packet_ids, player_abilities_payload, player_chat_tail, player_info_remove_payload,
-    player_info_update_gamemode_payload, player_info_update_init_payload,
-    player_info_update_latency_payload, player_position_payload, pong_payload, random_session_id,
-    read_var_int, registry_data_payload, remove_entities_payload, server_known_pack,
-    set_chunk_cache_center_payload, set_compression_payload, set_equipment_payload,
-    set_held_slot_payload, status_json, status_response_payload, suggest_completions,
-    swing_animation_payload, system_chat_payload, tab_list_payload, unknown_command_components,
-    update_tags_payload, validate_chat_content, validate_name, write_chunk_payload,
-    write_command_suggestions, write_nbt, write_var_int,
+    FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, GameMode, HumanoidArm, Intent, ItemStack,
+    ListedPlayer, MAIN_HAND_LEFT, MAX_SUGGESTION_LEN_DEFAULT, MAX_SUGGESTION_LEN_OP,
+    MAX_SUGGESTIONS, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus,
+    PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID, SWING_DURATION, SWING_WHACK,
+    Serverbound, State, StatusInfo, Style, TickThrottler, World, add_entity_payload,
+    argument_error_component, block_changed_ack_payload, block_update_payload,
+    build_compressed_packet, build_packet, bundle_delimiter_payload, chunk_batch_finished_payload,
+    chunk_batch_start_payload, chunk_coord, chunks_to_forget, chunks_to_load, client_has_core,
+    command_usage, command_usages, command_visible, commands_payload, config_disconnect_payload,
+    container_set_slot_payload, decode_client_information, decode_compressed_frame, decode_frame,
+    decode_known_packs, decode_serverbound, entity_event_permission_payload,
+    forget_level_chunk_payload, game_event_payload, keep_alive_payload, known_packs_payload,
+    login_disconnect_payload, login_play_payload, login_success_payload, network_data,
+    normalize_chat, offline_uuid, packet_ids, parse_gamemode, player_abilities_payload,
+    player_chat_tail, player_info_remove_payload, player_info_update_gamemode_payload,
+    player_info_update_init_payload, player_info_update_latency_payload, player_position_payload,
+    pong_payload, random_session_id, read_var_int, registry_data_payload, remove_entities_payload,
+    server_known_pack, set_chunk_cache_center_payload, set_compression_payload,
+    set_equipment_payload, set_held_slot_payload, status_json, status_response_payload,
+    suggest_completions, swing_animation_payload, system_chat_payload, tab_list_payload,
+    unknown_command_components, update_tags_payload, validate_chat_content, validate_name,
+    write_chunk_payload, write_command_suggestions, write_nbt, write_var_int,
 };
 use verdigris_protocol::{GAME_VERSION, WORLD_MAX_Y, WORLD_MIN_Y, is_air, is_fluid};
 
@@ -302,18 +305,15 @@ fn push_bundle(sender: &OutboundSender, frames: &[Arc<[u8]>]) {
     }
 }
 
-pub fn broadcast_gamemode_change(registry: &Arc<PlayerRegistry>, uuid: u128, mode: i32) {
-    let change = registry.change_gamemode(uuid, mode);
-    if change.senders.is_empty() {
-        return;
-    }
-    if let Some(frame) = frame_arc(
+fn gamemode_list_frame(uuid: u128, mode: i32) -> Option<Arc<[u8]>> {
+    frame_arc(
         play_cb::PLAYER_INFO_UPDATE,
         &player_info_update_gamemode_payload(uuid, mode),
-    ) {
-        push_frame(&change.senders, &frame);
-    }
-    for actions in &change.actions {
+    )
+}
+
+fn emit_observer_actions(actions: &[ObserverActions]) {
+    for actions in actions {
         if !actions.removed.is_empty()
             && let Some(frame) = frame_arc(
                 play_cb::REMOVE_ENTITIES,
@@ -326,6 +326,36 @@ pub fn broadcast_gamemode_change(registry: &Arc<PlayerRegistry>, uuid: u128, mod
             push_bundle(&actions.sender, &spawn_bundle(spawn));
         }
     }
+}
+
+pub fn broadcast_gamemode_change(
+    registry: &Arc<PlayerRegistry>,
+    uuid: u128,
+    mode: i32,
+    exclude: u128,
+) {
+    let Some(frame) = gamemode_list_frame(uuid, mode) else {
+        return;
+    };
+    for handle in registry.players() {
+        if handle.uuid == exclude {
+            continue;
+        }
+        let _ = handle.sender.send(Outbound::Frame(Arc::clone(&frame)));
+    }
+}
+
+pub fn apply_gamemode_change(registry: &Arc<PlayerRegistry>, uuid: u128, mode: i32) {
+    let GamemodeDecision::Changed { mode, actions, .. } = registry.change_gamemode(uuid, mode)
+    else {
+        return;
+    };
+    if let Some(frame) = gamemode_list_frame(uuid, mode) {
+        for handle in registry.players() {
+            let _ = handle.sender.send(Outbound::Frame(Arc::clone(&frame)));
+        }
+    }
+    emit_observer_actions(&actions);
 }
 
 pub fn broadcast_permission_change(registry: &Arc<PlayerRegistry>, uuid: u128, level: u8) {
@@ -1739,9 +1769,16 @@ async fn run_play(
                 }
             }
             PlayStep::Outbound(Some(outbound)) => {
-                if write_outbound(stream, threshold, &mut chat.next_chat_index, outbound)
-                    .await
-                    .is_err()
+                if apply_outbound(
+                    stream,
+                    framing,
+                    *state,
+                    threshold,
+                    &mut session,
+                    &mut chat.next_chat_index,
+                    outbound,
+                )
+                .await
                 {
                     disconnect(stream, framing, *state, REASON_CONNECTION_LOST).await;
                     return;
@@ -1903,7 +1940,93 @@ async fn write_outbound(
             Some(frame) => stream.write_all(&frame).await,
             None => Ok(()),
         },
+        Outbound::Control(_) => Ok(()),
     }
+}
+
+async fn apply_outbound(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    threshold: usize,
+    session: &mut Session<'_>,
+    next_chat_index: &mut i32,
+    outbound: Outbound,
+) -> bool {
+    match outbound {
+        Outbound::Frame(bytes) => stream.write_all(&bytes).await.is_err(),
+        Outbound::PlayerChat(tail) => match encode_player_chat(next_chat_index, &tail, threshold) {
+            Some(frame) => stream.write_all(&frame).await.is_err(),
+            None => false,
+        },
+        Outbound::Control(ControlMsg::SetGamemode {
+            mode,
+            info_update,
+            feedback,
+        }) => {
+            apply_set_gamemode(
+                stream,
+                framing,
+                state,
+                &mut session.player,
+                mode,
+                &info_update,
+                feedback.as_deref(),
+            )
+            .await
+        }
+    }
+}
+
+async fn apply_set_gamemode(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    player: &mut PlayerState,
+    mode: i32,
+    info_update: &[u8],
+    feedback: Option<&[u8]>,
+) -> bool {
+    if let Some(game_mode) = GameMode::from_game_type(mode) {
+        player.mode = game_mode;
+        player.flying = (game_mode.abilities_flags() & 0x02) != 0;
+    }
+    let flags = GameMode::from_game_type(mode)
+        .map(GameMode::abilities_flags)
+        .unwrap_or(0);
+    if write_packet(
+        stream,
+        framing,
+        state,
+        play_cb::PLAYER_ABILITIES,
+        &player_abilities_payload(flags),
+    )
+    .await
+    .is_err()
+    {
+        return true;
+    }
+    if stream.write_all(info_update).await.is_err() {
+        return true;
+    }
+    if write_packet(
+        stream,
+        framing,
+        state,
+        play_cb::GAME_EVENT,
+        &game_event_payload(3, mode as f32),
+    )
+    .await
+    .is_err()
+    {
+        return true;
+    }
+    if let Some(feedback) = feedback
+        && stream.write_all(feedback).await.is_err()
+    {
+        return true;
+    }
+    false
 }
 
 fn translate_disconnect_payload(key: &str) -> Vec<u8> {
@@ -2066,7 +2189,7 @@ async fn handle_command(
     framing: &Framing,
     threshold: usize,
     command: &str,
-    session: &Session<'_>,
+    session: &mut Session<'_>,
     chat: &mut ChatState,
     rx: &mut UnboundedReceiver<Outbound>,
 ) -> bool {
@@ -2112,7 +2235,7 @@ async fn handle_command(
 async fn execute_command(
     stream: &mut TcpStream,
     framing: &Framing,
-    session: &Session<'_>,
+    session: &mut Session<'_>,
     command: &str,
 ) -> bool {
     debug!(player = %session.player.name, command, "commande reçue");
@@ -2136,6 +2259,7 @@ async fn execute_command(
             false
         }
         "msg" | "tell" | "w" => send_message_command(stream, framing, session, command, name).await,
+        "gamemode" => handle_gamemode(stream, framing, session, remainder(command, name)).await,
         _ => {
             warn!(command = name, "commande sans exécuteur enregistré");
             false
@@ -2321,15 +2445,28 @@ async fn send_message_command(
 }
 
 fn resolve_targets(session: &Session<'_>, selector: &str) -> Vec<PlayerHandle> {
-    let players = session.registry.players();
+    select_players(
+        session.registry.players(),
+        session.uuid,
+        session.player.pos,
+        selector,
+    )
+}
+
+fn select_players(
+    players: Vec<PlayerHandle>,
+    author_uuid: u128,
+    author_pos: (f64, f64, f64),
+    selector: &str,
+) -> Vec<PlayerHandle> {
     match selector {
         "@a" => players,
         "@s" => players
             .into_iter()
-            .filter(|handle| handle.uuid == session.uuid)
+            .filter(|handle| handle.uuid == author_uuid)
             .collect(),
         "@p" => {
-            let (sx, _, sz) = session.player.pos;
+            let (sx, _, sz) = author_pos;
             players
                 .into_iter()
                 .min_by(|a, b| {
@@ -2345,6 +2482,115 @@ fn resolve_targets(session: &Session<'_>, selector: &str) -> Vec<PlayerHandle> {
             .into_iter()
             .filter(|handle| handle.name == name)
             .collect(),
+    }
+}
+
+fn mode_component(mode: i32) -> Component {
+    let name = GameMode::from_game_type(mode)
+        .map(GameMode::name)
+        .unwrap_or("survival");
+    Component::translate(format!("gameMode.{name}"))
+}
+
+async fn handle_gamemode(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &mut Session<'_>,
+    args: &str,
+) -> bool {
+    let mut parts = args.split_whitespace();
+    let mode_token = parts.next().unwrap_or("");
+    let target_token = parts.next();
+    let mode = match parse_gamemode(mode_token) {
+        Ok(mode) => mode,
+        Err(_) => {
+            let error = argument_error_component("argument.gamemode.invalid", mode_token);
+            return send_system_line(stream, framing, &error).await;
+        }
+    };
+    let targets = match target_token {
+        Some(selector) => {
+            let resolved = resolve_targets(session, selector);
+            if resolved.is_empty() {
+                let error = argument_error_component("argument.entity.notfound.player", selector);
+                return send_system_line(stream, framing, &error).await;
+            }
+            resolved
+        }
+        None => match session
+            .registry
+            .players()
+            .into_iter()
+            .find(|handle| handle.uuid == session.uuid)
+        {
+            Some(handle) => vec![handle],
+            None => return false,
+        },
+    };
+    for target in targets {
+        if apply_gamemode_to_target(stream, framing, session, &target, mode).await {
+            return true;
+        }
+    }
+    false
+}
+
+async fn apply_gamemode_to_target(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &mut Session<'_>,
+    target: &PlayerHandle,
+    mode: i32,
+) -> bool {
+    let GamemodeDecision::Changed { actions, .. } =
+        session.registry.change_gamemode(target.uuid, mode)
+    else {
+        return false;
+    };
+    let Some(frame) = gamemode_list_frame(target.uuid, mode) else {
+        return false;
+    };
+    for handle in session.registry.players() {
+        if handle.uuid == target.uuid {
+            continue;
+        }
+        let _ = handle.sender.send(Outbound::Frame(Arc::clone(&frame)));
+    }
+    emit_observer_actions(&actions);
+
+    if target.uuid == session.uuid {
+        if apply_set_gamemode(
+            stream,
+            framing,
+            State::Play,
+            &mut session.player,
+            mode,
+            &frame,
+            None,
+        )
+        .await
+        {
+            return true;
+        }
+        let message = Component::translate("commands.gamemode.success.self")
+            .with(Arg::Comp(Box::new(mode_component(mode))));
+        send_system_line(stream, framing, &message).await
+    } else {
+        let feedback = system_chat_frame(
+            &Component::translate("gameMode.changed")
+                .with(Arg::Comp(Box::new(mode_component(mode)))),
+        );
+        let _ = target
+            .sender
+            .send(Outbound::Control(ControlMsg::SetGamemode {
+                mode,
+                info_update: Arc::clone(&frame),
+                feedback,
+            }));
+        let message = Component::translate("commands.gamemode.success.other")
+            .with(Arg::Str(target.name.clone()))
+            .with(Arg::Comp(Box::new(mode_component(mode))));
+        send_system_line(stream, framing, &message).await
     }
 }
 
@@ -2838,9 +3084,9 @@ async fn drain(stream: &mut TcpStream, deadline: Instant) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Arc, Outbound, PLAY_THRESHOLD, PlayerRegistry, SuggestState, World,
-        broadcast_gamemode_change, broadcast_latency, build_env_filter, record_suggestion,
-        spawn_position,
+        Arc, Outbound, PLAY_THRESHOLD, PlayerHandle, PlayerRegistry, SuggestState, World,
+        apply_gamemode_change, broadcast_gamemode_change, broadcast_latency, build_env_filter,
+        record_suggestion, select_players, spawn_position,
     };
     use tokio::sync::mpsc::unbounded_channel;
     use verdigris_protocol::{
@@ -2850,7 +3096,18 @@ mod tests {
     fn frame_bytes(outbound: Outbound) -> Arc<[u8]> {
         match outbound {
             Outbound::Frame(bytes) => bytes,
-            Outbound::PlayerChat(_) => panic!("attendu une trame, obtenu un player_chat"),
+            other => panic!("attendu une trame, obtenu {other:?}"),
+        }
+    }
+
+    fn dummy_handle(uuid: u128, name: &str, x: f64, z: f64) -> PlayerHandle {
+        let (tx, _rx) = unbounded_channel();
+        PlayerHandle {
+            uuid,
+            name: name.to_owned(),
+            x,
+            z,
+            sender: tx,
         }
     }
 
@@ -2935,19 +3192,62 @@ mod tests {
     }
 
     #[test]
-    fn gamemode_change_broadcasts_only_its_action_to_all() {
+    fn broadcast_gamemode_change_skips_the_excluded_player() {
         let registry = Arc::new(PlayerRegistry::new("Verdigris", 20));
         let (tx_a, mut rx_a) = unbounded_channel::<Outbound>();
         let (tx_b, mut rx_b) = unbounded_channel::<Outbound>();
         registry.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
         registry.register(2, 11, (1.5, -60.0, 2.5), "Bob".to_owned(), 0, 0, tx_b);
 
-        broadcast_gamemode_change(&registry, 2, 3);
+        broadcast_gamemode_change(&registry, 2, 3, 2);
 
         let frame_a = rx_a.try_recv().expect("Alice reçoit la diffusion");
-        let frame_b = rx_b.try_recv().expect("Bob reçoit la diffusion");
         assert_eq!(action_byte(frame_a), (play_cb::PLAYER_INFO_UPDATE, 0x04));
-        assert_eq!(action_byte(frame_b), (play_cb::PLAYER_INFO_UPDATE, 0x04));
+        assert!(
+            rx_b.try_recv().is_err(),
+            "le joueur exclu ne reçoit pas la diffusion"
+        );
+    }
+
+    #[test]
+    fn apply_gamemode_change_updates_everyone_once_then_is_silent_when_unchanged() {
+        let registry = Arc::new(PlayerRegistry::new("Verdigris", 20));
+        let (tx_a, mut rx_a) = unbounded_channel::<Outbound>();
+        let (tx_b, mut rx_b) = unbounded_channel::<Outbound>();
+        registry.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx_a);
+        registry.register(2, 11, (1.5, -60.0, 2.5), "Bob".to_owned(), 1, 0, tx_b);
+
+        apply_gamemode_change(&registry, 2, 3);
+        assert_eq!(
+            action_byte(rx_a.try_recv().expect("Alice reçoit")),
+            (play_cb::PLAYER_INFO_UPDATE, 0x04)
+        );
+        assert_eq!(
+            action_byte(rx_b.try_recv().expect("Bob reçoit")),
+            (play_cb::PLAYER_INFO_UPDATE, 0x04)
+        );
+
+        apply_gamemode_change(&registry, 2, 3);
+        assert!(rx_a.try_recv().is_err(), "mode identique: aucun paquet");
+        assert!(rx_b.try_recv().is_err(), "mode identique: aucun paquet");
+    }
+
+    #[test]
+    fn select_players_resolves_name_self_and_unknown() {
+        let players = vec![
+            dummy_handle(1, "Alice", 0.0, 0.0),
+            dummy_handle(2, "Bob", 10.0, 0.0),
+        ];
+        let by_name = select_players(players.clone(), 2, (10.0, 0.0, 0.0), "Alice");
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].uuid, 1);
+
+        let myself = select_players(players.clone(), 2, (10.0, 0.0, 0.0), "@s");
+        assert_eq!(myself.len(), 1);
+        assert_eq!(myself[0].uuid, 2);
+
+        let unknown = select_players(players, 2, (10.0, 0.0, 0.0), "Zed");
+        assert!(unknown.is_empty(), "nom inconnu: aucune cible");
     }
 
     #[test]

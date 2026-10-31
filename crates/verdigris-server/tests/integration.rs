@@ -14,7 +14,7 @@ use verdigris_protocol::{
 };
 use verdigris_server::{
     ChunkStore, KeepAliveConfig, LoadOutcome, PlayerRegistry, REASON_CONFIG_NOT_VANILLA,
-    REASON_KEEP_ALIVE_TIMEOUT, REASON_LOGIN_INVALID_NAME, broadcast_gamemode_change,
+    REASON_KEEP_ALIVE_TIMEOUT, REASON_LOGIN_INVALID_NAME, apply_gamemode_change,
     broadcast_permission_change, player_joined_message, player_left_message, run, run_with_config,
     run_with_registry, run_with_store,
 };
@@ -2178,7 +2178,7 @@ async fn spectator_mode_hides_and_restores_entity_over_tcp() {
     let alice_uuid = offline_uuid("Alice");
     let bob_uuid = offline_uuid("Bob");
 
-    broadcast_gamemode_change(&registry, bob_uuid, 3);
+    apply_gamemode_change(&registry, bob_uuid, 3);
     read_gamemode_update(&mut alice, &mut buf_a).await;
     let (remove_id, remove_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
     assert_eq!(
@@ -2192,7 +2192,7 @@ async fn spectator_mode_hides_and_restores_entity_over_tcp() {
     );
     read_gamemode_update(&mut bob, &mut buf_b).await;
 
-    broadcast_gamemode_change(&registry, bob_uuid, 0);
+    apply_gamemode_change(&registry, bob_uuid, 0);
     read_gamemode_update(&mut alice, &mut buf_a).await;
     let bob_again = read_spawn_bundle(&mut alice, &mut buf_a).await;
     assert_eq!(
@@ -2201,7 +2201,7 @@ async fn spectator_mode_hides_and_restores_entity_over_tcp() {
     );
     read_gamemode_update(&mut bob, &mut buf_b).await;
 
-    broadcast_gamemode_change(&registry, alice_uuid, 3);
+    apply_gamemode_change(&registry, alice_uuid, 3);
     read_gamemode_update(&mut bob, &mut buf_b).await;
     let (remove_id, remove_body) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
     assert_eq!(
@@ -2211,7 +2211,7 @@ async fn spectator_mode_hides_and_restores_entity_over_tcp() {
     assert_eq!(parse_remove_entities(&remove_body), vec![alice_eid]);
     read_gamemode_update(&mut alice, &mut buf_a).await;
 
-    broadcast_gamemode_change(&registry, bob_uuid, 3);
+    apply_gamemode_change(&registry, bob_uuid, 3);
     read_gamemode_update(&mut bob, &mut buf_b).await;
     let alice_again = read_spawn_bundle(&mut bob, &mut buf_b).await;
     assert_eq!(
@@ -3108,6 +3108,109 @@ async fn two_players_in_play() -> (SocketAddr, TcpStream, Vec<u8>, TcpStream, Ve
     consume_empty_world(&mut bob, &mut buf_b).await;
 
     (addr, alice, buf_a, bob, buf_b)
+}
+
+fn compressed_command_frame(command: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_var_int(0x07, &mut body);
+    write_string(command, &mut body);
+    encode_compressed_frame(&body, CLIENT_THRESHOLD)
+}
+
+async fn read_until_gamemode_update(stream: &mut TcpStream, buf: &mut Vec<u8>) {
+    loop {
+        let (id, body) = read_one_compressed_frame(stream, buf).await;
+        if id == 0x47 && body[0] == 0x04 {
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn gamemode_command_packets_order_and_targets() {
+    let addr = spawn_server_with_permission(4).await;
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    consume_empty_world(&mut alice, &mut buf_a).await;
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_named(&mut bob, &mut buf_b, "Bob").await;
+    consume_empty_world(&mut bob, &mut buf_b).await;
+
+    alice
+        .write_all(&compressed_command_frame("gamemode survival"))
+        .await
+        .unwrap();
+    let abilities = read_skipping_until_id(&mut alice, &mut buf_a, 0x41).await;
+    assert_eq!(abilities[0], 0x00, "survie: capacités sans vol");
+    let (info_id, info_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(
+        info_id, 0x47,
+        "player_info_update suit directement les capacités"
+    );
+    assert_eq!(info_body[0], 0x04, "action UPDATE_GAME_MODE");
+    let (event_id, event_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(event_id, 0x27, "game_event suit le player_info_update");
+    assert_eq!(
+        event_body,
+        vec![0x03, 0x00, 0x00, 0x00, 0x00],
+        "event 3, survie 0.0"
+    );
+    let (chat_id, chat_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(chat_id, 0x7C, "message de succès en dernier");
+    assert!(contains_subslice(
+        &chat_body,
+        b"commands.gamemode.success.self"
+    ));
+    read_until_gamemode_update(&mut bob, &mut buf_b).await;
+
+    alice
+        .write_all(&compressed_command_frame("gamemode creative"))
+        .await
+        .unwrap();
+    let abilities = read_skipping_until_id(&mut alice, &mut buf_a, 0x41).await;
+    assert_eq!(abilities[0], 0x0D, "créatif: capacités de vol");
+    let (info_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(info_id, 0x47);
+    let (event_id, event_body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(event_id, 0x27);
+    assert_eq!(
+        event_body,
+        vec![0x03, 0x3f, 0x80, 0x00, 0x00],
+        "event 3, créatif 1.0"
+    );
+    let (chat_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(chat_id, 0x7C);
+
+    alice
+        .write_all(&compressed_command_frame("gamemode creative"))
+        .await
+        .unwrap();
+    while let Some((id, _)) =
+        try_read_compressed_frame(&mut alice, &mut buf_a, Duration::from_millis(200)).await
+    {
+        assert_ne!(id, 0x41, "mode déjà actif: aucune capacité renvoyée");
+        assert_ne!(id, 0x27, "mode déjà actif: aucun game_event");
+    }
+
+    alice
+        .write_all(&compressed_command_frame("gamemode survival Bob"))
+        .await
+        .unwrap();
+    let abilities = read_skipping_until_id(&mut bob, &mut buf_b, 0x41).await;
+    assert_eq!(abilities[0], 0x00, "Bob passe en survie");
+    let bob_feedback = read_skipping_until_id(&mut bob, &mut buf_b, 0x7C).await;
+    assert!(
+        contains_subslice(&bob_feedback, b"gameMode.changed"),
+        "Bob reçoit le message gameMode.changed"
+    );
+    let alice_feedback = read_skipping_until_id(&mut alice, &mut buf_a, 0x7C).await;
+    assert!(
+        contains_subslice(&alice_feedback, b"commands.gamemode.success.other"),
+        "Alice reçoit le succès pour autrui"
+    );
 }
 
 #[tokio::test]

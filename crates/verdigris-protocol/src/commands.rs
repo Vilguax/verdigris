@@ -1081,6 +1081,108 @@ mod tests {
         assert!(contains(&payload, &count));
     }
 
+    fn reencode_with_offsets(level: u8) -> (Vec<u8>, Vec<usize>, Vec<Node>, Vec<Option<usize>>) {
+        let nodes = full_tree();
+        let (remap, order) = bfs(&nodes, level);
+        let mut out = Vec::new();
+        write_var_int(order.len() as i32, &mut out);
+        let mut offsets = vec![0usize; nodes.len()];
+        for &index in &order {
+            offsets[index] = out.len();
+            encode_node(&nodes[index], &remap, &mut out);
+        }
+        write_var_int(0, &mut out);
+        (out, offsets, nodes, remap)
+    }
+
+    fn baked_node(nodes: &[Node], remap: &[Option<usize>], index: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_node(&nodes[index], remap, &mut out);
+        out
+    }
+
+    fn occurrences(payload: &[u8], needle: &[u8]) -> usize {
+        payload
+            .windows(needle.len())
+            .filter(|w| *w == needle)
+            .count()
+    }
+
+    #[test]
+    fn gamemode_nodes_exact_bytes_at_bfs_offsets() {
+        let (payload, offsets, nodes, remap) = reencode_with_offsets(4);
+        assert_eq!(
+            payload,
+            commands_payload(4),
+            "réencodage identique au payload"
+        );
+        assert_eq!(*payload.last().unwrap(), 0x00, "rootIndex = 0");
+        let (count, _) = read_var_int(&payload).unwrap().unwrap();
+        assert_eq!(count as usize, remap.iter().filter(|m| m.is_some()).count());
+
+        let lit = nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Literal && n.name == "gamemode")
+            .unwrap();
+        let arg = nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Argument && n.name == "gamemode")
+            .unwrap();
+        let tgt = nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Argument && n.name == "target")
+            .unwrap();
+
+        for &src in &[lit, arg, tgt] {
+            let baked = baked_node(&nodes, &remap, src);
+            let offset = offsets[src];
+            assert_eq!(
+                &payload[offset..offset + baked.len()],
+                &baked[..],
+                "octets du noeud à l'offset BFS attendu"
+            );
+            assert_eq!(
+                occurrences(&payload, &baked),
+                1,
+                "noeud unique dans le payload"
+            );
+        }
+
+        let lit_bytes = baked_node(&nodes, &remap, lit);
+        assert_eq!(
+            lit_bytes[0], 0x21,
+            "littéral gamemode: littéral + restreint"
+        );
+        let arg_bytes = baked_node(&nodes, &remap, arg);
+        assert_eq!(
+            arg_bytes[0], 0x06,
+            "argument gamemode: argument + exécutable"
+        );
+        assert_eq!(
+            *arg_bytes.last().unwrap(),
+            0x2a,
+            "parser gamemode 0x2a sans propriété"
+        );
+        let tgt_bytes = baked_node(&nodes, &remap, tgt);
+        assert_eq!(tgt_bytes[0], 0x06, "argument target: argument + exécutable");
+        assert_eq!(
+            &tgt_bytes[tgt_bytes.len() - 2..],
+            &[0x06, 0x02],
+            "parser entity 0x06 + propriété joueurs uniquement 0x02"
+        );
+
+        let root_children: Vec<usize> = nodes[0]
+            .children
+            .iter()
+            .filter(|&&c| remap[c].is_some())
+            .map(|&c| remap[c].unwrap())
+            .collect();
+        assert!(
+            root_children.contains(&remap[lit].unwrap()),
+            "le littéral gamemode figure dans les enfants de la racine"
+        );
+    }
+
     #[test]
     fn entity_event_permission_bytes() {
         assert_eq!(

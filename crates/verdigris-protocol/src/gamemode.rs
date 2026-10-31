@@ -35,6 +35,16 @@ impl GameMode {
         }
     }
 
+    pub fn from_game_type(value: i32) -> Option<GameMode> {
+        match value {
+            0 => Some(GameMode::Survival),
+            1 => Some(GameMode::Creative),
+            2 => Some(GameMode::Adventure),
+            3 => Some(GameMode::Spectator),
+            _ => None,
+        }
+    }
+
     pub fn abilities_flags(self) -> u8 {
         match self {
             GameMode::Creative => 0x0D,
@@ -95,6 +105,20 @@ mod tests {
         assert_eq!(GameMode::parse("foo"), None);
         assert_eq!(GameMode::parse(""), None);
         assert_eq!(GameMode::parse("Creative"), None);
+    }
+
+    #[test]
+    fn from_game_type_round_trips_known_values() {
+        for mode in [
+            GameMode::Survival,
+            GameMode::Creative,
+            GameMode::Adventure,
+            GameMode::Spectator,
+        ] {
+            assert_eq!(GameMode::from_game_type(mode.game_type()), Some(mode));
+        }
+        assert_eq!(GameMode::from_game_type(4), None);
+        assert_eq!(GameMode::from_game_type(-1), None);
     }
 
     #[test]

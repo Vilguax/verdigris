@@ -1157,6 +1157,26 @@ mod tests {
     use crate::varint::read_var_int;
 
     #[test]
+    fn game_event_gamemode_param_vectors() {
+        assert_eq!(
+            game_event_payload(3, 1.0),
+            vec![0x03, 0x3f, 0x80, 0x00, 0x00]
+        );
+        assert_eq!(
+            game_event_payload(3, 0.0),
+            vec![0x03, 0x00, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn player_abilities_creative_vector() {
+        assert_eq!(
+            player_abilities_payload(0x0D),
+            vec![0x0d, 0x3d, 0x4c, 0xcc, 0xcd, 0x3d, 0xcc, 0xcc, 0xcd]
+        );
+    }
+
+    #[test]
     fn packet_ids_match_report() {
         assert_eq!(packet_ids::clientbound::LOGIN, 0x32);
         assert_eq!(packet_ids::clientbound::PLAYER_POSITION, 0x49);
