@@ -1,6 +1,6 @@
 use crate::framing::{encode_compressed_frame, encode_frame};
 use crate::primitives::{write_f32, write_f64, write_i16, write_string, write_u16};
-use crate::varint::write_var_int;
+use crate::varint::{read_var_int, write_var_int};
 use crate::{MAX_PACKET_LEN, MAX_STRING_LEN};
 
 pub const MAX_OUTBOUND_PACKET_LEN: usize = MAX_PACKET_LEN;
@@ -138,6 +138,47 @@ pub fn remove_entities_payload(entity_ids: &[i32]) -> Vec<u8> {
         write_var_int(entity_id, &mut payload);
     }
     payload
+}
+
+fn entity_packet_len(buf: &[u8]) -> Option<usize> {
+    let (id, n0) = read_var_int(buf).ok()??;
+    let mut off = n0;
+    let (_entity_id, n1) = read_var_int(buf.get(off..)?).ok()??;
+    off += n1;
+    match id {
+        MOVE_ENTITY_POS_ID => {
+            let (_props, n) = read_var_int(buf.get(off..)?).ok()??;
+            off += n + 6;
+        }
+        MOVE_ENTITY_POS_ROT_ID => {
+            let (_props, n) = read_var_int(buf.get(off..)?).ok()??;
+            off += n + 6 + 2;
+        }
+        MOVE_ENTITY_ROT_ID => {
+            off += 1 + 2;
+        }
+        ROTATE_HEAD_ID => {
+            off += 1;
+        }
+        ENTITY_POSITION_SYNC_ID => {
+            let (_type, n) = read_var_int(buf.get(off..)?).ok()??;
+            off += n + 24 + 8 + 1;
+        }
+        _ => return None,
+    }
+    if off <= buf.len() { Some(off) } else { None }
+}
+
+pub fn frame_entity_pass(raw: &[u8], threshold: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut off = 0;
+    while off < raw.len() {
+        let len =
+            entity_packet_len(&raw[off..]).expect("les octets de passe sont toujours bien formés");
+        out.extend_from_slice(&encode_compressed_frame(&raw[off..off + len], threshold));
+        off += len;
+    }
+    out
 }
 
 pub fn set_entity_data_health_payload(entity_id: i32) -> Vec<u8> {
@@ -402,6 +443,37 @@ mod tests {
         expected.push(0x01);
 
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn frame_entity_pass_splits_move_and_head_into_two_frames() {
+        use crate::framing::decode_compressed_frame;
+        let mut raw = Vec::new();
+        move_entity_pos(42, 4096, 0, 0, true, &mut raw);
+        rotate_head(42, 0x80, &mut raw);
+        let framed = frame_entity_pass(&raw, 256);
+
+        let (first, consumed) = decode_compressed_frame(&framed, 256).unwrap().unwrap();
+        assert_eq!(
+            first,
+            vec![0x36, 0x2A, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+        let (second, consumed2) = decode_compressed_frame(&framed[consumed..], 256)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second, vec![0x55, 0x2A, 0x80]);
+        assert_eq!(consumed + consumed2, framed.len());
+    }
+
+    #[test]
+    fn frame_entity_pass_handles_position_sync() {
+        use crate::framing::decode_compressed_frame;
+        let mut raw = Vec::new();
+        entity_position_sync(7, 0.5, -60.0, 0.5, 90.0, -45.0, true, &mut raw);
+        let framed = frame_entity_pass(&raw, 256);
+        let (packet, consumed) = decode_compressed_frame(&framed, 256).unwrap().unwrap();
+        assert_eq!(packet, raw);
+        assert_eq!(consumed, framed.len());
     }
 
     #[test]

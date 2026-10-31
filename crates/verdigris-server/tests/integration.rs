@@ -1827,6 +1827,211 @@ async fn two_players_spawn_and_despawn_as_entities() {
     );
 }
 
+fn parse_entity_pos(body: &[u8]) -> (i32, i16, i16, i16) {
+    let (eid, used) = read_var_int(body).unwrap().unwrap();
+    let mut c = &body[used..];
+    let (_props, used) = read_var_int(c).unwrap().unwrap();
+    c = &c[used..];
+    let dx = i16::from_be_bytes([c[0], c[1]]);
+    let dy = i16::from_be_bytes([c[2], c[3]]);
+    let dz = i16::from_be_bytes([c[4], c[5]]);
+    (eid, dx, dy, dz)
+}
+
+fn parse_entity_pos_rot(body: &[u8]) -> (i32, i16, u8) {
+    let (eid, used) = read_var_int(body).unwrap().unwrap();
+    let mut c = &body[used..];
+    let (_props, used) = read_var_int(c).unwrap().unwrap();
+    c = &c[used..];
+    let dx = i16::from_be_bytes([c[0], c[1]]);
+    let yaw = c[6];
+    (eid, dx, yaw)
+}
+
+fn parse_entity_rot(body: &[u8]) -> (i32, u8) {
+    let (eid, used) = read_var_int(body).unwrap().unwrap();
+    let c = &body[used..];
+    (eid, c[1])
+}
+
+fn parse_rotate_head(body: &[u8]) -> (i32, u8) {
+    let (eid, used) = read_var_int(body).unwrap().unwrap();
+    (eid, body[used])
+}
+
+struct SpawnedEntity {
+    entity_id: i32,
+    x: f64,
+    y: f64,
+    z: f64,
+    pitch_byte: u8,
+    yaw_byte: u8,
+    head_byte: u8,
+}
+
+async fn read_spawn_bundle_full(client: &mut TcpStream, buf: &mut Vec<u8>) -> SpawnedEntity {
+    loop {
+        let (open_id, _) = read_one_compressed_frame(client, buf).await;
+        if open_id == 0x00 {
+            break;
+        }
+    }
+    let (add_id, add_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(add_id, 0x01, "puis add_entity 0x01");
+
+    let (entity_id, used) = read_var_int(&add_body).unwrap().unwrap();
+    let mut c = &add_body[used..];
+    c = &c[16..];
+    let (_type, used) = read_var_int(c).unwrap().unwrap();
+    c = &c[used..];
+    let (x, used) = read_f64(c).unwrap().unwrap();
+    c = &c[used..];
+    let (y, used) = read_f64(c).unwrap().unwrap();
+    c = &c[used..];
+    let (z, used) = read_f64(c).unwrap().unwrap();
+    c = &c[used..];
+    assert_eq!(c[0], 0x00, "octet de vitesse nul");
+    let pitch_byte = c[1];
+    let yaw_byte = c[2];
+    let head_byte = c[3];
+
+    let (data_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(data_id, 0x65, "puis set_entity_data 0x65");
+    let (close_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(close_id, 0x00, "le bundle se referme par un délimiteur");
+
+    SpawnedEntity {
+        entity_id,
+        x,
+        y,
+        z,
+        pitch_byte,
+        yaw_byte,
+        head_byte,
+    }
+}
+
+#[tokio::test]
+async fn observer_receives_movement_rotation_departure_and_return() {
+    let addr = spawn_server().await;
+
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    let _alice_id = consume_world_capturing_entity_id(&mut alice, &mut buf_a).await;
+    let (info_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(info_id, 0x47);
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_named(&mut bob, &mut buf_b, "Bob").await;
+    let bob_id = consume_world_capturing_entity_id(&mut bob, &mut buf_b).await;
+    let (info_id, _) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
+    assert_eq!(info_id, 0x47);
+    let (tab_id, _) = read_one_compressed_frame(&mut bob, &mut buf_b).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let (add_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(add_id, 0x47, "Alice reçoit l'ADD_PLAYER de Bob");
+    let (tab_id, _) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+    assert_eq!(tab_id, 0x7D);
+
+    let first = read_spawn_bundle_full(&mut alice, &mut buf_a).await;
+    assert_eq!(first.entity_id, bob_id);
+    assert_eq!((first.x, first.y, first.z), (0.5, -60.0, 0.5));
+
+    bob.write_all(&compressed_move_player_pos_frame(1.5, -60.0, 0.5, 0x01))
+        .await
+        .unwrap();
+    let dx = loop {
+        let (id, body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+        if id == 0x36 {
+            let (eid, dx, _, _) = parse_entity_pos(&body);
+            if eid == bob_id && dx != 0 {
+                break dx;
+            }
+        } else if id == 0x37 {
+            let (eid, dx, _) = parse_entity_pos_rot(&body);
+            if eid == bob_id && dx != 0 {
+                break dx;
+            }
+        }
+    };
+    assert_eq!(
+        dx, 4096,
+        "un déplacement de +1 bloc X donne un delta quantifié de 4096"
+    );
+
+    bob.write_all(&compressed_move_player_rot_frame(90.0, 0.0, 0x01))
+        .await
+        .unwrap();
+    let yaw_byte = loop {
+        let (id, body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+        if id == 0x39 {
+            let (eid, yaw) = parse_entity_rot(&body);
+            if eid == bob_id {
+                break yaw;
+            }
+        } else if id == 0x37 {
+            let (eid, _dx, yaw) = parse_entity_pos_rot(&body);
+            if eid == bob_id {
+                break yaw;
+            }
+        }
+    };
+    assert_eq!(yaw_byte, 0x40, "90° se quantifie en 0x40");
+    let head_byte = loop {
+        let (id, body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+        if id == 0x55 {
+            let (eid, head) = parse_rotate_head(&body);
+            if eid == bob_id {
+                break head;
+            }
+        }
+    };
+    assert_eq!(
+        head_byte, yaw_byte,
+        "la rotation de tête porte le même octet de lacet"
+    );
+
+    alice
+        .write_all(&compressed_move_player_pos_frame(140.5, -60.0, 0.5, 0x01))
+        .await
+        .unwrap();
+    let removed = loop {
+        let (id, body) = read_one_compressed_frame(&mut alice, &mut buf_a).await;
+        if id == 0x4E {
+            break parse_remove_entities(&body);
+        }
+    };
+    assert_eq!(
+        removed,
+        vec![bob_id],
+        "Alice s'éloigne: Bob sort de sa portée (Remove Entities)"
+    );
+
+    alice
+        .write_all(&compressed_move_player_pos_frame(0.5, -60.0, 0.5, 0x01))
+        .await
+        .unwrap();
+    let back = read_spawn_bundle_full(&mut alice, &mut buf_a).await;
+    assert_eq!(back.entity_id, bob_id, "Bob réapparaît comme entité");
+    assert_eq!(
+        (back.x, back.y, back.z),
+        (1.5, -60.0, 0.5),
+        "l'apparition utilise la position de base mémorisée de Bob (1.5 après son +1 bloc), \
+         jamais le spawn initial 0.5"
+    );
+    assert_eq!(
+        back.yaw_byte, 0x40,
+        "l'apparition porte l'angle de lacet de base mémorisé (90°)"
+    );
+    assert_eq!(back.head_byte, 0x40, "la tête de base suit le lacet");
+    assert_eq!(back.pitch_byte, 0x00, "tangage de base nul");
+}
+
 #[tokio::test]
 async fn placed_block_persists_across_restart() {
     let base = unique_world_dir();

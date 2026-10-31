@@ -36,7 +36,7 @@ use tracing_subscriber::EnvFilter;
 
 use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
-    Angle, COMPRESSION_THRESHOLD, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, Intent,
+    COMPRESSION_THRESHOLD, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, Intent,
     ListedPlayer, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus,
     PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID, Serverbound, State, StatusInfo,
     World, add_entity_payload, block_changed_ack_payload, block_update_payload,
@@ -86,6 +86,7 @@ pub const REASON_KEEP_ALIVE_TIMEOUT: &str = "keep alive délai dépassé";
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const FLUSH_INTERVAL: Duration = Duration::from_secs(30);
+const ENTITY_TICK_INTERVAL: Duration = Duration::from_millis(50);
 const LATENCY_BROADCAST_INTERVAL: Duration = Duration::from_secs(30);
 const GEN_METRICS_INTERVAL: Duration = Duration::from_secs(30);
 const PLAY_THRESHOLD: usize = COMPRESSION_THRESHOLD as usize;
@@ -220,9 +221,9 @@ fn spawn_bundle(spawn: &EntitySpawn) -> Vec<Arc<[u8]>> {
         spawn.x,
         spawn.y,
         spawn.z,
-        Angle::from_degrees(spawn.pitch as f64),
-        Angle::from_degrees(spawn.yaw as f64),
-        Angle::from_degrees(spawn.yaw as f64),
+        spawn.pitch_byte,
+        spawn.yaw_byte,
+        spawn.yaw_byte,
         0,
     );
     if let Some(frame) = frame_arc(play_cb::ADD_ENTITY, &add_entity) {
@@ -256,6 +257,25 @@ pub fn broadcast_gamemode_change(registry: &Arc<PlayerRegistry>, uuid: u128, mod
         &player_info_update_gamemode_payload(uuid, mode),
     ) {
         push_frame(&senders, &frame);
+    }
+}
+
+fn run_entity_tick(registry: &Arc<PlayerRegistry>, threshold: usize) {
+    for actions in registry.tick(threshold) {
+        if !actions.removed.is_empty()
+            && let Some(frame) = frame_arc(
+                play_cb::REMOVE_ENTITIES,
+                &remove_entities_payload(&actions.removed),
+            )
+        {
+            let _ = actions.sender.send(frame);
+        }
+        for spawn in &actions.entered {
+            push_bundle(&actions.sender, &spawn_bundle(spawn));
+        }
+        for frame in &actions.moved {
+            let _ = actions.sender.send(Arc::clone(frame));
+        }
     }
 }
 
@@ -515,6 +535,9 @@ where
     let mut gen_ticker = interval(GEN_METRICS_INTERVAL);
     gen_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     gen_ticker.tick().await;
+    let mut entity_ticker = interval(ENTITY_TICK_INTERVAL);
+    entity_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    entity_ticker.tick().await;
     tokio::pin!(shutdown);
 
     loop {
@@ -547,6 +570,9 @@ where
             }
             _ = gen_ticker.tick() => {
                 log_gen_metrics(gen_metrics.as_deref());
+            }
+            _ = entity_ticker.tick() => {
+                run_entity_tick(&players, PLAY_THRESHOLD);
             }
             _ = &mut shutdown => break,
         }
@@ -1198,7 +1224,6 @@ async fn enter_play(
 
     let uuid = offline_uuid(&player.name);
     let (tx, rx) = unbounded_channel::<Arc<[u8]>>();
-    let self_sender = tx.clone();
     let snapshot = registry.register(
         uuid,
         entity_id,
@@ -1208,6 +1233,7 @@ async fn enter_play(
         0,
         tx,
     );
+    registry.update_sent_chunks(uuid, &view.sent);
     let _guard = PlayGuard {
         registry: Arc::clone(registry),
         uuid,
@@ -1270,13 +1296,7 @@ async fn enter_play(
         }
     }
 
-    if let Some(exchange) = registry.activate(uuid) {
-        let own_bundle = spawn_bundle(&exchange.own);
-        for (observer, other) in &exchange.observers {
-            push_bundle(observer, &own_bundle);
-            push_bundle(&self_sender, &spawn_bundle(other));
-        }
-    }
+    registry.activate(uuid);
 
     let session = Session {
         view,
@@ -1587,6 +1607,9 @@ async fn handle_play_packet(
         Serverbound::PlayMovePlayerPos(m) => {
             session.view.apply_pos(&m);
             session.player.pos = (m.x, m.y, m.z);
+            session
+                .registry
+                .set_position(session.uuid, m.x, m.y, m.z, on_ground_flag(m.flags));
             session.view.log_position("déplacement");
             follow_player(stream, framing, state, session).await
         }
@@ -1600,6 +1623,9 @@ async fn handle_play_packet(
             session.player.yaw = m.yaw;
             session.player.pitch = m.pitch;
             publish_orientation(session);
+            session
+                .registry
+                .set_position(session.uuid, m.x, m.y, m.z, on_ground_flag(m.flags));
             session.view.log_position("déplacement et rotation");
             follow_player(stream, framing, state, session).await
         }
@@ -1612,11 +1638,17 @@ async fn handle_play_packet(
             session.player.yaw = m.yaw;
             session.player.pitch = m.pitch;
             publish_orientation(session);
+            session
+                .registry
+                .set_ground(session.uuid, on_ground_flag(m.flags));
             session.view.log_position("rotation");
             false
         }
         Serverbound::PlayMovePlayerStatus(m) => {
             session.view.apply_status(&m);
+            session
+                .registry
+                .set_ground(session.uuid, on_ground_flag(m.flags));
             session.view.log_position("statut au sol");
             false
         }
@@ -1825,6 +1857,10 @@ async fn emit_use_item(
     }
 }
 
+fn on_ground_flag(flags: u8) -> bool {
+    flags & 0x01 != 0
+}
+
 async fn follow_player(
     stream: &mut TcpStream,
     framing: &Framing,
@@ -1834,7 +1870,13 @@ async fn follow_player(
     if !session.view.chunk_changed() {
         return false;
     }
-    update_chunks(stream, framing, state, &mut session.view, session.world).await
+    let closed = update_chunks(stream, framing, state, &mut session.view, session.world).await;
+    if !closed {
+        session
+            .registry
+            .update_sent_chunks(session.uuid, &session.view.sent);
+    }
+    closed
 }
 
 async fn write_packet(
