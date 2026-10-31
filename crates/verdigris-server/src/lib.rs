@@ -36,22 +36,23 @@ use tracing_subscriber::EnvFilter;
 
 use verdigris_protocol::play::packet_ids::clientbound as play_cb;
 use verdigris_protocol::{
-    COMPRESSION_THRESHOLD, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, Intent,
-    ListedPlayer, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus,
-    PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID, Serverbound, State, StatusInfo,
-    World, add_entity_payload, block_changed_ack_payload, block_update_payload,
+    COMPRESSION_THRESHOLD, EncodeError, FlatGenerator, GAME_EVENT_WAIT_FOR_CHUNKS, HumanoidArm,
+    Intent, ListedPlayer, MAIN_HAND_LEFT, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
+    MovePlayerStatus, PLAYER_ENTITY_TYPE, PROTOCOL_VERSION, SET_COMPRESSION_ID, Serverbound, State,
+    StatusInfo, World, add_entity_payload, block_changed_ack_payload, block_update_payload,
     build_compressed_packet, build_packet, bundle_delimiter_payload, chunk_batch_finished_payload,
     chunk_batch_start_payload, chunk_coord, chunks_to_forget, chunks_to_load, client_has_core,
-    config_disconnect_payload, container_set_slot_payload, decode_compressed_frame, decode_frame,
-    decode_known_packs, decode_serverbound, forget_level_chunk_payload, game_event_payload,
-    keep_alive_payload, known_packs_payload, login_disconnect_payload, login_play_payload,
-    login_success_payload, network_data, offline_uuid, packet_ids, player_abilities_payload,
-    player_info_remove_payload, player_info_update_gamemode_payload,
-    player_info_update_init_payload, player_info_update_latency_payload, player_position_payload,
-    pong_payload, random_session_id, read_var_int, registry_data_payload, remove_entities_payload,
-    server_known_pack, set_chunk_cache_center_payload, set_compression_payload,
-    set_entity_data_health_payload, set_held_slot_payload, status_json, status_response_payload,
-    tab_list_payload, update_tags_payload, validate_name, write_chunk_payload,
+    config_disconnect_payload, container_set_slot_payload, decode_client_information,
+    decode_compressed_frame, decode_frame, decode_known_packs, decode_serverbound,
+    forget_level_chunk_payload, game_event_payload, keep_alive_payload, known_packs_payload,
+    login_disconnect_payload, login_play_payload, login_success_payload, network_data,
+    offline_uuid, packet_ids, player_abilities_payload, player_info_remove_payload,
+    player_info_update_gamemode_payload, player_info_update_init_payload,
+    player_info_update_latency_payload, player_position_payload, pong_payload, random_session_id,
+    read_var_int, registry_data_payload, remove_entities_payload, server_known_pack,
+    set_chunk_cache_center_payload, set_compression_payload, set_held_slot_payload, status_json,
+    status_response_payload, tab_list_payload, update_tags_payload, validate_name,
+    write_chunk_payload,
 };
 use verdigris_protocol::{GAME_VERSION, WORLD_MAX_Y, WORLD_MIN_Y, is_air, is_fluid};
 
@@ -229,10 +230,7 @@ fn spawn_bundle(spawn: &EntitySpawn) -> Vec<Arc<[u8]>> {
     if let Some(frame) = frame_arc(play_cb::ADD_ENTITY, &add_entity) {
         frames.push(frame);
     }
-    if let Some(frame) = frame_arc(
-        play_cb::SET_ENTITY_DATA,
-        &set_entity_data_health_payload(spawn.entity_id),
-    ) {
+    if let Some(frame) = frame_arc(play_cb::SET_ENTITY_DATA, &spawn.meta_payload) {
         frames.push(frame);
     }
     if let Some(frame) = frame_arc(play_cb::BUNDLE_DELIMITER, &bundle_delimiter_payload()) {
@@ -261,7 +259,8 @@ pub fn broadcast_gamemode_change(registry: &Arc<PlayerRegistry>, uuid: u128, mod
 }
 
 fn run_entity_tick(registry: &Arc<PlayerRegistry>, threshold: usize) {
-    for actions in registry.tick(threshold) {
+    let output = registry.tick(threshold);
+    for actions in &output.actions {
         if !actions.removed.is_empty()
             && let Some(frame) = frame_arc(
                 play_cb::REMOVE_ENTITIES,
@@ -275,6 +274,11 @@ fn run_entity_tick(registry: &Arc<PlayerRegistry>, threshold: usize) {
         }
         for frame in &actions.moved {
             let _ = actions.sender.send(Arc::clone(frame));
+        }
+    }
+    for update in &output.meta {
+        if let Some(frame) = frame_arc(play_cb::SET_ENTITY_DATA, &update.payload) {
+            push_frame(&update.targets, &frame);
         }
     }
 }
@@ -811,6 +815,7 @@ async fn dispatch(
         | Serverbound::PlaySetCarriedItem(_)
         | Serverbound::PlaySetCreativeModeSlot(_)
         | Serverbound::PlayPickItemFromBlock(_)
+        | Serverbound::PlayClientInformation(_)
         | Serverbound::PlayIgnored { .. } => {
             Next::Terminate(REASON_LOGIN_UNEXPECTED_PACKET.to_owned())
         }
@@ -863,10 +868,20 @@ fn finish_login(state: &mut State, awaiting_ack: &mut bool, body: &[u8]) -> Next
     }
 }
 
-fn is_ignorable_config(id: i32) -> bool {
-    id == packet_ids::serverbound::CLIENT_INFORMATION
-        || id == packet_ids::serverbound::CUSTOM_PAYLOAD
-        || id == packet_ids::serverbound::KEEP_ALIVE
+fn store_client_information(player: &mut PlayerState, rest: &[u8]) {
+    if let Ok(info) = decode_client_information(rest) {
+        player.skin = info.model_customisation;
+        player.main_hand_left = info.main_hand == MAIN_HAND_LEFT;
+        player.view_distance = info.view_distance;
+    }
+}
+
+fn arm_of(main_hand_left: bool) -> HumanoidArm {
+    if main_hand_left {
+        HumanoidArm::Left
+    } else {
+        HumanoidArm::Right
+    }
 }
 
 fn split_packet(body: &[u8]) -> Option<(i32, &[u8])> {
@@ -918,7 +933,7 @@ async fn run_configuration(
     state: &mut State,
     buf: &mut Vec<u8>,
     chunk: &mut [u8],
-    handoff: PlayHandoff<'_>,
+    mut handoff: PlayHandoff<'_>,
 ) {
     let threshold = match framing {
         Framing::Compressed(threshold) => *threshold,
@@ -951,7 +966,13 @@ async fn run_configuration(
                     disconnect(stream, framing, *state, REASON_CONFIG_UNEXPECTED).await;
                     return;
                 };
-                if is_ignorable_config(id) {
+                if id == packet_ids::serverbound::CLIENT_INFORMATION {
+                    store_client_information(&mut handoff.player, rest);
+                    continue;
+                }
+                if id == packet_ids::serverbound::CUSTOM_PAYLOAD
+                    || id == packet_ids::serverbound::KEEP_ALIVE
+                {
                     continue;
                 }
                 if id == packet_ids::serverbound::SELECT_KNOWN_PACKS {
@@ -1039,8 +1060,17 @@ async fn run_configuration(
     loop {
         match read_config_packet(stream, threshold, buf, chunk, ack_deadline).await {
             ReadOutcome::Packet(body) => {
-                let id = peek_id(&body);
-                if is_ignorable_config(id) {
+                let Some((id, rest)) = split_packet(&body) else {
+                    disconnect(stream, framing, *state, REASON_CONFIG_UNEXPECTED).await;
+                    return;
+                };
+                if id == packet_ids::serverbound::CLIENT_INFORMATION {
+                    store_client_information(&mut handoff.player, rest);
+                    continue;
+                }
+                if id == packet_ids::serverbound::CUSTOM_PAYLOAD
+                    || id == packet_ids::serverbound::KEEP_ALIVE
+                {
                     continue;
                 }
                 if id == packet_ids::serverbound::FINISH_CONFIGURATION {
@@ -1234,6 +1264,7 @@ async fn enter_play(
         tx,
     );
     registry.update_sent_chunks(uuid, &view.sent);
+    registry.set_appearance(uuid, player.skin, arm_of(player.main_hand_left));
     let _guard = PlayGuard {
         registry: Arc::clone(registry),
         uuid,
@@ -1702,14 +1733,32 @@ async fn handle_play_packet(
         Serverbound::PlayPlayerInput(input) => {
             session.player.sneaking = input.sneaking();
             publish_orientation(session);
+            session
+                .registry
+                .apply_crouch(session.uuid, input.sneaking(), session.player.flying);
             debug!(sneaking = session.player.sneaking, "entrée joueur");
             false
         }
         Serverbound::PlayPlayerCommand(command) => {
-            debug!(
-                entity = command.entity_id,
-                action = command.action,
-                "commande joueur ignorée"
+            match command.action {
+                1 => session.registry.apply_sprint(session.uuid, true),
+                2 => session.registry.apply_sprint(session.uuid, false),
+                _ => debug!(
+                    entity = command.entity_id,
+                    action = command.action,
+                    "commande joueur ignorée"
+                ),
+            }
+            false
+        }
+        Serverbound::PlayClientInformation(info) => {
+            session.player.skin = info.model_customisation;
+            session.player.main_hand_left = info.main_hand == MAIN_HAND_LEFT;
+            session.player.view_distance = info.view_distance;
+            session.registry.apply_appearance_change(
+                session.uuid,
+                info.model_customisation,
+                arm_of(info.main_hand == MAIN_HAND_LEFT),
             );
             false
         }
