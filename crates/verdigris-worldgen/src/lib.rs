@@ -4,6 +4,7 @@ pub mod aquifer;
 pub mod arith;
 pub mod biome;
 pub mod blended;
+pub mod carver;
 pub mod chunk_fill;
 pub mod data;
 pub mod df;
@@ -22,6 +23,8 @@ pub mod xoroshiro;
 pub use aquifer::{AquiferFunctions, AquiferMode, AquiferScratch, Filled};
 pub use biome::{BiomeNames, BiomeSource, BiomeTree, SearchState, biome_names};
 pub use blended::{BlendedParams, OldBlendedNoise};
+pub use carver::mask::CarveMask;
+pub use carver::{CarverData, carve_chunk_mask, carve_chunk_mask_into};
 pub use chunk_fill::{Category, ChunkTerrain, WorldGenerator, category_for};
 pub use data::{Aquifers, DataError, Router, WorldDensity, WorldgenData};
 pub use df::{

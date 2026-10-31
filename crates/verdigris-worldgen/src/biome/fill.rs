@@ -88,6 +88,12 @@ impl BiomeSource {
         out
     }
 
+    pub fn biome_at_point(&self, state: &mut SearchState, x: i32, y: i32, z: i32) -> u16 {
+        state.reset();
+        let target = self.target(x, y, z);
+        self.tree.search(state, &target)
+    }
+
     pub fn fill_chunk(&self, cx: i32, cz: i32, state: &mut SearchState, out: &mut [u16]) {
         state.reset();
         let x0 = 16i32.wrapping_mul(cx);
