@@ -45,6 +45,7 @@ pub mod packet_ids {
         pub const SET_ENTITY_DATA: i32 = 0x65;
         pub const SET_EQUIPMENT: i32 = 0x68;
         pub const SWING_ANIMATION: i32 = 0x7B;
+        pub const SYSTEM_CHAT: i32 = 0x7C;
     }
 
     pub mod serverbound {

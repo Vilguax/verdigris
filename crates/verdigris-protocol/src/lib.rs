@@ -20,6 +20,7 @@ pub mod playerlist;
 pub mod portal_tables;
 pub mod primitives;
 pub mod status;
+pub mod text;
 pub mod tracking;
 pub mod varint;
 pub mod view;
@@ -136,6 +137,10 @@ pub use primitives::{
 pub use status::{
     StatusInfo, encode_pong, encode_status_response, pong_payload, status_json,
     status_response_payload,
+};
+pub use text::{
+    Arg, ClickEvent, Component, Content, HoverEvent, SYSTEM_CHAT, Style, player_display_name,
+    root_tag_type, system_chat_payload, write_nbt,
 };
 pub use tracking::{
     EntitySnapshot, FORCE_SYNC_TICKS, MAX_TELEPORT_DELAY, POSITION_EPSILON_SQ, TrackedState,
