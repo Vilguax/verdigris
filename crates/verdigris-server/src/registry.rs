@@ -12,6 +12,16 @@ use verdigris_protocol::{
 pub enum Outbound {
     Frame(Arc<[u8]>),
     PlayerChat(Arc<[u8]>),
+    Control(ControlMsg),
+}
+
+#[derive(Debug, Clone)]
+pub enum ControlMsg {
+    SetGamemode {
+        mode: i32,
+        info_update: Arc<[u8]>,
+        feedback: Option<Arc<[u8]>>,
+    },
 }
 
 pub type OutboundSender = UnboundedSender<Outbound>;
@@ -184,9 +194,13 @@ pub struct Departure {
     pub remaining: Vec<OutboundSender>,
 }
 
-pub struct GamemodeChange {
-    pub senders: Vec<OutboundSender>,
-    pub actions: Vec<ObserverActions>,
+pub enum GamemodeDecision {
+    Unchanged,
+    Changed {
+        previous: i32,
+        mode: i32,
+        actions: Vec<ObserverActions>,
+    },
 }
 
 struct ReadyInfo {
@@ -568,12 +582,16 @@ impl PlayerRegistry {
         slots.values().map(|slot| slot.sender.clone()).collect()
     }
 
-    pub fn change_gamemode(&self, uuid: u128, game_mode: i32) -> GamemodeChange {
+    pub fn change_gamemode(&self, uuid: u128, game_mode: i32) -> GamemodeDecision {
         let mut slots = self.slots.lock().unwrap();
-        if let Some(slot) = slots.get_mut(&uuid) {
-            slot.game_mode = game_mode;
+        let previous = match slots.get(&uuid) {
+            Some(slot) => slot.game_mode,
+            None => return GamemodeDecision::Unchanged,
+        };
+        if previous == game_mode {
+            return GamemodeDecision::Unchanged;
         }
-        let senders: Vec<OutboundSender> = slots.values().map(|slot| slot.sender.clone()).collect();
+        slots.get_mut(&uuid).unwrap().game_mode = game_mode;
 
         let p = match slots.get(&uuid) {
             Some(slot) if slot.ready => ReadyInfo {
@@ -584,8 +602,9 @@ impl PlayerRegistry {
                 game_mode: slot.game_mode,
             },
             _ => {
-                return GamemodeChange {
-                    senders,
+                return GamemodeDecision::Changed {
+                    previous,
+                    mode: game_mode,
                     actions: Vec::new(),
                 };
             }
@@ -672,7 +691,11 @@ impl PlayerRegistry {
             }
         }
 
-        GamemodeChange { senders, actions }
+        GamemodeDecision::Changed {
+            previous,
+            mode: game_mode,
+            actions,
+        }
     }
 
     pub fn latency_broadcast(&self) -> (Vec<(u128, i32)>, Vec<OutboundSender>) {
@@ -886,6 +909,13 @@ mod tests {
         PlayerRegistry::new("Verdigris", 20)
     }
 
+    fn changed_actions(decision: GamemodeDecision) -> Vec<ObserverActions> {
+        match decision {
+            GamemodeDecision::Changed { actions, .. } => actions,
+            GamemodeDecision::Unchanged => panic!("changement de mode attendu"),
+        }
+    }
+
     fn full_square(center: (i32, i32)) -> HashSet<(i32, i32)> {
         let mut set = HashSet::new();
         for x in (center.0 - 8)..=(center.0 + 8) {
@@ -1029,9 +1059,8 @@ mod tests {
         reg.activate(3);
         reg.tick(256);
 
-        let change = reg.change_gamemode(2, 3);
-        let bob_removed: Vec<i32> = change
-            .actions
+        let actions = changed_actions(reg.change_gamemode(2, 3));
+        let bob_removed: Vec<i32> = actions
             .iter()
             .flat_map(|a| a.removed.iter().copied())
             .collect();
@@ -1041,8 +1070,7 @@ mod tests {
             "Bob devenu spectateur disparaît des observateurs non-spectateurs"
         );
         assert!(
-            change
-                .actions
+            actions
                 .iter()
                 .all(|a| a.entered.iter().all(|e| e.entity_id != 11)),
             "Bob ne réapparaît chez personne en entrant spectateur"
@@ -1060,6 +1088,30 @@ mod tests {
     }
 
     #[test]
+    fn change_gamemode_same_mode_is_unchanged_and_different_is_changed() {
+        let reg = registry();
+        let (tx, _rx) = unbounded_channel();
+        reg.register(1, 10, (0.5, -60.0, 0.5), "Alice".to_owned(), 1, 0, tx);
+        reg.activate(1);
+        assert!(matches!(
+            reg.change_gamemode(1, 1),
+            GamemodeDecision::Unchanged
+        ));
+        assert!(matches!(
+            reg.change_gamemode(1, 0),
+            GamemodeDecision::Changed {
+                previous: 1,
+                mode: 0,
+                ..
+            }
+        ));
+        assert!(
+            matches!(reg.change_gamemode(99, 3), GamemodeDecision::Unchanged),
+            "un joueur absent ne décide rien"
+        );
+    }
+
+    #[test]
     fn change_gamemode_back_to_survival_respawns_to_observers() {
         let reg = registry();
         let (tx_a, _rx_a) = unbounded_channel();
@@ -1072,10 +1124,9 @@ mod tests {
         reg.activate(2);
         reg.tick(256);
 
-        reg.change_gamemode(2, 3);
-        let change = reg.change_gamemode(2, 1);
-        let spawned: Vec<i32> = change
-            .actions
+        let _ = reg.change_gamemode(2, 3);
+        let actions = changed_actions(reg.change_gamemode(2, 1));
+        let spawned: Vec<i32> = actions
             .iter()
             .flat_map(|a| a.entered.iter().map(|e| e.entity_id))
             .collect();
@@ -1085,7 +1136,7 @@ mod tests {
             "le retour en survie réapparaît chez Alice"
         );
         assert!(
-            change.actions.iter().all(|a| a.removed.is_empty()),
+            actions.iter().all(|a| a.removed.is_empty()),
             "aucun retrait au retour en survie"
         );
     }
@@ -1103,8 +1154,8 @@ mod tests {
         reg.activate(2);
         reg.tick(256);
 
-        reg.change_gamemode(1, 3);
-        reg.change_gamemode(2, 3);
+        let _ = reg.change_gamemode(1, 3);
+        let _ = reg.change_gamemode(2, 3);
 
         let slots = reg.slots.lock().unwrap();
         assert!(
