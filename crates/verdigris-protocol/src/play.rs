@@ -43,6 +43,8 @@ pub mod packet_ids {
         pub const ADD_ENTITY: i32 = 0x01;
         pub const REMOVE_ENTITIES: i32 = 0x4E;
         pub const SET_ENTITY_DATA: i32 = 0x65;
+        pub const SET_EQUIPMENT: i32 = 0x68;
+        pub const SWING_ANIMATION: i32 = 0x7B;
     }
 
     pub mod serverbound {
@@ -64,8 +66,12 @@ pub mod packet_ids {
         pub const SET_CREATIVE_MODE_SLOT: i32 = 0x39;
         pub const PICK_ITEM_FROM_BLOCK: i32 = 0x24;
         pub const CLIENT_INFORMATION: i32 = 0x0E;
+        pub const PUNCH: i32 = 0x2E;
     }
 }
+
+pub const SWING_WHACK: i32 = 1;
+pub const SWING_DURATION: i32 = 6;
 
 pub const AIR_STATE: u16 = 0;
 
@@ -776,6 +782,18 @@ pub fn decode_pick_item_from_block(body: &[u8]) -> Result<PickItemFromBlock, Pro
     Ok(PickItemFromBlock { pos, include_data })
 }
 
+pub fn write_item_stack_no_components(stack: ItemStack, out: &mut Vec<u8>) {
+    match stack {
+        ItemStack::Item { count, item } if count > 0 => {
+            write_var_int(count, out);
+            write_var_int(item, out);
+            write_var_int(0, out);
+            write_var_int(0, out);
+        }
+        _ => write_var_int(0, out),
+    }
+}
+
 pub fn container_set_slot_payload(
     window_id: i32,
     state_id: i32,
@@ -786,16 +804,43 @@ pub fn container_set_slot_payload(
     write_var_int(window_id, &mut payload);
     write_var_int(state_id, &mut payload);
     crate::primitives::write_u16(slot as u16, &mut payload);
-    match stack {
-        ItemStack::Item { count, item } if count > 0 => {
-            write_var_int(count, &mut payload);
-            write_var_int(item, &mut payload);
-            write_var_int(0, &mut payload);
-            write_var_int(0, &mut payload);
-        }
-        _ => write_var_int(0, &mut payload),
+    write_item_stack_no_components(stack, &mut payload);
+    payload
+}
+
+pub fn swing_animation_payload(entity_id: i32, hand: i32, anim: i32, duration: i32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_var_int(entity_id, &mut payload);
+    write_var_int(hand, &mut payload);
+    write_var_int(anim, &mut payload);
+    write_var_int(duration, &mut payload);
+    payload
+}
+
+pub fn set_equipment_payload(entity_id: i32, entries: &[(i8, ItemStack)]) -> Vec<u8> {
+    debug_assert!(
+        !entries.is_empty(),
+        "set_equipment ne doit jamais etre vide"
+    );
+    let mut payload = Vec::new();
+    write_var_int(entity_id, &mut payload);
+    for (index, &(slot, stack)) in entries.iter().enumerate() {
+        let marker = if index + 1 == entries.len() {
+            slot as u8
+        } else {
+            (slot as u8) | 0x80
+        };
+        payload.push(marker);
+        write_item_stack_no_components(stack, &mut payload);
     }
     payload
+}
+
+pub fn decode_punch(body: &[u8]) -> Result<(), ProtocolError> {
+    if !body.is_empty() {
+        return Err(ProtocolError::TrailingBytes);
+    }
+    Ok(())
 }
 
 pub fn set_held_slot_payload(slot: i32) -> Vec<u8> {
@@ -856,6 +901,9 @@ mod tests {
         assert_eq!(packet_ids::clientbound::ADD_ENTITY, 0x01);
         assert_eq!(packet_ids::clientbound::REMOVE_ENTITIES, 0x4E);
         assert_eq!(packet_ids::clientbound::SET_ENTITY_DATA, 0x65);
+        assert_eq!(packet_ids::clientbound::SET_EQUIPMENT, 0x68);
+        assert_eq!(packet_ids::clientbound::SWING_ANIMATION, 0x7B);
+        assert_eq!(packet_ids::serverbound::PUNCH, 0x2E);
     }
 
     #[test]
@@ -1934,6 +1982,49 @@ mod tests {
                 flags: 0x02,
             }
         );
+    }
+
+    #[test]
+    fn swing_animation_payload_exact_bytes() {
+        let payload = swing_animation_payload(7, 0, SWING_WHACK, SWING_DURATION);
+        assert_eq!(payload, vec![0x07, 0x00, 0x01, 0x06]);
+    }
+
+    #[test]
+    fn set_equipment_single_entry_bytes() {
+        let payload = set_equipment_payload(7, &[(0, ItemStack::Item { count: 1, item: 55 })]);
+        let (entity_id, consumed) = read_var_int(&payload).unwrap().unwrap();
+        assert_eq!(entity_id, 7);
+        assert_eq!(&payload[consumed..], &[0x00, 0x01, 0x37, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn set_equipment_two_entries_set_continuation_bit() {
+        let payload = set_equipment_payload(
+            1,
+            &[
+                (0, ItemStack::Item { count: 1, item: 55 }),
+                (1, ItemStack::Item { count: 2, item: 54 }),
+            ],
+        );
+        let (_entity_id, consumed) = read_var_int(&payload).unwrap().unwrap();
+        assert_eq!(
+            &payload[consumed..],
+            &[0x80, 0x01, 0x37, 0x00, 0x00, 0x01, 0x02, 0x36, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn set_equipment_empty_stack_is_zero() {
+        let payload = set_equipment_payload(3, &[(0, ItemStack::Empty)]);
+        let (_entity_id, consumed) = read_var_int(&payload).unwrap().unwrap();
+        assert_eq!(&payload[consumed..], &[0x00, 0x00]);
+    }
+
+    #[test]
+    fn decode_punch_requires_empty_body() {
+        assert_eq!(decode_punch(&[]), Ok(()));
+        assert_eq!(decode_punch(&[0x00]), Err(ProtocolError::TrailingBytes));
     }
 
     #[test]
