@@ -459,7 +459,33 @@ def blocks_doc(generated, static, server_jar):
             "item_ids": dict(sorted(item_ids.items(), key=lambda kv: kv[1])), "item_props": item_props}
 
 
+PHYSICS_FLAGS = [
+    "air", "liquid", "legacy_solid", "replaceable", "solid_render", "can_occlude", "has_collision", "has_shape",
+    "full_collision_block", "ignited_by_lava", "randomly_ticking", "large_collision", "propagates_skylight_down",
+    "shape_for_light_occlusion", "block_entity", "requires_correct_tool", "signal_source", "offset_function",
+]
+PHYSICS_FACES = ["sturdy_full", "sturdy_center", "sturdy_rigid", "collision_face_full", "collision_face_nonempty",
+                 "occlusion_face_full"]
+PHYSICS_COLUMNS = ["flags", "faces", "fluid", "fluid_amount", "light_emission", "light_dampening", "destroy_speed",
+                   "explosion_resistance", "friction", "speed_factor", "jump_factor", "collision_box"]
+
+
+def physics_doc(probe, server_jar, state_count):
+    raw = json.loads(Path(probe).read_text(encoding="utf-8"))
+    if len(raw["states"]) != state_count:
+        raise SystemExit(f"sonde physique: {len(raw['states'])} etats, blocks.json en a {state_count}")
+    return {"game_version": GAME_VERSION, "server_jar_sha1": hashlib.sha1(Path(server_jar).read_bytes()).hexdigest(),
+            "directions": ["down", "up", "north", "south", "west", "east"], "flags": PHYSICS_FLAGS,
+            "faces": PHYSICS_FACES, "columns": PHYSICS_COLUMNS, "fluids": raw["fluids"], "states": raw["states"]}
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        raise SystemExit("usage: datagen.py <dossier generated> <server.jar> <sortie.json>")
-    main(*sys.argv[1:])
+    if len(sys.argv) not in (4, 5):
+        raise SystemExit("usage: datagen.py <dossier generated> <server.jar> <sortie.json> [sonde physique.json]")
+    main(*sys.argv[1:4])
+    if len(sys.argv) == 5:
+        target = Path(sys.argv[3]).parent
+        count = json.loads((target / "blocks.json").read_text(encoding="utf-8"))["state_count"]
+        physics = physics_doc(sys.argv[4], sys.argv[2], count)
+        (target / "physics.json").write_text(json.dumps(physics, separators=(",", ":")) + NEWLINE, encoding="utf-8")
+        print(f"{target / 'physics.json'}: {len(physics['states'])} etats")
