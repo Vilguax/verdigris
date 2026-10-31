@@ -102,6 +102,10 @@ def main(generated, server_jar, out):
     worldgen_out = Path(out).parent / "worldgen.json"
     worldgen = worldgen_doc(data / "worldgen", server_jar, generated / "reports")
     worldgen_out.write_text(json.dumps(worldgen, separators=(",", ":"), ensure_ascii=False) + "\n", encoding="utf-8")
+    gameplay_out = Path(out).parent / "gameplay.json"
+    gameplay = gameplay_doc(generated, server_jar)
+    gameplay_out.write_text(json.dumps(gameplay, separators=(",", ":"), ensure_ascii=False) + NEWLINE, encoding="utf-8")
+    print(f"{gameplay_out}: {len(gameplay['damage_type'])} types de degats, {len(gameplay['food'])} aliments")
     features_out = Path(out).parent / "features.json"
     features = features_doc(data / "worldgen", server_jar)
     features_out.write_text(json.dumps(features, separators=(",", ":"), ensure_ascii=False) + "\n", encoding="utf-8")
@@ -114,6 +118,27 @@ def main(generated, server_jar, out):
 
 
 WORLDGEN_SETTINGS = ["overworld"]
+
+
+NEWLINE = chr(10)
+
+
+def gameplay_doc(generated, server_jar):
+    data = Path(generated) / "data" / "minecraft"
+    damage = {"minecraft:" + p.stem: json.loads(p.read_text(encoding="utf-8"))
+              for p in sorted((data / "damage_type").glob("*.json"))}
+    tags = {"minecraft:" + p.relative_to(data / "tags" / "damage_type").with_suffix("").as_posix():
+            json.loads(p.read_text(encoding="utf-8"))["values"]
+            for p in sorted((data / "tags" / "damage_type").rglob("*.json"))}
+    components = Path(generated) / "reports" / "minecraft" / "components" / "item"
+    food = {}
+    for p in sorted(components.glob("*.json")):
+        body = json.loads(p.read_text(encoding="utf-8"))["components"]
+        if "minecraft:food" in body:
+            food["minecraft:" + p.stem] = {k: body[k] for k in ("minecraft:food", "minecraft:consumable",
+                                                               "minecraft:use_remainder") if k in body}
+    return {"game_version": GAME_VERSION, "server_jar_sha1": hashlib.sha1(Path(server_jar).read_bytes()).hexdigest(),
+            "damage_type": damage, "damage_type_tags": tags, "food": food}
 
 
 def features_doc(worldgen, server_jar):
