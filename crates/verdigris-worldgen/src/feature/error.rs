@@ -10,6 +10,8 @@ pub enum FeatureError {
     UnknownState(String),
     Cycle(String),
     Region(String),
+    NotYetImplemented(String),
+    DepthLimit(String),
 }
 
 impl fmt::Display for FeatureError {
@@ -25,6 +27,8 @@ impl fmt::Display for FeatureError {
             Self::UnknownState(s) => write!(f, "unknown block state: {s}"),
             Self::Cycle(s) => write!(f, "cycle in feature ordering: {s}"),
             Self::Region(s) => write!(f, "region access error: {s}"),
+            Self::NotYetImplemented(s) => write!(f, "feature not yet implemented: {s}"),
+            Self::DepthLimit(s) => write!(f, "recursion depth limit exceeded: {s}"),
         }
     }
 }

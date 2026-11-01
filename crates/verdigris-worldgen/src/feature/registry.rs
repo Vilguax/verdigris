@@ -91,6 +91,59 @@ pub const COMPOSITION_TYPES: &[&str] = &[
     "random_boolean_selector",
 ];
 
+pub const FEATURE_LEAF_TYPES: &[&str] = &[
+    "bamboo",
+    "block_blob",
+    "block_column",
+    "block_pile",
+    "blue_ice",
+    "bonus_chest",
+    "chorus_plant",
+    "coral_claw",
+    "coral_tree",
+    "delta_feature",
+    "disk",
+    "end_gateway",
+    "end_island",
+    "end_platform",
+    "end_podium",
+    "end_spike",
+    "fallen_tree",
+    "fossil",
+    "freeze_top_layer",
+    "geode",
+    "huge_brown_mushroom",
+    "huge_fungus",
+    "huge_red_mushroom",
+    "iceberg",
+    "lake",
+    "large_dripstone",
+    "monster_room",
+    "multiface_growth",
+    "netherrack_replace_blobs",
+    "ore",
+    "random_neighbor_spread",
+    "root_system",
+    "scattered_ore",
+    "sculk_patch",
+    "simple_block",
+    "single_block_pillar",
+    "speleothem",
+    "speleothem_cluster",
+    "spike",
+    "spring_feature",
+    "stepped_column_cluster",
+    "template",
+    "tree",
+    "underwater_magma",
+    "vegetation_patch",
+    "vines",
+    "void_start_platform",
+    "waterlogged_vegetation_patch",
+];
+
+const MAX_EXTRACT_DEPTH: usize = 64;
+
 #[derive(Clone, Debug)]
 pub enum PlacedRef {
     Named(String),
@@ -150,6 +203,7 @@ pub struct FeatureRegistry {
     pub palette: StatePalette,
     pub placement_types_seen: BTreeSet<String>,
     pub provider_types_seen: BTreeSet<String>,
+    pub feature_types_seen: BTreeSet<String>,
 }
 
 impl FeatureRegistry {
@@ -184,8 +238,31 @@ impl FeatureRegistry {
             }
         }
 
+        reg.extract_states_rec(root, 0);
         reg.validate_references()?;
         Ok(reg)
+    }
+
+    fn extract_states_rec(&mut self, v: &Value, depth: usize) {
+        if depth >= MAX_EXTRACT_DEPTH {
+            return;
+        }
+        match v {
+            Value::Object(o) => {
+                if o.contains_key("Name") || o.contains_key("id") {
+                    let _ = self.palette.intern_state(v);
+                }
+                for val in o.values() {
+                    self.extract_states_rec(val, depth + 1);
+                }
+            }
+            Value::Array(a) => {
+                for e in a {
+                    self.extract_states_rec(e, depth + 1);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn parse_feature(&mut self, v: &Value) -> Result<ConfiguredFeature, FeatureError> {
@@ -197,6 +274,7 @@ impl FeatureRegistry {
             .and_then(Value::as_str)
             .map(strip_ns)
             .ok_or_else(|| FeatureError::MissingField("feature.type".to_string()))?;
+        self.feature_types_seen.insert(ty.to_string());
         match ty {
             "no_op" => Ok(ConfiguredFeature::NoOp),
             "sequence" => Ok(ConfiguredFeature::Sequence(
@@ -274,9 +352,13 @@ impl FeatureRegistry {
                 }
                 Ok(ConfiguredFeature::RandomSelector { default, entries })
             }
-            other => Ok(ConfiguredFeature::Leaf {
+            other if FEATURE_LEAF_TYPES.contains(&other) => Ok(ConfiguredFeature::Leaf {
                 ty: other.to_string(),
                 config: v.clone(),
+            }),
+            other => Err(FeatureError::UnknownType {
+                namespace: "feature".to_string(),
+                name: other.to_string(),
             }),
         }
     }

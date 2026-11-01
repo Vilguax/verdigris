@@ -631,20 +631,127 @@ précompilés une fois (`Decoration::build`), pas reparsés par position.
   non confrontée ; marquée à revérifier.
 - `trapezoid` (hauteur/entier) : pas de court-circuit `plateau ≥ étendue` ; min=max=0
   consomme 2 tirages et vaut 0 (§11.1, tranché par le plan, CORR 3).
-- Filtre `biome` du moteur : conservé comme laisser-passer au niveau du modificateur ;
-  l'activation par biome candidat est appliquée au niveau de la boucle d'étape
-  (`decorate_chunk` prend l'ensemble des biomes candidats des 9 chunks). Comme aucune
-  feuille ne pose, l'absence de filtrage fin par position n'a pas d'effet visible.
-- `count_on_every_layer`, `noise_threshold_count`, `noise_based_count`,
-  `environment_scan`, `surface_*_filter`, `randomly_selected`, `cuboid`,
-  `fixed_placement`, `carving_mask` : chargés et validés (§r) mais exécutés en
-  laisser-passer sans tirage (approximation) ; à implémenter avec leur aléa propre.
+- Filtre `biome` du moteur : désormais actif, applique le zoom flou par position (voir
+  « Agrégation des biomes et zoom flou » ci-dessous) ; l'activation par étape utilise
+  l'ensemble agrégé des 9 chunks que `decorate_chunk` calcule lui-même.
 - Empaquetage des faces de `physics.json` : bit `(index_face · 6 + index_direction)` ;
   convention retenue faute de vecteur de contrôle, à confronter si un prédicat de face
   diverge.
-- `would_survive`, `matching_fluids`, `solid`, `has_sturdy_face` : prédicats présents,
-  évaluation fine reportée (laisser-passer après lecture de la région) ; `all_of`/
-  `any_of`/`not`/`true`/`inside_world_bounds` exacts.
-- Extraction d'états §s : au chargement, seuls les états des fournisseurs de 1er niveau
-  sont internés dans la palette (non bloquant) ; l'extraction récursive intégrale des
-  configs de feuilles brutes est reportée (les feuilles ne posent pas).
+
+## Complément phase 1b (socle features) — modificateurs, prédicats, types
+
+### Modificateurs §5 (plus de laisser-passer)
+Tous les modificateurs des données overworld 26.3 sont exécutés en propre, dans l'ordre
+de parcours en profondeur (le modificateur k produit une position, qui traverse tous les
+modificateurs suivants avant la suivante) :
+- `count`, `rarity_filter`, `random_chance`, `in_square`, `height_range`, `heightmap`,
+  `offset`, `biome`, `block_predicate_filter` : inchangés (tirages déjà validés §11.2).
+- `count_on_every_layer` (§5.2) : re-tirage du fournisseur `count` à CHAQUE test de
+  boucle `i < count.sample(R)` (quirk Java), `nextInt(16)` x puis z par item, position
+  verticale par `find_on_ground` (balayage descendant depuis `OCEAN_FLOOR_WG`, premier
+  creux air/remplaçable au-dessus d'un bloc `legacy_solid`, (layer+1)-ème occurrence) ;
+  arrêt quand une couche ne pose rien. Implémenté MÊME absent des placed features
+  overworld (exigence §5). [INCERTAIN] : `find_on_ground` reconstruit de la prose, non
+  confronté à vanilla (pas d'oracle features ici).
+- `noise_threshold_count` (§5.3) : `G = Simplex(graine 2345).value(x/200, z/200)` (bruit
+  d'info biome, réutilisé de `material::special`), `count = G < noise_level ? below : above`,
+  `count` copies à la même position, aucun tirage `R`.
+- `noise_based_count` (§5.4) : `G = Simplex(2345).value(x/noise_factor, z/noise_factor)`,
+  `count = ceil((G + noise_offset) · ratio)`, borné ≥ 0, aucun tirage `R`. [INCERTAIN]
+  `G` est en `f32` (décision `material`), élargi en `f64` ; non confronté à vanilla.
+- `surface_relative_threshold_filter` (§5.6) : `y ∈ [surface+min, surface+max]` en `i64`,
+  `min` défaut `i32::MIN`, `max` défaut `i32::MAX`, aucun tirage.
+- `surface_water_depth_filter` (§5.7) : `WORLD_SURFACE_WG − OCEAN_FLOOR_WG ≤ max_water_depth`.
+- `environment_scan` (§5.5) : balayage dans `direction_of_search` jusqu'à `max_steps`,
+  émet la première position où `target_condition` est vraie ; s'arrête hors monde ou dès
+  que `allowed_search_condition` devient fausse. Aucun tirage.
+- `randomly_selected` (§5.x) : `pick = nextInt(len(placements))` puis applique le
+  modificateur choisi, qui enchaîne sur la queue des modificateurs. [INCERTAIN] le tirage
+  (`nextInt(n)` uniforme) et l'absence de pondération sont reconstruits de la prose §3.3.
+- `fixed_placement` (§5.18) : émet chaque position absolue configurée (filtrage au chunk
+  délégué au rayon d'écriture). Implémenté MÊME absent des placed features overworld
+  (exigence §5). [INCERTAIN] filtrage chunk non confronté.
+- `cuboid` (§5.17, présent) : tire `xz_size` puis `y_size`, parcourt le pavé centré,
+  émet arêtes/intérieur selon `include_edges`/`include_interior`. [INCERTAIN] ordre des
+  tirages et géométrie reconstruits de la prose, non confrontés.
+- `carving_mask` : ABSENT des données overworld 26.3. Non exécuté ; toute occurrence
+  future provoque une erreur de chargement propre (`UnknownType`) plutôt qu'un bras par
+  défaut (plan T3.2).
+Aucune allocation par position : parcours par `split_first` sur une tranche de
+modificateurs (pas de `Vec` intermédiaire), tampon `placed` unique réutilisé entre chunks.
+
+### Prédicats §7 (plus de bras `=> true`)
+`BlockPredicate` est compilé en ensembles d'états précalculés (`matching_blocks` et
+`matching_block_tag` → plages `[first_state, first_state+state_count)` via `blocks.json`,
+tags résolus une fois à la construction). L'évaluation lit l'état `u16` renvoyé par la
+région (identifiant d'état global) et consulte `physics.json` : `solid` →
+`legacy_solid`, `replaceable`, `has_sturdy_face(dir)` → `sturdy_full`, `matching_fluids`
+→ nom du fluide via le registre `network.json`, `inside_world_bounds` → `y ∈ [−64, 320)`.
+`offset` par prédicat (triplet, défaut `[0,0,0]`) appliqué à la position lue.
+`all_of`/`any_of` court-circuitent dans l'ordre ; `not`/`true` exacts ; `unobstructed`
+et `volume_match` → toujours vrais pendant la génération (décision explicite, documentée,
+pas un laisser-passer silencieux). Récursion bornée à 64 (erreur `DepthLimit` au-delà).
+[INCERTAIN] :
+- `would_survive` : approximation « bloc dessous `legacy_solid` » ; la table §8.5 (dont
+  `small_dripleaf`) n'est pas reconstruite faute de spec, non confronté à vanilla.
+- `solid` = `legacy_solid` (§8.3 « solide historique ») : convention, à confronter si un
+  prédicat `solid` diverge.
+- `volume_match` traité comme `unobstructed` (vrai en génération) : 1 occurrence, non
+  confronté.
+
+### Types de features (§9, H1)
+Les 55 types de features atteignables dans `features.json` (nommés + en ligne) sont
+transcrits : 7 compositions implémentées (`no_op`/`sequence`/`overlay`/les 4 sélecteurs)
+et 48 features posant des blocs (`FEATURE_LEAF_TYPES`). Un type de feature absent de ces
+deux listes = erreur de chargement propre (`UnknownType`), plus de feuille brute
+silencieuse. Les features posant des blocs sont RECONNUES au chargement (config conservée,
+palette alimentée) mais compilées en `CompiledFeature::Unimplemented` : leur exécution ne
+pose rien et incrémente `DecorationContext::unimplemented_hits` (observable, pas un faux
+« connu »). `decorate_chunk` traverse malgré tout les 171 placed features pour exercer
+l'ordre global et les tirages `R` ; il ne lève PAS `NotYetImplemented` (sinon la première
+feuille avorterait la traversée, qui est le cœur de la phase 1b). La classification
+explicite vit dans le registre (`COMPOSITION_TYPES`/`FEATURE_LEAF_TYPES`).
+
+### Extraction récursive des états (§s, T4)
+`FeatureRegistry::extract_states_rec` parcourt tout le JSON (bornée à 64) et interne tout
+objet `{Name|id, Properties?}` dans la palette (fluid/barrier/ground_state/state/data et
+fournisseurs imbriqués compris), erreurs ignorées (best-effort, non bloquant). Les états
+en chaîne nue hors fournisseurs ne sont pas captés (reporté ; les feuilles ne posent pas).
+
+### Agrégation des biomes et zoom flou (T5, critère figé)
+`decorate_chunk(region, ctx, level_seed, cx, cz)` n'a PLUS de paramètre `candidate_biomes`.
+Il agrège lui-même, via le trait `Region`, les biomes stockés des 9 chunks (`stored_biome`
+sur chaque cellule 4×4 horizontale × 96 cellules verticales, `qy ∈ [-16, 80)`), dédoublonnés
+dans un `BTreeSet` (spec 09 §2.3 : seulement les biomes présents dans les cellules). Le trait
+`Region` gagne un `stored_biome(cell_x, cell_y, cell_z)` à impl par défaut
+(`read_biome(cell<<2, …)`), donc aucun impl existant ne casse.
+
+`is_active` ne garde un feature que si un biome candidat ∈ son ensemble autorisé ; biome
+non résolu → faux (T7.1). Le modificateur `biome` (§5.10) applique le ZOOM FLOU (spec 06
+§1.8) : `feature/zoom.rs::biome_at_block` reproduit bit à bit l'algorithme oracle-validé du
+module `material` (`zoom_seed` du monde via SHA-256, `zoom_n`/`zoom_f`, sélection du coin de
+score strictement minimal parmi 8), lit la cellule stockée élue via `Region::stored_biome`, et
+ne laisse passer que si le biome au bloc ∈ l'ensemble autorisé de la feature. Une erreur de
+région (lecture hors rayon) laisse passer sans avorter la traversée (documenté, non permissif
+côté prédicats). Couvert par `tests/biome_block.rs` (activation plains, biome hors overworld
+= 0, lecture effective des 8 chunks voisins) et `tests/global_order.rs` (56 biomes par ordre
+de première apparition, 171 placed features, 11 étapes, ordre par étape cohérent). `decorate_chunk`
+traverse quand même toutes les features pour l'ordre global + tirages `R` (les feuilles posant
+des blocs incrémentent `unimplemented_hits`, jamais `NotYetImplemented` qui avorterait).
+
+### Invariant perf (T0/T8)
+Boucle de placement sans allocation par position : parcours `split_first` sur tranches, pile
+implicite de récursion, tampon `placed` unique vidé (jamais rétréci) par chunk. `unsafe` étant
+interdit par le règlement, l'allocateur compteur n'est pas utilisable ; repli documenté par
+`tests/allocation.rs` (capacité du tampon stable sur 8 décorations identiques = pas de
+réallocation par appel) + revue structurelle. L'agrégation des biomes alloue un `BTreeSet`
+borné (~56 entrées) une fois par chunk, hors boucle chaude.
+
+### Reports assumés
+- `blocks.json` reste parsé par deux `OnceLock` (palette + tags), bénin ; mutualisation
+  T7.2 non faite pour éviter un couplage inter-module.
+- Zoom flou : réutilise l'algorithme du module `material` (porte oracle-matériaux verte) ;
+  pas d'oracle de features dédié cette session, l'exactitude vanilla est héritée de `material`.
+- Modificateurs/prédicats marqués [INCERTAIN] ci-dessus : aucun oracle de features dans
+  cette session ; tests dédiés dérivés de la prose, à passer en `#[ignore]` s'ils
+  divergent après relecture, jamais d'ajustement du code pour forcer un vecteur.

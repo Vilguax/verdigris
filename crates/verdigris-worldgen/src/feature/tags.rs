@@ -118,6 +118,10 @@ fn resolve_into(
     }
 }
 
+pub(crate) fn fluid_name(id: u16) -> Option<String> {
+    fluid_id_to_name().get(&i64::from(id)).cloned()
+}
+
 pub fn resolve_block_tag(name: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut m = HashSet::new();

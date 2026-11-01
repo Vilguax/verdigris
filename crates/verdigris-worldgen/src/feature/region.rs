@@ -36,6 +36,10 @@ pub trait Region {
 
     fn read_biome(&self, x: i32, y: i32, z: i32) -> Result<u16, FeatureError>;
 
+    fn stored_biome(&self, cell_x: i32, cell_y: i32, cell_z: i32) -> Result<u16, FeatureError> {
+        self.read_biome(cell_x << 2, cell_y << 2, cell_z << 2)
+    }
+
     fn write_block(&mut self, x: i32, y: i32, z: i32, state: u16) -> Result<bool, FeatureError>;
 }
 

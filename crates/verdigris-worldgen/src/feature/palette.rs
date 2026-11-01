@@ -29,6 +29,7 @@ fn blocks_value() -> &'static Value {
 struct BlockDef {
     first_state: u32,
     default_state: u32,
+    state_count: u32,
     properties: Vec<(String, Vec<String>)>,
 }
 
@@ -44,6 +45,7 @@ fn block_defs() -> &'static HashMap<String, BlockDef> {
                 let first_state = b.get("first_state").and_then(Value::as_u64).unwrap_or(0) as u32;
                 let default_state =
                     b.get("default_state").and_then(Value::as_u64).unwrap_or(0) as u32;
+                let state_count = b.get("state_count").and_then(Value::as_u64).unwrap_or(1) as u32;
                 let mut properties = Vec::new();
                 if let Some(props) = b.get("properties").and_then(Value::as_array) {
                     for p in props {
@@ -66,6 +68,7 @@ fn block_defs() -> &'static HashMap<String, BlockDef> {
                     BlockDef {
                         first_state,
                         default_state,
+                        state_count,
                         properties,
                     },
                 );
@@ -162,6 +165,21 @@ impl Physics {
     pub fn occlusion_face_full(&self, dir: &str) -> bool {
         self.face("occlusion_face_full", dir)
     }
+}
+
+pub(crate) fn block_state_range(name: &str) -> Option<(u32, u32)> {
+    let full = full_key(name);
+    block_defs()
+        .get(&full)
+        .map(|d| (d.first_state, d.first_state + d.state_count))
+}
+
+pub(crate) fn physics_of_state(state_id: u32) -> Physics {
+    physics_for_state(state_id)
+}
+
+pub(crate) fn fluid_id_of_state(state_id: u32) -> u16 {
+    physics_for_state(state_id).fluid
 }
 
 fn physics_for_state(state_id: u32) -> Physics {

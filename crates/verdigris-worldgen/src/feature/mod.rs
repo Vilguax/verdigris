@@ -8,6 +8,7 @@ pub mod region;
 pub mod registry;
 pub mod rng;
 pub mod tags;
+pub mod zoom;
 
 pub use engine::{Decoration, DecorationContext};
 pub use error::FeatureError;
