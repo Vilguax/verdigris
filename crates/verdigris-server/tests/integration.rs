@@ -9,8 +9,8 @@ use verdigris_protocol::{
     BlockPos, MAX_STRING_LEN, MAX_USERNAME_LEN, WORLD_MIN_Y, block_item_of_state,
     decode_compressed_frame, decode_frame, default_state_of_name, encode_compressed_frame,
     encode_frame, item_id_of_name, offline_uuid, property_of, read_f64, read_i64, read_string,
-    read_var_int, system_chat_payload, write_f32, write_f64, write_i64, write_string, write_u16,
-    write_var_int,
+    read_var_int, read_var_long, system_chat_payload, write_f32, write_f64, write_i64,
+    write_string, write_u16, write_var_int,
 };
 use verdigris_server::{
     ChunkStore, KeepAliveConfig, LoadOutcome, PlayerRegistry, REASON_CONFIG_NOT_VANILLA,
@@ -229,6 +229,10 @@ async fn expect_clean_eof(client: &mut TcpStream) {
     }
 }
 
+fn is_periodic_set_time(id: i32, payload: &[u8]) -> bool {
+    id == 0x73 && payload.len() >= 9 && matches!(read_var_int(&payload[8..]), Ok(Some((0, _))))
+}
+
 async fn read_one_compressed_frame(stream: &mut TcpStream, buf: &mut Vec<u8>) -> (i32, Vec<u8>) {
     let mut chunk = [0u8; 1024];
     loop {
@@ -236,6 +240,9 @@ async fn read_one_compressed_frame(stream: &mut TcpStream, buf: &mut Vec<u8>) ->
             let (id, header) = read_var_int(&body).unwrap().unwrap();
             let payload = body[header..].to_vec();
             buf.drain(..consumed);
+            if is_periodic_set_time(id, &payload) {
+                continue;
+            }
             return (id, payload);
         }
         let n = timeout(Duration::from_secs(5), stream.read(&mut chunk))
@@ -419,10 +426,16 @@ async fn play_sequence_sends_empty_world_and_stays_open() {
         "game event type is 13 (wait for chunks)"
     );
 
+    let (set_time_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
+    assert_eq!(
+        set_time_id, 0x73,
+        "Game Event is followed by Set Time before chunks"
+    );
+
     let (center_id, _) = read_one_compressed_frame(&mut client, &mut buf).await;
     assert_eq!(
         center_id, 0x60,
-        "Game Event is followed by Set Chunk Cache Center"
+        "Set Time is followed by Set Chunk Cache Center"
     );
 
     let (batch_start_id, batch_start_body) = read_one_compressed_frame(&mut client, &mut buf).await;
@@ -501,10 +514,12 @@ async fn play_sequence_sends_empty_world_and_stays_open() {
 
     let mut scratch = [0u8; 64];
     let outcome = timeout(Duration::from_millis(1000), client.read(&mut scratch)).await;
-    assert!(
-        outcome.is_err(),
-        "connection must stay open in play without sending a disconnect or FIN"
-    );
+    match outcome {
+        Err(_) => {}
+        Ok(Ok(0)) => panic!("connection closed (FIN) in play"),
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => panic!("connection error in play: {err}"),
+    }
 }
 
 #[tokio::test]
@@ -713,6 +728,8 @@ async fn consume_empty_world(client: &mut TcpStream, buf: &mut Vec<u8>) {
     assert_eq!(position_id, 0x49);
     let (game_event_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(game_event_id, 0x27);
+    let (set_time_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(set_time_id, 0x73, "set_time précède le centre de cache");
     let (center_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(center_id, 0x60);
     let (batch_start_id, _) = read_one_compressed_frame(client, buf).await;
@@ -1349,6 +1366,9 @@ async fn try_read_compressed_frame(
             let (id, header) = read_var_int(&body).unwrap().unwrap();
             let payload = body[header..].to_vec();
             buf.drain(..consumed);
+            if is_periodic_set_time(id, &payload) {
+                continue;
+            }
             return Some((id, payload));
         }
         let n = match timeout(budget, stream.read(&mut chunk)).await {
@@ -1540,6 +1560,8 @@ async fn consume_world_only(client: &mut TcpStream, buf: &mut Vec<u8>) {
     assert_eq!(position_id, 0x49);
     let (game_event_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(game_event_id, 0x27);
+    let (set_time_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(set_time_id, 0x73, "set_time précède le centre de cache");
     let (center_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(center_id, 0x60);
     let (batch_start_id, _) = read_one_compressed_frame(client, buf).await;
@@ -1691,6 +1713,8 @@ async fn consume_world_capturing_entity_id(client: &mut TcpStream, buf: &mut Vec
     assert_eq!(position_id, 0x49);
     let (game_event_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(game_event_id, 0x27);
+    let (set_time_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(set_time_id, 0x73, "set_time précède le centre de cache");
     let (center_id, _) = read_one_compressed_frame(client, buf).await;
     assert_eq!(center_id, 0x60);
     let (batch_start_id, _) = read_one_compressed_frame(client, buf).await;
@@ -3211,6 +3235,224 @@ async fn gamemode_command_packets_order_and_targets() {
         contains_subslice(&alice_feedback, b"commands.gamemode.success.other"),
         "Alice reçoit le succès pour autrui"
     );
+}
+
+fn decode_set_time(body: &[u8]) -> (i64, Vec<(i32, i64)>) {
+    let (game_time, c) = read_i64(body).unwrap().unwrap();
+    let mut cursor = &body[c..];
+    let (count, c) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[c..];
+    let mut clocks = Vec::new();
+    for _ in 0..count {
+        let (id, c) = read_var_int(cursor).unwrap().unwrap();
+        cursor = &cursor[c..];
+        let (total, c) = read_var_long(cursor).unwrap().unwrap();
+        cursor = &cursor[c..];
+        cursor = &cursor[8..];
+        clocks.push((id, total));
+    }
+    (game_time, clocks)
+}
+
+async fn read_set_time_with_clock(
+    stream: &mut TcpStream,
+    buf: &mut Vec<u8>,
+) -> (i64, Vec<(i32, i64)>) {
+    loop {
+        let body = read_skipping_until_id(stream, buf, 0x73).await;
+        let decoded = decode_set_time(&body);
+        if !decoded.1.is_empty() {
+            return decoded;
+        }
+    }
+}
+
+async fn read_command_feedback(
+    stream: &mut TcpStream,
+    buf: &mut Vec<u8>,
+    needle: &[u8],
+) -> Vec<u8> {
+    loop {
+        let body = read_skipping_until_id(stream, buf, 0x7C).await;
+        if contains_subslice(&body, needle) {
+            return body;
+        }
+    }
+}
+
+async fn consume_join_clear(client: &mut TcpStream, buf: &mut Vec<u8>) -> (i64, Vec<(i32, i64)>) {
+    let (login_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(login_id, 0x32);
+    let (abilities_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(abilities_id, 0x41);
+    let (commands_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(commands_id, 0x10);
+    let (entity_event_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(entity_event_id, 0x22);
+    let (position_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(position_id, 0x49);
+    let (game_event_id, game_event_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(game_event_id, 0x27);
+    assert_eq!(game_event_body[0], 13);
+    let (set_time_id, set_time_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(set_time_id, 0x73, "set_time complet avant le premier chunk");
+    let (center_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(
+        center_id, 0x60,
+        "météo Clear: aucun game_event entre set_time et le centre de cache"
+    );
+    let (batch_start_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(batch_start_id, 0x0C);
+    for _ in 0..289 {
+        let (chunk_id, _) = read_one_compressed_frame(client, buf).await;
+        assert_eq!(chunk_id, 0x2E);
+    }
+    let (batch_finished_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(batch_finished_id, 0x0B);
+    decode_set_time(&set_time_body)
+}
+
+async fn consume_join_rain(client: &mut TcpStream, buf: &mut Vec<u8>) {
+    let (login_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(login_id, 0x32);
+    let (abilities_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(abilities_id, 0x41);
+    let (commands_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(commands_id, 0x10);
+    let (entity_event_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(entity_event_id, 0x22);
+    let (position_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(position_id, 0x49);
+    let (game_event_id, game_event_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(game_event_id, 0x27);
+    assert_eq!(game_event_body[0], 13);
+    let (set_time_id, set_time_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(set_time_id, 0x73);
+    let (_, clocks) = decode_set_time(&set_time_body);
+    assert_eq!(clocks.len(), 2, "set_time complet à la connexion");
+    let (ge1_id, ge1_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(ge1_id, 0x27, "météo Rain: game_event après le set_time");
+    assert_eq!(ge1_body, vec![0x01, 0x00, 0x00, 0x00, 0x00]);
+    let (ge7_id, ge7_body) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(ge7_id, 0x27);
+    assert_eq!(ge7_body, vec![0x07, 0x3f, 0x80, 0x00, 0x00]);
+    let (center_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(center_id, 0x60, "la météo précède le premier chunk");
+    let (batch_start_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(batch_start_id, 0x0C);
+    for _ in 0..289 {
+        let (chunk_id, _) = read_one_compressed_frame(client, buf).await;
+        assert_eq!(chunk_id, 0x2E);
+    }
+    let (batch_finished_id, _) = read_one_compressed_frame(client, buf).await;
+    assert_eq!(batch_finished_id, 0x0B);
+}
+
+#[tokio::test]
+async fn time_and_weather_commands_over_tcp() {
+    let addr = spawn_server_with_permission(4).await;
+
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    let (_game_time, clocks) = consume_join_clear(&mut alice, &mut buf_a).await;
+    assert_eq!(clocks.len(), 2, "les deux horloges sont transmises");
+    assert_eq!(clocks[0].0, 0, "première horloge: identifiant overworld 0");
+    assert_eq!(clocks[1].0, 1, "seconde horloge: identifiant the_end 1");
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_named(&mut bob, &mut buf_b, "Bob").await;
+    let _ = consume_join_clear(&mut bob, &mut buf_b).await;
+
+    alice
+        .write_all(&compressed_command_frame("time set 13000"))
+        .await
+        .unwrap();
+    read_command_feedback(&mut alice, &mut buf_a, b"commands.time.set.absolute").await;
+    let (_, a_clocks) = read_set_time_with_clock(&mut alice, &mut buf_a).await;
+    assert_eq!(
+        a_clocks,
+        vec![(0, 13000)],
+        "Alice reçoit l'horloge 0 à 13000"
+    );
+    let (_, b_clocks) = read_set_time_with_clock(&mut bob, &mut buf_b).await;
+    assert_eq!(b_clocks, vec![(0, 13000)], "Bob aussi");
+
+    alice
+        .write_all(&compressed_command_frame("time set day"))
+        .await
+        .unwrap();
+    read_command_feedback(&mut alice, &mut buf_a, b"commands.time.set.time_marker").await;
+    let (_, a_clocks) = read_set_time_with_clock(&mut alice, &mut buf_a).await;
+    assert_eq!(a_clocks.len(), 1);
+    assert_eq!(a_clocks[0].0, 0);
+    assert_eq!(
+        a_clocks[0].1.rem_euclid(24000),
+        1000,
+        "l'horloge avance au prochain marqueur day"
+    );
+    let (_, b_clocks) = read_set_time_with_clock(&mut bob, &mut buf_b).await;
+    assert_eq!(b_clocks[0].1.rem_euclid(24000), 1000);
+
+    alice
+        .write_all(&compressed_command_frame("weather rain"))
+        .await
+        .unwrap();
+    read_command_feedback(&mut alice, &mut buf_a, b"commands.weather.set.rain").await;
+    let ge = read_skipping_until_id(&mut alice, &mut buf_a, 0x27).await;
+    assert_eq!(
+        ge,
+        vec![0x01, 0x00, 0x00, 0x00, 0x00],
+        "Alice: game_event 1 (0.0)"
+    );
+    let ge = read_skipping_until_id(&mut alice, &mut buf_a, 0x27).await;
+    assert_eq!(
+        ge,
+        vec![0x07, 0x3f, 0x80, 0x00, 0x00],
+        "Alice: game_event 7 (1.0)"
+    );
+    let ge = read_skipping_until_id(&mut bob, &mut buf_b, 0x27).await;
+    assert_eq!(
+        ge,
+        vec![0x01, 0x00, 0x00, 0x00, 0x00],
+        "Bob: game_event 1 (0.0)"
+    );
+    let ge = read_skipping_until_id(&mut bob, &mut buf_b, 0x27).await;
+    assert_eq!(
+        ge,
+        vec![0x07, 0x3f, 0x80, 0x00, 0x00],
+        "Bob: game_event 7 (1.0)"
+    );
+
+    let mut carol = TcpStream::connect(addr).await.unwrap();
+    let mut buf_c = Vec::new();
+    drive_to_play_named(&mut carol, &mut buf_c, "Carol").await;
+    consume_join_rain(&mut carol, &mut buf_c).await;
+
+    alice
+        .write_all(&compressed_command_frame("weather clear"))
+        .await
+        .unwrap();
+    read_command_feedback(&mut alice, &mut buf_a, b"commands.weather.set.clear").await;
+    for (stream, buf, who) in [
+        (&mut alice, &mut buf_a, "Alice"),
+        (&mut bob, &mut buf_b, "Bob"),
+        (&mut carol, &mut buf_c, "Carol"),
+    ] {
+        let ge = read_skipping_until_id(stream, buf, 0x27).await;
+        assert_eq!(
+            ge,
+            vec![0x02, 0x00, 0x00, 0x00, 0x00],
+            "{who}: game_event 2 (0.0)"
+        );
+        let ge = read_skipping_until_id(stream, buf, 0x27).await;
+        assert_eq!(
+            ge,
+            vec![0x07, 0x00, 0x00, 0x00, 0x00],
+            "{who}: game_event 7 (0.0)"
+        );
+    }
 }
 
 #[tokio::test]

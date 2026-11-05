@@ -5,7 +5,7 @@ use crate::primitives::{
     read_f32, read_f64, read_i64, read_string, read_u16, write_f32, write_f64, write_i32,
     write_i64, write_string,
 };
-use crate::varint::{read_var_int, write_var_int};
+use crate::varint::{read_var_int, write_var_int, write_var_long};
 
 pub const MAX_CLIENT_LOCALE_LEN: usize = 16;
 
@@ -50,6 +50,7 @@ pub mod packet_ids {
         pub const COMMANDS: i32 = 0x10;
         pub const COMMAND_SUGGESTIONS: i32 = 0x0F;
         pub const ENTITY_EVENT: i32 = 0x22;
+        pub const SET_TIME: i32 = 0x73;
     }
 
     pub mod serverbound {
@@ -241,6 +242,56 @@ pub fn game_event_payload(event: u8, param: f32) -> Vec<u8> {
     payload.push(event);
     write_f32(param, &mut payload);
     payload
+}
+
+pub const OVERWORLD_CLOCK_ID: i32 = 0;
+pub const THE_END_CLOCK_ID: i32 = 1;
+pub const CLOCK_PARTIAL_TICK: f32 = 0.0;
+pub const CLOCK_RATE: f32 = 1.0;
+
+pub fn set_time_payload(game_time: i64, clocks: &[(i32, i64, f32, f32)]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_i64(game_time, &mut payload);
+    write_var_int(clocks.len() as i32, &mut payload);
+    for &(id, total_ticks, partial_tick, rate) in clocks {
+        write_var_int(id, &mut payload);
+        write_var_long(total_ticks, &mut payload);
+        write_f32(partial_tick, &mut payload);
+        write_f32(rate, &mut payload);
+    }
+    payload
+}
+
+pub fn set_time_full(game_time: i64, overworld_total: i64, the_end_total: i64) -> Vec<u8> {
+    set_time_payload(
+        game_time,
+        &[
+            (
+                OVERWORLD_CLOCK_ID,
+                overworld_total,
+                CLOCK_PARTIAL_TICK,
+                CLOCK_RATE,
+            ),
+            (
+                THE_END_CLOCK_ID,
+                the_end_total,
+                CLOCK_PARTIAL_TICK,
+                CLOCK_RATE,
+            ),
+        ],
+    )
+}
+
+pub fn set_time_overworld_only(game_time: i64, overworld_total: i64) -> Vec<u8> {
+    set_time_payload(
+        game_time,
+        &[(
+            OVERWORLD_CLOCK_ID,
+            overworld_total,
+            CLOCK_PARTIAL_TICK,
+            CLOCK_RATE,
+        )],
+    )
 }
 
 pub fn set_chunk_cache_center_payload(x: i32, z: i32) -> Vec<u8> {
@@ -1154,7 +1205,7 @@ pub fn player_chat_tail(
 mod tests {
     use super::*;
     use crate::primitives::write_u16;
-    use crate::varint::read_var_int;
+    use crate::varint::{read_var_int, read_var_long};
 
     #[test]
     fn game_event_gamemode_param_vectors() {
@@ -1166,6 +1217,81 @@ mod tests {
             game_event_payload(3, 0.0),
             vec![0x03, 0x00, 0x00, 0x00, 0x00]
         );
+    }
+
+    fn decode_set_time(payload: &[u8]) -> (i64, Vec<(i32, i64, f32, f32)>) {
+        let mut cursor = payload;
+        let (game_time, c) = read_i64(cursor).unwrap().unwrap();
+        cursor = &cursor[c..];
+        let (count, c) = read_var_int(cursor).unwrap().unwrap();
+        cursor = &cursor[c..];
+        let mut clocks = Vec::new();
+        for _ in 0..count {
+            let (id, c) = read_var_int(cursor).unwrap().unwrap();
+            cursor = &cursor[c..];
+            let (total, c) = read_var_long(cursor).unwrap().unwrap();
+            cursor = &cursor[c..];
+            let (partial, c) = read_f32(cursor).unwrap().unwrap();
+            cursor = &cursor[c..];
+            let (rate, c) = read_f32(cursor).unwrap().unwrap();
+            cursor = &cursor[c..];
+            clocks.push((id, total, partial, rate));
+        }
+        assert!(cursor.is_empty());
+        (game_time, clocks)
+    }
+
+    #[test]
+    fn set_time_full_connection_vector_bytes_and_fields() {
+        let payload = set_time_full(2650, 2650, 2650);
+        assert_eq!(
+            payload,
+            vec![
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x5a, 0x02, 0x00, 0xda, 0x14, 0x00, 0x00,
+                0x00, 0x00, 0x3f, 0x80, 0x00, 0x00, 0x01, 0xda, 0x14, 0x00, 0x00, 0x00, 0x00, 0x3f,
+                0x80, 0x00, 0x00,
+            ]
+        );
+        assert_eq!(payload.len(), 31);
+        let (game_time, clocks) = decode_set_time(&payload);
+        assert_eq!(game_time, 2650);
+        assert_eq!(clocks.len(), 2);
+        assert_eq!(clocks[0], (0, 2650, 0.0, 1.0));
+        assert_eq!(clocks[1], (1, 2650, 0.0, 1.0));
+    }
+
+    #[test]
+    fn set_time_overworld_only_absolute_vector() {
+        let payload = set_time_overworld_only(2928, 13000);
+        assert_eq!(
+            payload,
+            vec![
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x70, 0x01, 0x00, 0xc8, 0x65, 0x00, 0x00,
+                0x00, 0x00, 0x3f, 0x80, 0x00, 0x00,
+            ]
+        );
+        assert_eq!(payload.len(), 20);
+        let (game_time, clocks) = decode_set_time(&payload);
+        assert_eq!(game_time, 2928);
+        assert_eq!(clocks, vec![(0, 13000, 0.0, 1.0)]);
+    }
+
+    #[test]
+    fn set_time_periodic_game_time_only_vector() {
+        let payload = set_time_payload(2659, &[]);
+        assert_eq!(
+            payload,
+            vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x63, 0x00]
+        );
+        assert_eq!(payload.len(), 9);
+        let (game_time, clocks) = decode_set_time(&payload);
+        assert_eq!(game_time, 2659);
+        assert!(clocks.is_empty());
+    }
+
+    #[test]
+    fn set_time_packet_id_is_0x73() {
+        assert_eq!(packet_ids::clientbound::SET_TIME, 0x73);
     }
 
     #[test]

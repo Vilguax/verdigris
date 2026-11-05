@@ -8,6 +8,29 @@ use verdigris_protocol::{
     chunk_coord, frame_entity_pass, set_entity_data_payload,
 };
 
+use crate::time::move_to_marker;
+use crate::weather::Weather;
+
+pub const TIME_BROADCAST_INTERVAL: i64 = 20;
+
+struct ClockState {
+    game_time: i64,
+    overworld_total: i64,
+    the_end_total: i64,
+    weather: Weather,
+}
+
+impl ClockState {
+    fn new() -> Self {
+        ClockState {
+            game_time: 0,
+            overworld_total: 0,
+            the_end_total: 0,
+            weather: Weather::Clear,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Outbound {
     Frame(Arc<[u8]>),
@@ -277,6 +300,7 @@ pub struct PlayerRegistry {
     ops: Vec<String>,
     default_permission: u8,
     tick_counter: AtomicU64,
+    clock: Mutex<ClockState>,
 }
 
 impl PlayerRegistry {
@@ -313,6 +337,7 @@ impl PlayerRegistry {
             ops,
             default_permission,
             tick_counter: AtomicU64::new(0),
+            clock: Mutex::new(ClockState::new()),
         }
     }
 
@@ -330,6 +355,48 @@ impl PlayerRegistry {
 
     pub fn current_tick(&self) -> u64 {
         self.tick_counter.load(Ordering::Relaxed)
+    }
+
+    pub fn tick_time(&self) -> (i64, bool) {
+        let mut clock = self.clock.lock().unwrap();
+        clock.game_time = clock.game_time.wrapping_add(1);
+        clock.overworld_total = clock.overworld_total.wrapping_add(1);
+        clock.the_end_total = clock.the_end_total.wrapping_add(1);
+        let broadcast = clock.game_time % TIME_BROADCAST_INTERVAL == 0;
+        (clock.game_time, broadcast)
+    }
+
+    pub fn time_snapshot(&self) -> (i64, i64, i64) {
+        let clock = self.clock.lock().unwrap();
+        (clock.game_time, clock.overworld_total, clock.the_end_total)
+    }
+
+    pub fn overworld_total(&self) -> i64 {
+        self.clock.lock().unwrap().overworld_total
+    }
+
+    pub fn set_overworld_time(&self, total: i64) -> i64 {
+        let mut clock = self.clock.lock().unwrap();
+        clock.overworld_total = total;
+        clock.game_time
+    }
+
+    pub fn advance_overworld_to_marker(&self, marker: i64) -> Option<(i64, i64)> {
+        let mut clock = self.clock.lock().unwrap();
+        let target = move_to_marker(clock.overworld_total, marker)?;
+        clock.overworld_total = target;
+        Some((clock.game_time, target))
+    }
+
+    pub fn weather(&self) -> Weather {
+        self.clock.lock().unwrap().weather
+    }
+
+    pub fn swap_weather(&self, to: Weather) -> Weather {
+        let mut clock = self.clock.lock().unwrap();
+        let previous = clock.weather;
+        clock.weather = to;
+        previous
     }
 
     pub fn player_names(&self) -> Vec<String> {
@@ -1419,6 +1486,58 @@ mod tests {
         let (_eid, _senders) = reg
             .update_mainhand(2, ItemStack::Empty)
             .expect("passage plein->vide détecté");
+    }
+
+    #[test]
+    fn clock_starts_at_zero_and_clear() {
+        let reg = registry();
+        assert_eq!(reg.time_snapshot(), (0, 0, 0));
+        assert_eq!(reg.overworld_total(), 0);
+        assert_eq!(reg.weather(), Weather::Clear);
+    }
+
+    #[test]
+    fn tick_time_increments_all_clocks_and_flags_each_twentieth() {
+        let reg = registry();
+        for expected in 1..=19 {
+            let (game_time, broadcast) = reg.tick_time();
+            assert_eq!(game_time, expected);
+            assert!(!broadcast);
+        }
+        let (game_time, broadcast) = reg.tick_time();
+        assert_eq!(game_time, 20);
+        assert!(broadcast, "diffusion tous les 20 ticks");
+        assert_eq!(reg.time_snapshot(), (20, 20, 20));
+    }
+
+    #[test]
+    fn set_overworld_time_diverges_from_game_time() {
+        let reg = registry();
+        reg.tick_time();
+        reg.tick_time();
+        let game_time = reg.set_overworld_time(13_000);
+        assert_eq!(game_time, 2);
+        assert_eq!(reg.overworld_total(), 13_000);
+        assert_eq!(reg.time_snapshot(), (2, 13_000, 2));
+    }
+
+    #[test]
+    fn advance_overworld_to_marker_moves_or_reports_already_there() {
+        let reg = registry();
+        reg.set_overworld_time(13_000);
+        let (_game_time, target) = reg.advance_overworld_to_marker(1_000).unwrap();
+        assert_eq!(target, 25_000);
+        assert_eq!(reg.overworld_total(), 25_000);
+        assert!(reg.advance_overworld_to_marker(1_000).is_none());
+        assert_eq!(reg.overworld_total(), 25_000);
+    }
+
+    #[test]
+    fn swap_weather_returns_previous_state() {
+        let reg = registry();
+        assert_eq!(reg.swap_weather(Weather::Rain), Weather::Clear);
+        assert_eq!(reg.weather(), Weather::Rain);
+        assert_eq!(reg.swap_weather(Weather::Thunder), Weather::Rain);
     }
 
     #[test]

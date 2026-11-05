@@ -150,6 +150,30 @@ pub fn player_display_name(name: &str, uuid: u128) -> Component {
     }
 }
 
+pub const OVERWORLD_DIMENSION_ID: &str = "minecraft:overworld";
+
+pub fn time_set_absolute_message(time: i32) -> Component {
+    Component::translate("commands.time.set.absolute")
+        .with(Arg::Str(OVERWORLD_DIMENSION_ID.to_owned()))
+        .with(Arg::Int(time))
+}
+
+pub fn time_set_marker_message(marker: &str) -> Component {
+    Component::translate("commands.time.set.time_marker")
+        .with(Arg::Str(OVERWORLD_DIMENSION_ID.to_owned()))
+        .with(Arg::Str(marker.to_owned()))
+}
+
+pub fn time_already_at_marker_message(marker: &str) -> Component {
+    Component::translate("commands.time.set.already_at_time_marker")
+        .with(Arg::Str(OVERWORLD_DIMENSION_ID.to_owned()))
+        .with(Arg::Str(marker.to_owned()))
+}
+
+pub fn weather_set_message(kind: &str) -> Component {
+    Component::translate(format!("commands.weather.set.{kind}"))
+}
+
 pub fn item_name_translation_key(name: &str) -> String {
     let path = name.rsplit_once(':').map_or(name, |(_, path)| path);
     let places = crate::blocks::item_id_of_name(name)
@@ -513,6 +537,69 @@ mod tests {
         assert_eq!(body.len(), 42);
         assert_eq!(body[41], 0x00);
         assert_eq!(&body[..41], nbt_payload.as_slice());
+    }
+
+    #[test]
+    fn time_set_absolute_body_is_eighty_seven_bytes() {
+        let component = time_set_absolute_message(13000);
+        let nbt_payload = nbt(&component);
+        assert_eq!(nbt_payload.len(), 87);
+        assert!(contains_subslice(
+            &nbt_payload,
+            b"commands.time.set.absolute"
+        ));
+        assert!(contains_subslice(&nbt_payload, b"minecraft:overworld"));
+
+        let body = system_chat_payload(&component, false);
+        assert_eq!(body.len(), 88);
+        assert_eq!(body[87], 0x00);
+        assert_eq!(&body[..87], nbt_payload.as_slice());
+    }
+
+    #[test]
+    fn time_set_marker_message_is_homogeneous_string_list() {
+        let component = time_set_marker_message("minecraft:day");
+        match &component.content {
+            Content::Translatable { key, args } => {
+                assert_eq!(key, "commands.time.set.time_marker");
+                assert_eq!(
+                    args,
+                    &vec![
+                        Arg::Str("minecraft:overworld".to_owned()),
+                        Arg::Str("minecraft:day".to_owned()),
+                    ]
+                );
+            }
+            other => panic!("contenu inattendu {other:?}"),
+        }
+        let payload = nbt(&component);
+        assert!(contains_subslice(
+            &payload,
+            b"commands.time.set.time_marker"
+        ));
+        assert!(contains_subslice(&payload, b"minecraft:day"));
+    }
+
+    #[test]
+    fn time_already_at_marker_message_keeps_marker_argument() {
+        let component = time_already_at_marker_message("minecraft:day");
+        let payload = nbt(&component);
+        assert!(contains_subslice(
+            &payload,
+            b"commands.time.set.already_at_time_marker"
+        ));
+        assert!(contains_subslice(&payload, b"minecraft:overworld"));
+        assert!(contains_subslice(&payload, b"minecraft:day"));
+    }
+
+    #[test]
+    fn weather_set_message_matches_translate_key() {
+        assert_eq!(
+            weather_set_message("rain"),
+            Component::translate("commands.weather.set.rain")
+        );
+        let body = system_chat_payload(&weather_set_message("rain"), false);
+        assert_eq!(body.len(), 42);
     }
 
     #[test]

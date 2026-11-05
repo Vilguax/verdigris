@@ -9,6 +9,8 @@ mod raycast;
 mod registry;
 mod storage;
 mod teleport;
+mod time;
+mod weather;
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -56,15 +58,17 @@ use verdigris_protocol::{
     decode_known_packs, decode_serverbound, entity_event_permission_payload,
     forget_level_chunk_payload, game_event_payload, keep_alive_payload, known_packs_payload,
     login_disconnect_payload, login_play_payload, login_success_payload, max_stack_size,
-    network_data, normalize_chat, offline_uuid, packet_ids, parse_gamemode,
+    network_data, normalize_chat, offline_uuid, packet_ids, parse_gamemode, parse_time,
     player_abilities_payload, player_chat_tail, player_info_remove_payload,
     player_info_update_gamemode_payload, player_info_update_init_payload,
     player_info_update_latency_payload, player_position_payload, pong_payload, random_session_id,
     read_var_int, registry_data_payload, remove_entities_payload, server_known_pack,
     set_chunk_cache_center_payload, set_compression_payload, set_equipment_payload,
-    set_held_slot_payload, status_json, status_response_payload, suggest_completions,
-    swing_animation_payload, system_chat_payload, tab_list_payload, unknown_command_components,
-    update_tags_payload, validate_chat_content, validate_name, write_chunk_payload,
+    set_held_slot_payload, set_time_full, set_time_overworld_only, set_time_payload, status_json,
+    status_response_payload, suggest_completions, swing_animation_payload, system_chat_payload,
+    tab_list_payload, time_already_at_marker_message, time_set_absolute_message,
+    time_set_marker_message, unknown_command_components, update_tags_payload,
+    validate_chat_content, validate_name, weather_set_message, write_chunk_payload,
     write_command_suggestions, write_nbt, write_var_int,
 };
 use verdigris_protocol::{GAME_VERSION, WORLD_MAX_Y, WORLD_MIN_Y, is_air, is_fluid};
@@ -401,6 +405,29 @@ fn run_entity_tick(registry: &Arc<PlayerRegistry>, threshold: usize) {
     }
 }
 
+fn run_time_tick(registry: &Arc<PlayerRegistry>) {
+    let (game_time, broadcast) = registry.tick_time();
+    if !broadcast {
+        return;
+    }
+    let senders = registry.chat_targets();
+    if senders.is_empty() {
+        return;
+    }
+    if let Some(frame) = frame_arc(play_cb::SET_TIME, &set_time_payload(game_time, &[])) {
+        push_frame(&senders, &frame);
+    }
+}
+
+fn broadcast_to_all(registry: &PlayerRegistry, id: i32, payload: &[u8]) {
+    let Some(frame) = frame_arc(id, payload) else {
+        return;
+    };
+    for sender in registry.chat_targets() {
+        let _ = sender.send(Outbound::Frame(Arc::clone(&frame)));
+    }
+}
+
 fn broadcast_latency(registry: &Arc<PlayerRegistry>) {
     let (all_entries, senders) = registry.latency_broadcast();
     let entries: Vec<(u128, i32)> = all_entries
@@ -698,6 +725,7 @@ where
                 log_gen_metrics(gen_metrics.as_deref());
             }
             _ = entity_ticker.tick() => {
+                run_time_tick(&players);
                 run_entity_tick(&players, PLAY_THRESHOLD);
             }
             _ = &mut shutdown => break,
@@ -1404,6 +1432,34 @@ async fn enter_play(
         .is_err()
     {
         return;
+    }
+
+    let (game_time, overworld_total, the_end_total) = registry.time_snapshot();
+    if write_packet(
+        stream,
+        framing,
+        *state,
+        play_cb::SET_TIME,
+        &set_time_full(game_time, overworld_total, the_end_total),
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+    for (event, param) in weather::weather_on_join(registry.weather()) {
+        if write_packet(
+            stream,
+            framing,
+            *state,
+            play_cb::GAME_EVENT,
+            &game_event_payload(event, param),
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
     }
 
     let mut view = PlayerView::new(spawn);
@@ -2320,6 +2376,8 @@ async fn execute_command(
         "teleport" | "tp" => {
             handle_teleport(stream, framing, session, remainder(command, name)).await
         }
+        "time" => handle_time(stream, framing, session, remainder(command, name)).await,
+        "weather" => handle_weather(stream, framing, session, remainder(command, name)).await,
         _ => {
             warn!(command = name, "commande sans exécuteur enregistré");
             false
@@ -2652,6 +2710,76 @@ async fn apply_gamemode_to_target(
             .with(Arg::Comp(Box::new(mode_component(mode))));
         send_system_line(stream, framing, &message).await
     }
+}
+
+async fn handle_time(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &mut Session<'_>,
+    args: &str,
+) -> bool {
+    let mut parts = args.split_whitespace();
+    if parts.next() != Some("set") {
+        return false;
+    }
+    let value = match parts.next() {
+        Some(value) => value,
+        None => return send_unknown_command(stream, framing, &format!("time {args}")).await,
+    };
+
+    if let Ok(absolute) = parse_time(value) {
+        let game_time = session.registry.set_overworld_time(absolute as i64);
+        broadcast_to_all(
+            &session.registry,
+            play_cb::SET_TIME,
+            &set_time_overworld_only(game_time, absolute as i64),
+        );
+        return send_system_line(stream, framing, &time_set_absolute_message(absolute)).await;
+    }
+
+    let marker = match time::parse_marker(value) {
+        Some(marker) => marker,
+        None => {
+            let error = argument_error_component("argument.id.invalid", value);
+            return send_system_line(stream, framing, &error).await;
+        }
+    };
+    let canonical = time::canonical_marker(value).unwrap_or(value);
+    match session.registry.advance_overworld_to_marker(marker) {
+        None => send_system_line(stream, framing, &time_already_at_marker_message(canonical)).await,
+        Some((game_time, target)) => {
+            broadcast_to_all(
+                &session.registry,
+                play_cb::SET_TIME,
+                &set_time_overworld_only(game_time, target),
+            );
+            send_system_line(stream, framing, &time_set_marker_message(canonical)).await
+        }
+    }
+}
+
+async fn handle_weather(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &mut Session<'_>,
+    args: &str,
+) -> bool {
+    let kind = args.split_whitespace().next().unwrap_or("");
+    let to = match kind {
+        "clear" => weather::Weather::Clear,
+        "rain" => weather::Weather::Rain,
+        "thunder" => weather::Weather::Thunder,
+        _ => return send_unknown_command(stream, framing, &format!("weather {args}")).await,
+    };
+    let previous = session.registry.swap_weather(to);
+    for (event, param) in weather::weather_transition(previous, to) {
+        broadcast_to_all(
+            &session.registry,
+            play_cb::GAME_EVENT,
+            &game_event_payload(event, param),
+        );
+    }
+    send_system_line(stream, framing, &weather_set_message(kind)).await
 }
 
 async fn handle_give(
