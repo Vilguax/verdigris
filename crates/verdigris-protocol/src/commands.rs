@@ -258,6 +258,7 @@ fn full_tree() -> Vec<Node> {
     b.argument(give_item, "count", Parser::IntegerMin(1), 2, true, false);
 
     let teleport = b.literal(root, "teleport", 2, false);
+    b.argument(teleport, "location", Parser::Vec3, 2, true, false);
     b.argument(
         teleport,
         "destination",
@@ -268,7 +269,25 @@ fn full_tree() -> Vec<Node> {
         true,
         false,
     );
-    b.argument(teleport, "location", Parser::Vec3, 2, true, false);
+    let tp_targets = b.argument(
+        teleport,
+        "targets",
+        Parser::Entity { flags: 0 },
+        2,
+        false,
+        false,
+    );
+    b.argument(tp_targets, "location", Parser::Vec3, 2, true, false);
+    b.argument(
+        tp_targets,
+        "destination",
+        Parser::Entity {
+            flags: ENTITY_SINGLE,
+        },
+        2,
+        true,
+        false,
+    );
     b.redirect_literal(root, "tp", 2, teleport);
 
     let time = b.literal(root, "time", 2, false);
@@ -1180,6 +1199,121 @@ mod tests {
         assert!(
             root_children.contains(&remap[lit].unwrap()),
             "le littéral gamemode figure dans les enfants de la racine"
+        );
+    }
+
+    #[test]
+    fn teleport_subtree_exact_bytes_at_bfs_offsets() {
+        let (payload, offsets, nodes, remap) = reencode_with_offsets(4);
+        assert_eq!(
+            payload,
+            commands_payload(4),
+            "réencodage identique au payload"
+        );
+        let teleport = nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Literal && n.name == "teleport")
+            .unwrap();
+        let children = nodes[teleport].children.clone();
+        assert_eq!(children.len(), 3);
+        let loc = children[0];
+        let dest = children[1];
+        let targets = children[2];
+        assert_eq!(nodes[loc].name, "location");
+        assert_eq!(nodes[dest].name, "destination");
+        assert_eq!(nodes[targets].name, "targets");
+        let tloc = nodes[targets].children[0];
+        let tdest = nodes[targets].children[1];
+        assert_eq!(nodes[tloc].name, "location");
+        assert_eq!(nodes[tdest].name, "destination");
+
+        for &src in &[teleport, loc, dest, targets, tloc, tdest] {
+            let baked = baked_node(&nodes, &remap, src);
+            let offset = offsets[src];
+            assert_eq!(
+                &payload[offset..offset + baked.len()],
+                &baked[..],
+                "octets du noeud à l'offset BFS attendu"
+            );
+        }
+        assert_eq!(
+            occurrences(&payload, &baked_node(&nodes, &remap, teleport)),
+            1,
+            "littéral teleport unique"
+        );
+        assert_eq!(
+            occurrences(&payload, &baked_node(&nodes, &remap, targets)),
+            1,
+            "argument targets unique"
+        );
+
+        assert_eq!(
+            baked_node(&nodes, &remap, teleport)[0],
+            0x21,
+            "teleport: littéral + restreint"
+        );
+        let loc_bytes = baked_node(&nodes, &remap, loc);
+        assert_eq!(loc_bytes[0], 0x06, "location: argument + exécutable");
+        assert_eq!(
+            *loc_bytes.last().unwrap(),
+            0x0a,
+            "parser vec3 0x0a sans propriété"
+        );
+        let dest_bytes = baked_node(&nodes, &remap, dest);
+        assert_eq!(dest_bytes[0], 0x06, "destination: argument + exécutable");
+        assert_eq!(
+            &dest_bytes[dest_bytes.len() - 2..],
+            &[0x06, 0x01],
+            "parser entity 0x06 + single 0x01"
+        );
+        let targets_bytes = baked_node(&nodes, &remap, targets);
+        assert_eq!(targets_bytes[0], 0x02, "targets: argument non exécutable");
+        assert_eq!(
+            &targets_bytes[targets_bytes.len() - 2..],
+            &[0x06, 0x00],
+            "parser entity 0x06 + multiples 0x00"
+        );
+        let tloc_bytes = baked_node(&nodes, &remap, tloc);
+        assert_eq!(tloc_bytes[0], 0x06);
+        assert_eq!(*tloc_bytes.last().unwrap(), 0x0a);
+        let tdest_bytes = baked_node(&nodes, &remap, tdest);
+        assert_eq!(&tdest_bytes[tdest_bytes.len() - 2..], &[0x06, 0x01]);
+    }
+
+    #[test]
+    fn tp_literal_redirect_form_bytes() {
+        let (_payload, _offsets, nodes, remap) = reencode_with_offsets(4);
+        let teleport = nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Literal && n.name == "teleport")
+            .unwrap();
+        let tp = nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Literal && n.name == "tp")
+            .unwrap();
+        let tp_bytes = baked_node(&nodes, &remap, tp);
+        let mut expected = vec![0x29u8, 0x00];
+        write_var_int(remap[teleport].unwrap() as i32, &mut expected);
+        expected.extend_from_slice(&[0x02, 0x74, 0x70]);
+        assert_eq!(tp_bytes, expected, "forme tp 29 00 <idx> 02 74 70");
+    }
+
+    #[test]
+    fn root_children_order_is_preserved_at_level_four() {
+        let payload = commands_payload(4);
+        let (nodes, _) = decode_tree(&payload);
+        let names: Vec<&str> = nodes[0]
+            .1
+            .iter()
+            .map(|&i| nodes[i].3.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "help", "list", "msg", "tell", "w", "say", "gamemode", "give", "teleport", "tp",
+                "time", "weather", "kill",
+            ],
+            "les littéraux racine gardent leur ordre, teleport/tp non déplacés"
         );
     }
 

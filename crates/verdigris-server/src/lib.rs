@@ -7,6 +7,7 @@ mod portal;
 mod raycast;
 mod registry;
 mod storage;
+mod teleport;
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -1289,6 +1290,9 @@ struct Session<'a> {
     player: PlayerState,
     uuid: u128,
     registry: Arc<PlayerRegistry>,
+    next_teleport_id: i32,
+    awaiting_teleport: Option<(i32, (f64, f64, f64))>,
+    rng: u64,
 }
 
 async fn enter_play(
@@ -1494,6 +1498,9 @@ async fn enter_play(
         player,
         uuid,
         registry: Arc::clone(registry),
+        next_teleport_id: PLAY_TELEPORT_ID + 1,
+        awaiting_teleport: None,
+        rng: teleport::seed_rng(),
     };
     run_play(stream, framing, state, buf, chunk, keep_alive, rx, session).await;
 }
@@ -1975,7 +1982,49 @@ async fn apply_outbound(
             )
             .await
         }
+        Outbound::Control(ControlMsg::Teleport { x, y, z }) => {
+            apply_teleport(stream, framing, state, session, x, y, z).await
+        }
     }
+}
+
+async fn apply_teleport(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    session: &mut Session<'_>,
+    x: f64,
+    y: f64,
+    z: f64,
+) -> bool {
+    let awaiting_id = session.awaiting_teleport.map(|(id, _)| id);
+    let id = teleport::alloc(&mut session.next_teleport_id, awaiting_id);
+    session.view.x = x;
+    session.view.y = y;
+    session.view.z = z;
+    session.player.pos = (x, y, z);
+    let on_ground = on_ground_flag(session.view.flags);
+    session
+        .registry
+        .set_position(session.uuid, x, y, z, on_ground);
+    let payload = player_position_payload(id, [x, y, z], [0.0; 3], 0.0, 0.0, 0);
+    if write_packet(stream, framing, state, play_cb::PLAYER_POSITION, &payload)
+        .await
+        .is_err()
+    {
+        return true;
+    }
+    session.awaiting_teleport = Some((id, (x, y, z)));
+    if session.view.chunk_changed() {
+        let closed = update_chunks(stream, framing, state, &mut session.view, session.world).await;
+        if !closed {
+            session
+                .registry
+                .update_sent_chunks(session.uuid, &session.view.sent);
+        }
+        return closed;
+    }
+    false
 }
 
 async fn apply_set_gamemode(
@@ -2260,6 +2309,9 @@ async fn execute_command(
         }
         "msg" | "tell" | "w" => send_message_command(stream, framing, session, command, name).await,
         "gamemode" => handle_gamemode(stream, framing, session, remainder(command, name)).await,
+        "teleport" | "tp" => {
+            handle_teleport(stream, framing, session, remainder(command, name)).await
+        }
         _ => {
             warn!(command = name, "commande sans exécuteur enregistré");
             false
@@ -2594,6 +2646,236 @@ async fn apply_gamemode_to_target(
     }
 }
 
+async fn handle_teleport(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &mut Session<'_>,
+    args: &str,
+) -> bool {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    match tokens.len() {
+        1 => teleport_self_to_destination(stream, framing, session, tokens[0]).await,
+        2 => teleport_targets_to_destination(stream, framing, session, tokens[0], tokens[1]).await,
+        3 => {
+            teleport_self_to_location(stream, framing, session, [tokens[0], tokens[1], tokens[2]])
+                .await
+        }
+        4 => {
+            teleport_targets_to_location(
+                stream,
+                framing,
+                session,
+                tokens[0],
+                [tokens[1], tokens[2], tokens[3]],
+            )
+            .await
+        }
+        _ => send_unknown_command(stream, framing, &format!("tp {args}")).await,
+    }
+}
+
+async fn teleport_self_to_location(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &mut Session<'_>,
+    tokens: [&str; 3],
+) -> bool {
+    let base = (session.view.x, session.view.y, session.view.z);
+    let pos = match teleport::eval_vec3(tokens, base) {
+        Ok(pos) => pos,
+        Err(_) => return send_coordinate_error(stream, framing).await,
+    };
+    if apply_teleport(
+        stream,
+        framing,
+        State::Play,
+        session,
+        pos[0],
+        pos[1],
+        pos[2],
+    )
+    .await
+    {
+        return true;
+    }
+    let name = session.player.name.clone();
+    send_system_line(stream, framing, &teleport::location_feedback(&name, 1, pos)).await
+}
+
+async fn teleport_self_to_destination(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &mut Session<'_>,
+    token: &str,
+) -> bool {
+    let players = session.registry.players();
+    let dest = match teleport::resolve_destination(
+        players,
+        session.uuid,
+        session.player.pos,
+        token,
+        &mut session.rng,
+    ) {
+        Ok(dest) => dest,
+        Err(err) => return send_selector_error(stream, framing, err, token).await,
+    };
+    if apply_teleport(
+        stream,
+        framing,
+        State::Play,
+        session,
+        dest.x,
+        dest.y,
+        dest.z,
+    )
+    .await
+    {
+        return true;
+    }
+    let name = session.player.name.clone();
+    send_system_line(
+        stream,
+        framing,
+        &teleport::entity_feedback(&name, 1, &dest.name),
+    )
+    .await
+}
+
+async fn teleport_targets_to_location(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &mut Session<'_>,
+    targets_token: &str,
+    coords: [&str; 3],
+) -> bool {
+    let players = session.registry.players();
+    let targets = match teleport::resolve_targets(
+        players,
+        session.uuid,
+        session.player.pos,
+        targets_token,
+        &mut session.rng,
+    ) {
+        Ok(targets) => targets,
+        Err(err) => return send_selector_error(stream, framing, err, targets_token).await,
+    };
+    let base = (session.view.x, session.view.y, session.view.z);
+    let pos = match teleport::eval_vec3(coords, base) {
+        Ok(pos) => pos,
+        Err(_) => return send_coordinate_error(stream, framing).await,
+    };
+    let count = targets.len();
+    let first_name = targets[0].name.clone();
+    if apply_teleport_to_each(stream, framing, session, &targets, pos).await {
+        return true;
+    }
+    send_system_line(
+        stream,
+        framing,
+        &teleport::location_feedback(&first_name, count, pos),
+    )
+    .await
+}
+
+async fn teleport_targets_to_destination(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &mut Session<'_>,
+    targets_token: &str,
+    dest_token: &str,
+) -> bool {
+    let targets = match teleport::resolve_targets(
+        session.registry.players(),
+        session.uuid,
+        session.player.pos,
+        targets_token,
+        &mut session.rng,
+    ) {
+        Ok(targets) => targets,
+        Err(err) => return send_selector_error(stream, framing, err, targets_token).await,
+    };
+    let dest = match teleport::resolve_destination(
+        session.registry.players(),
+        session.uuid,
+        session.player.pos,
+        dest_token,
+        &mut session.rng,
+    ) {
+        Ok(dest) => dest,
+        Err(err) => return send_selector_error(stream, framing, err, dest_token).await,
+    };
+    let pos = [dest.x, dest.y, dest.z];
+    let count = targets.len();
+    let first_name = targets[0].name.clone();
+    if apply_teleport_to_each(stream, framing, session, &targets, pos).await {
+        return true;
+    }
+    send_system_line(
+        stream,
+        framing,
+        &teleport::entity_feedback(&first_name, count, &dest.name),
+    )
+    .await
+}
+
+async fn apply_teleport_to_each(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &mut Session<'_>,
+    targets: &[PlayerHandle],
+    pos: [f64; 3],
+) -> bool {
+    for target in targets {
+        if target.uuid == session.uuid {
+            if apply_teleport(
+                stream,
+                framing,
+                State::Play,
+                session,
+                pos[0],
+                pos[1],
+                pos[2],
+            )
+            .await
+            {
+                return true;
+            }
+        } else {
+            let _ = target.sender.send(Outbound::Control(ControlMsg::Teleport {
+                x: pos[0],
+                y: pos[1],
+                z: pos[2],
+            }));
+        }
+    }
+    false
+}
+
+async fn send_selector_error(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    err: teleport::SelectError,
+    token: &str,
+) -> bool {
+    let component = match err {
+        teleport::SelectError::NotFound => {
+            argument_error_component("argument.entity.notfound.entity", token)
+        }
+        teleport::SelectError::TooMany => {
+            argument_error_component("argument.entity.toomany", token)
+        }
+        teleport::SelectError::Syntax => {
+            argument_error_component("argument.entity.selector.unknown", token)
+        }
+    };
+    send_system_line(stream, framing, &component).await
+}
+
+async fn send_coordinate_error(stream: &mut TcpStream, framing: &Framing) -> bool {
+    let component = argument_error_component("argument.pos.missing.double", "");
+    send_system_line(stream, framing, &component).await
+}
+
 async fn run_keep_alive_action(
     stream: &mut TcpStream,
     framing: &Framing,
@@ -2675,14 +2957,18 @@ async fn handle_play_packet(
 ) -> bool {
     match packet {
         Serverbound::PlayAcceptTeleportation(accept) => {
-            if accept.teleport_id == PLAY_TELEPORT_ID {
-                info!(teleport_id = accept.teleport_id, "téléportation confirmée");
-            } else {
-                warn!(
-                    recu = accept.teleport_id,
-                    attendu = PLAY_TELEPORT_ID,
-                    "téléportation inattendue"
-                );
+            match session.awaiting_teleport {
+                Some((expected, _)) if expected == accept.teleport_id => {
+                    session.awaiting_teleport = None;
+                    info!(teleport_id = accept.teleport_id, "téléportation confirmée");
+                }
+                _ => {
+                    if accept.teleport_id == PLAY_TELEPORT_ID {
+                        info!(teleport_id = accept.teleport_id, "apparition confirmée");
+                    } else {
+                        warn!(recu = accept.teleport_id, "téléportation obsolète ignorée");
+                    }
+                }
             }
             false
         }
@@ -2706,6 +2992,9 @@ async fn handle_play_packet(
             false
         }
         Serverbound::PlayMovePlayerPos(m) => {
+            if session.awaiting_teleport.is_some() {
+                return false;
+            }
             session.view.apply_pos(&m);
             session.player.pos = (m.x, m.y, m.z);
             session
@@ -2715,6 +3004,9 @@ async fn handle_play_packet(
             follow_player(stream, framing, state, session).await
         }
         Serverbound::PlayMovePlayerPosRot(m) => {
+            if session.awaiting_teleport.is_some() {
+                return false;
+            }
             if !(m.yaw.is_finite() && m.pitch.is_finite()) {
                 debug!("rotation non finie ignorée");
                 return false;
@@ -3106,6 +3398,7 @@ mod tests {
             uuid,
             name: name.to_owned(),
             x,
+            y: 0.0,
             z,
             sender: tx,
         }

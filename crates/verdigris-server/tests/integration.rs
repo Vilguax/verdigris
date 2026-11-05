@@ -3343,6 +3343,34 @@ async fn chat_command_replies_unknown_command() {
 }
 
 #[tokio::test]
+async fn teleport_is_refused_below_permission_two() {
+    let addr = spawn_server_with_permission(0).await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play_named(&mut client, &mut buf, "Lowly").await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    client
+        .write_all(&compressed_command_frame("tp 0 100 0"))
+        .await
+        .unwrap();
+
+    let system = read_skipping_until_id(&mut client, &mut buf, 0x7C).await;
+    assert!(
+        contains_subslice(&system, b"command.unknown.command"),
+        "/tp sous le niveau 2 est traité comme commande inconnue"
+    );
+    while let Some((id, _)) =
+        try_read_compressed_frame(&mut client, &mut buf, Duration::from_millis(200)).await
+    {
+        assert_ne!(
+            id, 0x49,
+            "aucune téléportation n'est exécutée sans permission"
+        );
+    }
+}
+
+#[tokio::test]
 async fn chat_spam_disconnects_after_broadcasting_last_message() {
     let (_addr, mut alice, mut buf_a, mut bob, mut buf_b) = two_players_in_play().await;
 
@@ -3840,4 +3868,156 @@ async fn command_spam_disconnects_level_zero_player() {
         "une rafale de commandes éjecte un joueur non opérateur"
     );
     expect_clean_eof(&mut client).await;
+}
+
+fn parse_player_position(body: &[u8]) -> (i32, f64, f64, f64) {
+    let mut cursor = body;
+    let (id, consumed) = read_var_int(cursor).unwrap().unwrap();
+    cursor = &cursor[consumed..];
+    let (x, consumed) = read_f64(cursor).unwrap().unwrap();
+    cursor = &cursor[consumed..];
+    let (y, consumed) = read_f64(cursor).unwrap().unwrap();
+    cursor = &cursor[consumed..];
+    let (z, _) = read_f64(cursor).unwrap().unwrap();
+    (id, x, y, z)
+}
+
+#[tokio::test]
+async fn teleport_rejects_non_finite_coordinates_without_publishing() {
+    let addr = spawn_server_with_permission(4).await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let mut buf = Vec::new();
+    drive_to_play_named(&mut client, &mut buf, "Alice").await;
+    consume_empty_world(&mut client, &mut buf).await;
+
+    client
+        .write_all(&compressed_command_frame("tp NaN 100 0"))
+        .await
+        .unwrap();
+
+    let system = read_skipping_until_id(&mut client, &mut buf, 0x7C).await;
+    assert!(
+        contains_subslice(&system, b"argument.pos.missing.double"),
+        "une coordonnée non finie est refusée par une erreur de syntaxe"
+    );
+    while let Some((id, _)) =
+        try_read_compressed_frame(&mut client, &mut buf, Duration::from_millis(200)).await
+    {
+        assert_ne!(
+            id, 0x49,
+            "aucune téléportation n'est publiée pour des coordonnées non finies"
+        );
+    }
+}
+
+#[tokio::test]
+async fn teleport_self_player_and_remote_over_tcp() {
+    let addr = spawn_server_with_permission(4).await;
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    consume_empty_world(&mut alice, &mut buf_a).await;
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_named(&mut bob, &mut buf_b, "Bob").await;
+    consume_empty_world(&mut bob, &mut buf_b).await;
+
+    alice
+        .write_all(&compressed_command_frame("tp 0 100 0"))
+        .await
+        .unwrap();
+    let position = read_skipping_until_id(&mut alice, &mut buf_a, 0x49).await;
+    let (teleport_id, x, y, z) = parse_player_position(&position);
+    assert_ne!(
+        teleport_id, 1,
+        "l'identifiant de téléportation n'est pas celui du spawn"
+    );
+    assert_eq!(
+        (x, y, z),
+        (0.5, 100.0, 0.5),
+        "entiers x,z centrés, y intact"
+    );
+    let feedback = read_skipping_until_id(&mut alice, &mut buf_a, 0x7C).await;
+    assert!(
+        contains_subslice(&feedback, b"commands.teleport.success.location.single"),
+        "retour location.single"
+    );
+    assert!(contains_subslice(&feedback, b"100.000000"));
+
+    alice
+        .write_all(&compressed_move_player_pos_frame(24.5, 100.0, 0.5, 0x01))
+        .await
+        .unwrap();
+    while let Some((id, _)) =
+        try_read_compressed_frame(&mut alice, &mut buf_a, Duration::from_millis(300)).await
+    {
+        assert_ne!(
+            id, 0x60,
+            "un déplacement avant l'accusé ne recentre aucun chunk"
+        );
+    }
+
+    alice
+        .write_all(&compressed_accept_teleportation_frame(
+            teleport_id,
+            0.5,
+            100.0,
+            0.5,
+            0.0,
+            0.0,
+        ))
+        .await
+        .unwrap();
+    alice
+        .write_all(&compressed_move_player_pos_frame(24.5, 100.0, 0.5, 0x01))
+        .await
+        .unwrap();
+    let _ = read_skipping_until_id(&mut alice, &mut buf_a, 0x60).await;
+
+    bob.write_all(&compressed_move_player_pos_frame(8.5, -60.0, 4.5, 0x01))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(150)).await;
+
+    alice
+        .write_all(&compressed_command_frame("tp Bob"))
+        .await
+        .unwrap();
+    let position = read_skipping_until_id(&mut alice, &mut buf_a, 0x49).await;
+    let (teleport_id, x, y, z) = parse_player_position(&position);
+    assert_ne!(teleport_id, 1);
+    assert_eq!(
+        (x, y, z),
+        (8.5, -60.0, 4.5),
+        "Alice rejoint la position publiée de Bob"
+    );
+    let feedback = read_skipping_until_id(&mut alice, &mut buf_a, 0x7C).await;
+    assert!(
+        contains_subslice(&feedback, b"commands.teleport.success.entity.single"),
+        "retour entity.single"
+    );
+    assert!(contains_subslice(&feedback, b"Bob"));
+
+    alice
+        .write_all(&compressed_command_frame("tp Bob 0 80 0"))
+        .await
+        .unwrap();
+    let position = read_skipping_until_id(&mut bob, &mut buf_b, 0x49).await;
+    let (bob_teleport_id, bx, by, bz) = parse_player_position(&position);
+    assert_ne!(
+        bob_teleport_id, 1,
+        "Bob reçoit un identifiant de téléportation distant"
+    );
+    assert_eq!(
+        (bx, by, bz),
+        (0.5, 80.0, 0.5),
+        "Bob est amené à la position centrée"
+    );
+    let feedback = read_skipping_until_id(&mut alice, &mut buf_a, 0x7C).await;
+    assert!(
+        contains_subslice(&feedback, b"commands.teleport.success.location.single"),
+        "retour location.single pour une cible distante vers des coordonnées"
+    );
+    assert!(contains_subslice(&feedback, b"Bob"));
 }

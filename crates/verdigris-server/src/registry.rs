@@ -22,6 +22,11 @@ pub enum ControlMsg {
         info_update: Arc<[u8]>,
         feedback: Option<Arc<[u8]>>,
     },
+    Teleport {
+        x: f64,
+        y: f64,
+        z: f64,
+    },
 }
 
 pub type OutboundSender = UnboundedSender<Outbound>;
@@ -154,6 +159,7 @@ pub struct PlayerHandle {
     pub uuid: u128,
     pub name: String,
     pub x: f64,
+    pub y: f64,
     pub z: f64,
     pub sender: OutboundSender,
 }
@@ -868,6 +874,7 @@ impl PlayerRegistry {
                 uuid,
                 name: slot.name.clone(),
                 x: slot.x,
+                y: slot.y,
                 z: slot.z,
                 sender: slot.sender.clone(),
             })
