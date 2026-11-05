@@ -273,6 +273,62 @@ impl Inventory {
         });
         vec![sel]
     }
+
+    fn mergeable_slot(&self, item: i32, max_stack: i32) -> Option<usize> {
+        let sel = self.selected;
+        if matches!(self.slots[sel], Some(s) if s.item == item && s.count < max_stack) {
+            return Some(sel);
+        }
+        (0..INVENTORY_SLOTS)
+            .find(|&i| matches!(self.slots[i], Some(s) if s.item == item && s.count < max_stack))
+    }
+
+    fn insert_stack(&mut self, item: i32, mut pile: i32, max_stack: i32, touched: &mut Vec<usize>) {
+        while pile > 0 {
+            if max_stack > 1
+                && let Some(index) = self.mergeable_slot(item, max_stack)
+            {
+                let slot = self.slots[index].as_mut().unwrap();
+                let added = (max_stack - slot.count).min(pile);
+                slot.count += added;
+                pile -= added;
+                push_unique(touched, index);
+                continue;
+            }
+            match (0..INVENTORY_SLOTS).find(|&i| self.slots[i].is_none()) {
+                Some(index) => {
+                    let added = max_stack.min(pile);
+                    self.slots[index] = Some(ItemSlot { item, count: added });
+                    pile -= added;
+                    push_unique(touched, index);
+                }
+                None => break,
+            }
+        }
+    }
+
+    pub fn give(&mut self, item: i32, count: i32, max_stack: u8) -> Vec<usize> {
+        let max_stack = max_stack as i32;
+        let mut touched = Vec::new();
+        if max_stack <= 0 {
+            return touched;
+        }
+        let mut remaining = count;
+        while remaining > 0 {
+            let pile = max_stack.min(remaining);
+            remaining -= pile;
+            self.insert_stack(item, pile, max_stack, &mut touched);
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        touched
+    }
+}
+
+fn push_unique(touched: &mut Vec<usize>, index: usize) {
+    if !touched.contains(&index) {
+        touched.push(index);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,6 +446,19 @@ impl PlayerState {
     pub fn next_container_state_id(&mut self) -> i32 {
         self.container_state_id += 1;
         self.container_state_id
+    }
+
+    pub fn give_item(&mut self, item: i32, count: i32, max_stack: u8) -> Vec<SlotUpdate> {
+        let changed = self.inventory.give(item, count, max_stack);
+        let mut updates: Vec<SlotUpdate> = changed
+            .into_iter()
+            .map(|index| SlotUpdate {
+                menu_slot: index_to_menu_slot(index),
+                stack: slot_to_stack(self.inventory.slots[index]),
+            })
+            .collect();
+        updates.sort_by_key(|update| update.menu_slot);
+        updates
     }
 
     fn within_reach_squared(&self, pos: BlockPos, max_squared: f64) -> bool {
@@ -1404,6 +1473,91 @@ mod tests {
         assert!(slots.is_empty(), "survie introuvable: aucune case modifiée");
         assert_eq!(selected, 0, "case choisie inchangée");
         assert_eq!(player.inventory.slots[0], slot(DIRT_ITEM));
+    }
+
+    const GIVE_ITEM: i32 = 1000;
+
+    fn item_slot(item: i32, count: i32) -> Option<ItemSlot> {
+        Some(ItemSlot { item, count })
+    }
+
+    #[test]
+    fn give_70_diamants_vide() {
+        let mut inventory = Inventory::new();
+        let changed = inventory.give(GIVE_ITEM, 70, 64);
+        assert_eq!(inventory.slots[0], item_slot(GIVE_ITEM, 64));
+        assert_eq!(inventory.slots[1], item_slot(GIVE_ITEM, 6));
+        assert_eq!(changed, vec![0, 1]);
+    }
+
+    #[test]
+    fn give_max_stack_1() {
+        let mut inventory = Inventory::new();
+        let changed = inventory.give(GIVE_ITEM, 3, 1);
+        assert_eq!(inventory.slots[0], item_slot(GIVE_ITEM, 1));
+        assert_eq!(inventory.slots[1], item_slot(GIVE_ITEM, 1));
+        assert_eq!(inventory.slots[2], item_slot(GIVE_ITEM, 1));
+        assert_eq!(changed, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn give_max_stack_16() {
+        let mut inventory = Inventory::new();
+        inventory.give(GIVE_ITEM, 20, 16);
+        assert_eq!(inventory.slots[0], item_slot(GIVE_ITEM, 16));
+        assert_eq!(inventory.slots[1], item_slot(GIVE_ITEM, 4));
+    }
+
+    #[test]
+    fn give_ordre_selectionnee_puis_0_35() {
+        let mut inventory = Inventory::new();
+        inventory.slots[3] = item_slot(GIVE_ITEM, 5);
+        inventory.selected = 3;
+        let changed = inventory.give(GIVE_ITEM, 10, 64);
+        assert_eq!(
+            inventory.slots[3],
+            item_slot(GIVE_ITEM, 15),
+            "la case sélectionnée est remplie avant les autres"
+        );
+        assert_eq!(changed, vec![3]);
+        assert!(
+            inventory.slots.iter().filter(|s| s.is_some()).count() == 1,
+            "aucune autre case touchée"
+        );
+    }
+
+    #[test]
+    fn give_indices_dedupliques() {
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = item_slot(GIVE_ITEM, 10);
+        inventory.selected = 0;
+        let changed = inventory.give(GIVE_ITEM, 20, 16);
+        assert_eq!(inventory.slots[0], item_slot(GIVE_ITEM, 16));
+        assert_eq!(
+            inventory.slots[1],
+            item_slot(GIVE_ITEM, 14),
+            "case 1 abondée par deux piles"
+        );
+        assert_eq!(changed, vec![0, 1], "l'index 1 n'apparaît qu'une fois");
+    }
+
+    #[test]
+    fn give_emission_triee_menu_slots() {
+        let mut inventory = Inventory::new();
+        inventory.slots[0] = item_slot(GIVE_ITEM, 63);
+        for index in 1..HOTBAR_SLOTS {
+            inventory.slots[index] = item_slot(GIVE_ITEM + 1, 64);
+        }
+        inventory.slots[9] = item_slot(GIVE_ITEM, 60);
+        inventory.selected = 0;
+        let mut player = PlayerState::with_inventory(GameMode::Creative, SPAWN, inventory);
+        let updates = player.give_item(GIVE_ITEM, 64, 64);
+        let menu: Vec<i16> = updates.iter().map(|u| u.menu_slot).collect();
+        assert_eq!(
+            menu,
+            vec![9, 10, 36],
+            "slots de menu croissants: réserve 9..35 avant barre 36..44"
+        );
     }
 
     #[test]

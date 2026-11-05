@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 pub const EXPECTED_STATE_COUNT: i32 = 35723;
@@ -28,6 +28,11 @@ pub struct ItemState {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ItemProps {
+    pub max_stack_size: Option<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct BlocksData {
     pub game_version: String,
     pub server_jar_sha1: String,
@@ -37,6 +42,8 @@ pub struct BlocksData {
     pub items: Vec<ItemState>,
     #[serde(default)]
     pub item_ids: HashMap<String, i32>,
+    #[serde(default)]
+    pub item_props: HashMap<String, ItemProps>,
 }
 
 pub struct Blocks {
@@ -45,6 +52,8 @@ pub struct Blocks {
     by_id: HashMap<i32, usize>,
     items: HashMap<i32, i32>,
     steps: Vec<Vec<i32>>,
+    max_stack: Vec<u8>,
+    placing_items: HashSet<i32>,
 }
 
 static BLOCKS: OnceLock<Blocks> = OnceLock::new();
@@ -88,6 +97,8 @@ fn blocks() -> &'static Blocks {
             .map(|entry| (entry.item, entry.state))
             .collect();
         let steps = data.blocks.iter().map(mixed_radix_steps).collect();
+        let max_stack = build_max_stack(&data);
+        let placing_items = data.items.iter().map(|entry| entry.item).collect();
 
         Blocks {
             data,
@@ -95,8 +106,26 @@ fn blocks() -> &'static Blocks {
             by_id,
             items,
             steps,
+            max_stack,
+            placing_items,
         }
     })
+}
+
+fn build_max_stack(data: &BlocksData) -> Vec<u8> {
+    let highest = data.item_ids.values().copied().max().unwrap_or(-1);
+    let mut table = vec![0u8; (highest + 1).max(0) as usize];
+    for (name, &id) in &data.item_ids {
+        let size = data
+            .item_props
+            .get(name)
+            .and_then(|props| props.max_stack_size)
+            .unwrap_or_else(|| {
+                panic!("item_props.{name}.max_stack_size absent pour l'objet {name} (id {id})")
+            });
+        table[id as usize] = size;
+    }
+    table
 }
 
 pub fn blocks_data() -> &'static BlocksData {
@@ -212,6 +241,18 @@ pub fn item_id_of_name(name: &str) -> Option<i32> {
     blocks().data.item_ids.get(name).copied()
 }
 
+pub fn max_stack_size(item_id: i32) -> u8 {
+    let table = &blocks().max_stack;
+    if item_id < 0 {
+        return 0;
+    }
+    table.get(item_id as usize).copied().unwrap_or(0)
+}
+
+pub fn item_places_block(item_id: i32) -> bool {
+    blocks().placing_items.contains(&item_id)
+}
+
 pub fn is_air(state: i32) -> bool {
     if state == 0 {
         return true;
@@ -288,6 +329,36 @@ mod tests {
     fn item_ids_resolve_from_name() {
         assert_eq!(item_id_of_name("minecraft:ender_eye"), Some(1278));
         assert_eq!(item_id_of_name("minecraft:not_an_item"), None);
+    }
+
+    #[test]
+    fn max_stack_size_couvre_tout() {
+        let data = blocks_data();
+        for (name, &id) in &data.item_ids {
+            let size = max_stack_size(id);
+            assert!(
+                matches!(size, 1 | 16 | 64),
+                "taille de pile inattendue {size} pour {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_stack_size_valeurs_connues() {
+        let diamond = item_id_of_name("minecraft:diamond").unwrap();
+        let ender_pearl = item_id_of_name("minecraft:ender_pearl").unwrap();
+        let sword = item_id_of_name("minecraft:diamond_sword").unwrap();
+        assert_eq!(max_stack_size(diamond), 64);
+        assert_eq!(max_stack_size(ender_pearl), 16);
+        assert_eq!(max_stack_size(sword), 1);
+    }
+
+    #[test]
+    fn item_places_block_distinguishes_blocks_from_tools() {
+        let dirt = item_id_of_name("minecraft:dirt").unwrap();
+        let diamond = item_id_of_name("minecraft:diamond").unwrap();
+        assert!(item_places_block(dirt));
+        assert!(!item_places_block(diamond));
     }
 
     #[test]

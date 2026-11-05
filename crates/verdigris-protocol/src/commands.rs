@@ -1281,6 +1281,114 @@ mod tests {
     }
 
     #[test]
+    fn give_nodes_exact_bytes_at_bfs_offsets() {
+        let (payload, offsets, nodes, remap) = reencode_with_offsets(4);
+        assert_eq!(
+            payload,
+            commands_payload(4),
+            "réencodage identique au payload"
+        );
+
+        let give = nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Literal && n.name == "give")
+            .unwrap();
+        let targets = nodes[give].children[0];
+        assert_eq!(nodes[targets].name, "targets");
+        assert_eq!(
+            nodes[targets].parser,
+            Some(Parser::Entity {
+                flags: ENTITY_PLAYERS_ONLY
+            })
+        );
+        let item = nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Argument && n.name == "item")
+            .unwrap();
+        let count = nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Argument && n.name == "count")
+            .unwrap();
+
+        for &src in &[give, targets, item, count] {
+            let baked = baked_node(&nodes, &remap, src);
+            let offset = offsets[src];
+            assert_eq!(
+                &payload[offset..offset + baked.len()],
+                &baked[..],
+                "octets du noeud à l'offset BFS attendu"
+            );
+        }
+
+        let give_bytes = baked_node(&nodes, &remap, give);
+        assert_eq!(give_bytes[0], 0x21, "give: littéral + restreint");
+        assert_eq!(give_bytes[1], 0x01, "give: un seul enfant");
+        assert_eq!(
+            &give_bytes[give_bytes.len() - 5..],
+            &[0x04, b'g', b'i', b'v', b'e'],
+            "give: nom en fin de noeud"
+        );
+
+        let targets_bytes = baked_node(&nodes, &remap, targets);
+        assert_eq!(targets_bytes[0], 0x02, "targets: argument non exécutable");
+        assert_eq!(
+            &targets_bytes[targets_bytes.len() - 2..],
+            &[0x06, 0x02],
+            "parser entity + joueurs uniquement"
+        );
+
+        let item_bytes = baked_node(&nodes, &remap, item);
+        assert_eq!(item_bytes[0], 0x06, "item: argument + exécutable");
+        assert_eq!(
+            *item_bytes.last().unwrap(),
+            0x0e,
+            "parser item_stack 0x0e sans propriété"
+        );
+
+        let count_bytes = baked_node(&nodes, &remap, count);
+        assert_eq!(
+            count_bytes,
+            vec![
+                0x06, 0x00, 0x05, b'c', b'o', b'u', b'n', b't', 0x03, 0x01, 0x00, 0x00, 0x00, 0x01
+            ],
+            "count: argument exécutable sans enfant, integer min 1"
+        );
+    }
+
+    #[test]
+    fn give_arbre_connecte() {
+        let payload = commands_payload(4);
+        let (nodes, _) = decode_tree(&payload);
+        let give = nodes
+            .iter()
+            .position(|n| n.3.as_deref() == Some("give"))
+            .unwrap();
+        assert_eq!(nodes[give].1.len(), 1, "give a exactement un enfant");
+        let targets = nodes[give].1[0];
+        assert_eq!(nodes[targets].3.as_deref(), Some("targets"));
+        assert_ne!(
+            nodes[targets].3.as_deref(),
+            Some("item"),
+            "l'enfant de give est targets, pas item"
+        );
+        assert_eq!(nodes[targets].1.len(), 1);
+        let item = nodes[targets].1[0];
+        assert_eq!(nodes[item].3.as_deref(), Some("item"));
+        assert_eq!(nodes[item].1.len(), 1);
+        let count = nodes[item].1[0];
+        assert_eq!(nodes[count].3.as_deref(), Some("count"));
+
+        assert_ne!(nodes[item].0 & FLAG_EXECUTABLE, 0, "item exécutable");
+        assert_ne!(nodes[count].0 & FLAG_EXECUTABLE, 0, "count exécutable");
+        assert!(nodes[count].1.is_empty(), "count n'a pas d'enfant");
+
+        assert!(
+            nodes[0].1.contains(&give),
+            "la racine référence le littéral give"
+        );
+    }
+
+    #[test]
     fn tp_literal_redirect_form_bytes() {
         let (_payload, _offsets, nodes, remap) = reencode_with_offsets(4);
         let teleport = nodes

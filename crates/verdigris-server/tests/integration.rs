@@ -4021,3 +4021,84 @@ async fn teleport_self_player_and_remote_over_tcp() {
     );
     assert!(contains_subslice(&feedback, b"Bob"));
 }
+
+async fn read_give_slot(stream: &mut TcpStream, buf: &mut Vec<u8>) -> (i16, Option<(i32, i32)>) {
+    let body = read_skipping_until_id(stream, buf, 0x14).await;
+    let (_state_id, slot, stack) = read_container_set_slot(&body);
+    (slot, stack)
+}
+
+#[tokio::test]
+async fn give_command_distributes_items_over_tcp() {
+    let addr = spawn_server_with_permission(4).await;
+    let diamond = item_id_of_name("minecraft:diamond").unwrap();
+    let ender_pearl = item_id_of_name("minecraft:ender_pearl").unwrap();
+
+    let mut alice = TcpStream::connect(addr).await.unwrap();
+    let mut buf_a = Vec::new();
+    drive_to_play_named(&mut alice, &mut buf_a, "Alice").await;
+    consume_empty_world(&mut alice, &mut buf_a).await;
+
+    let mut bob = TcpStream::connect(addr).await.unwrap();
+    let mut buf_b = Vec::new();
+    drive_to_play_named(&mut bob, &mut buf_b, "Bob").await;
+    consume_empty_world(&mut bob, &mut buf_b).await;
+
+    alice
+        .write_all(&compressed_command_frame("give Alice minecraft:diamond 5"))
+        .await
+        .unwrap();
+    let (slot, stack) = read_give_slot(&mut alice, &mut buf_a).await;
+    assert_eq!(slot, 36, "diamants en première case de la barre");
+    assert_eq!(stack, Some((diamond, 5)));
+    let feedback = read_skipping_until_id(&mut alice, &mut buf_a, 0x7C).await;
+    assert!(contains_subslice(
+        &feedback,
+        b"commands.give.success.single"
+    ));
+
+    alice
+        .write_all(&compressed_command_frame("give Alice diamond 70"))
+        .await
+        .unwrap();
+    let (slot, stack) = read_give_slot(&mut alice, &mut buf_a).await;
+    assert_eq!(slot, 36);
+    assert_eq!(stack, Some((diamond, 64)), "la pile existante monte à 64");
+    let (slot, stack) = read_give_slot(&mut alice, &mut buf_a).await;
+    assert_eq!(slot, 37);
+    assert_eq!(stack, Some((diamond, 11)), "le reste de 70 cumulé: 11");
+    let _ = read_skipping_until_id(&mut alice, &mut buf_a, 0x7C).await;
+
+    alice
+        .write_all(&compressed_command_frame(
+            "give Bob minecraft:ender_pearl 20",
+        ))
+        .await
+        .unwrap();
+    let (slot, stack) = read_give_slot(&mut bob, &mut buf_b).await;
+    assert_eq!(slot, 36);
+    assert_eq!(stack, Some((ender_pearl, 16)), "perles plafonnées à 16");
+    let (slot, stack) = read_give_slot(&mut bob, &mut buf_b).await;
+    assert_eq!(slot, 37);
+    assert_eq!(stack, Some((ender_pearl, 4)));
+    let feedback = read_skipping_until_id(&mut alice, &mut buf_a, 0x7C).await;
+    assert!(
+        contains_subslice(&feedback, b"commands.give.success.single"),
+        "l'auteur reçoit son retour pour un don à autrui"
+    );
+
+    alice
+        .write_all(&compressed_command_frame("give Alice ender_pearl 1601"))
+        .await
+        .unwrap();
+    let feedback = read_skipping_until_id(&mut alice, &mut buf_a, 0x7C).await;
+    assert!(
+        contains_subslice(&feedback, b"commands.give.failed.toomanyitems"),
+        "au-delà du plafond 16x100 = 1600, l'échec est signalé"
+    );
+    while let Some((id, _)) =
+        try_read_compressed_frame(&mut alice, &mut buf_a, Duration::from_millis(200)).await
+    {
+        assert_ne!(id, 0x14, "aucun paquet d'inventaire envoyé en cas d'échec");
+    }
+}

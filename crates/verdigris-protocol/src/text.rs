@@ -40,6 +40,7 @@ pub enum HoverEvent {
     },
     ShowItem {
         id: String,
+        count: Option<i32>,
     },
 }
 
@@ -149,6 +150,37 @@ pub fn player_display_name(name: &str, uuid: u128) -> Component {
     }
 }
 
+pub fn item_name_translation_key(name: &str) -> String {
+    let path = name.rsplit_once(':').map_or(name, |(_, path)| path);
+    let places = crate::blocks::item_id_of_name(name)
+        .map(crate::blocks::item_places_block)
+        .unwrap_or(false);
+    if places {
+        format!("block.minecraft.{path}")
+    } else {
+        format!("item.minecraft.{path}")
+    }
+}
+
+pub fn item_component(name: &str, count: i32) -> Component {
+    let inner = Component::translate(item_name_translation_key(name));
+    Component {
+        content: Content::Translatable {
+            key: "chat.square_brackets".to_owned(),
+            args: vec![Arg::Comp(Box::new(inner))],
+        },
+        style: Style {
+            color: Some("white".to_owned()),
+            hover: Some(HoverEvent::ShowItem {
+                id: name.to_owned(),
+                count: if count == 1 { None } else { Some(count) },
+            }),
+            ..Style::default()
+        },
+        extra: Vec::new(),
+    }
+}
+
 fn write_component_payload(buf: &mut Vec<u8>, component: &Component) {
     if root_tag_type(component) == TAG_STRING {
         if let Content::Text(value) = &component.content {
@@ -227,9 +259,13 @@ fn write_hover_event(buf: &mut Vec<u8>, hover: &HoverEvent) {
             write_entry_header(buf, root_tag_type(name), "name");
             write_component_payload(buf, name);
         }
-        HoverEvent::ShowItem { id } => {
+        HoverEvent::ShowItem { id, count } => {
             write_string_entry(buf, "action", "show_item");
             write_string_entry(buf, "id", id);
+            if let Some(count) = count {
+                write_entry_header(buf, TAG_INT, "count");
+                write_i32(*count, buf);
+            }
         }
     }
     buf.push(TAG_END);
@@ -512,6 +548,67 @@ mod tests {
         let mut buf = Vec::new();
         write_nbt(&mut buf, &name);
         assert_eq!(buf[0], TAG_COMPOUND);
+    }
+
+    #[test]
+    fn item_component_diamond_is_white_square_brackets_with_item_key() {
+        let component = item_component("minecraft:diamond", 5);
+        assert_eq!(component.style.color.as_deref(), Some("white"));
+        match &component.content {
+            Content::Translatable { key, args } => {
+                assert_eq!(key, "chat.square_brackets");
+                assert_eq!(args.len(), 1);
+                match &args[0] {
+                    Arg::Comp(inner) => assert_eq!(
+                        inner.content,
+                        Content::Translatable {
+                            key: "item.minecraft.diamond".to_owned(),
+                            args: Vec::new(),
+                        }
+                    ),
+                    other => panic!("argument inattendu {other:?}"),
+                }
+            }
+            other => panic!("contenu inattendu {other:?}"),
+        }
+        match component.style.hover.as_ref().unwrap() {
+            HoverEvent::ShowItem { id, count } => {
+                assert_eq!(id, "minecraft:diamond");
+                assert_eq!(*count, Some(5));
+            }
+            other => panic!("survol inattendu {other:?}"),
+        }
+    }
+
+    #[test]
+    fn item_component_count_one_omits_count_field() {
+        let component = item_component("minecraft:diamond", 1);
+        match component.style.hover.as_ref().unwrap() {
+            HoverEvent::ShowItem { count, .. } => assert_eq!(*count, None),
+            other => panic!("survol inattendu {other:?}"),
+        }
+        let mut buf = Vec::new();
+        write_nbt(&mut buf, &component);
+        assert!(
+            !contains_subslice(&buf, b"count"),
+            "le champ count est absent quand count vaut 1"
+        );
+    }
+
+    #[test]
+    fn item_component_block_uses_block_key() {
+        assert_eq!(
+            item_name_translation_key("minecraft:dirt"),
+            "block.minecraft.dirt"
+        );
+        assert_eq!(
+            item_name_translation_key("minecraft:diamond"),
+            "item.minecraft.diamond"
+        );
+    }
+
+    fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod generator;
+mod give;
 mod interaction;
 mod level;
 mod placement;
@@ -54,16 +55,17 @@ use verdigris_protocol::{
     container_set_slot_payload, decode_client_information, decode_compressed_frame, decode_frame,
     decode_known_packs, decode_serverbound, entity_event_permission_payload,
     forget_level_chunk_payload, game_event_payload, keep_alive_payload, known_packs_payload,
-    login_disconnect_payload, login_play_payload, login_success_payload, network_data,
-    normalize_chat, offline_uuid, packet_ids, parse_gamemode, player_abilities_payload,
-    player_chat_tail, player_info_remove_payload, player_info_update_gamemode_payload,
-    player_info_update_init_payload, player_info_update_latency_payload, player_position_payload,
-    pong_payload, random_session_id, read_var_int, registry_data_payload, remove_entities_payload,
-    server_known_pack, set_chunk_cache_center_payload, set_compression_payload,
-    set_equipment_payload, set_held_slot_payload, status_json, status_response_payload,
-    suggest_completions, swing_animation_payload, system_chat_payload, tab_list_payload,
-    unknown_command_components, update_tags_payload, validate_chat_content, validate_name,
-    write_chunk_payload, write_command_suggestions, write_nbt, write_var_int,
+    login_disconnect_payload, login_play_payload, login_success_payload, max_stack_size,
+    network_data, normalize_chat, offline_uuid, packet_ids, parse_gamemode,
+    player_abilities_payload, player_chat_tail, player_info_remove_payload,
+    player_info_update_gamemode_payload, player_info_update_init_payload,
+    player_info_update_latency_payload, player_position_payload, pong_payload, random_session_id,
+    read_var_int, registry_data_payload, remove_entities_payload, server_known_pack,
+    set_chunk_cache_center_payload, set_compression_payload, set_equipment_payload,
+    set_held_slot_payload, status_json, status_response_payload, suggest_completions,
+    swing_animation_payload, system_chat_payload, tab_list_payload, unknown_command_components,
+    update_tags_payload, validate_chat_content, validate_name, write_chunk_payload,
+    write_command_suggestions, write_nbt, write_var_int,
 };
 use verdigris_protocol::{GAME_VERSION, WORLD_MAX_Y, WORLD_MIN_Y, is_air, is_fluid};
 
@@ -1985,6 +1987,11 @@ async fn apply_outbound(
         Outbound::Control(ControlMsg::Teleport { x, y, z }) => {
             apply_teleport(stream, framing, state, session, x, y, z).await
         }
+        Outbound::Control(ControlMsg::Give { item, count }) => {
+            let max_stack = max_stack_size(item);
+            let updates = session.player.give_item(item, count, max_stack);
+            emit_slot_updates(stream, framing, state, &mut session.player, updates).await
+        }
     }
 }
 
@@ -2309,6 +2316,7 @@ async fn execute_command(
         }
         "msg" | "tell" | "w" => send_message_command(stream, framing, session, command, name).await,
         "gamemode" => handle_gamemode(stream, framing, session, remainder(command, name)).await,
+        "give" => handle_give(stream, framing, session, remainder(command, name)).await,
         "teleport" | "tp" => {
             handle_teleport(stream, framing, session, remainder(command, name)).await
         }
@@ -2644,6 +2652,94 @@ async fn apply_gamemode_to_target(
             .with(Arg::Comp(Box::new(mode_component(mode))));
         send_system_line(stream, framing, &message).await
     }
+}
+
+async fn handle_give(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    session: &mut Session<'_>,
+    args: &str,
+) -> bool {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return send_unknown_command(stream, framing, &format!("give {args}")).await;
+    }
+    let selector = tokens[0];
+    let item = match give::parse_item_token(tokens[1]) {
+        Ok(parsed) => parsed,
+        Err(give::ItemError::Unknown(id)) => {
+            let error = argument_error_component("argument.item.id.invalid", &id);
+            return send_system_line(stream, framing, &error).await;
+        }
+        Err(give::ItemError::Syntax) => {
+            return send_unknown_command(stream, framing, &format!("give {args}")).await;
+        }
+    };
+    let count = match give::parse_count(tokens.get(2).copied()) {
+        Ok(count) => count,
+        Err(_) => return send_unknown_command(stream, framing, &format!("give {args}")).await,
+    };
+
+    let max_stack = max_stack_size(item.id);
+    let cap = max_stack as i32 * 100;
+    if count > cap {
+        let component = give::too_many_items_component(cap, &item.name);
+        return send_system_line(stream, framing, &component).await;
+    }
+
+    let targets = resolve_targets(session, selector);
+    if targets.is_empty() {
+        let error = argument_error_component("argument.entity.notfound.player", selector);
+        return send_system_line(stream, framing, &error).await;
+    }
+
+    let target_count = targets.len();
+    for target in &targets {
+        if target.uuid == session.uuid {
+            let updates = session.player.give_item(item.id, count, max_stack);
+            if emit_slot_updates(stream, framing, State::Play, &mut session.player, updates).await {
+                return true;
+            }
+        } else {
+            let _ = target.sender.send(Outbound::Control(ControlMsg::Give {
+                item: item.id,
+                count,
+            }));
+        }
+    }
+
+    let feedback = if target_count == 1 {
+        let target = &targets[0];
+        give::success_single(count, &item.name, &target.name, target.uuid)
+    } else {
+        give::success_multiple(count, &item.name, target_count as i32)
+    };
+    send_system_line(stream, framing, &feedback).await
+}
+
+async fn emit_slot_updates(
+    stream: &mut TcpStream,
+    framing: &Framing,
+    state: State,
+    player_state: &mut PlayerState,
+    updates: Vec<player::SlotUpdate>,
+) -> bool {
+    for slot in updates {
+        let state_id = player_state.next_container_state_id();
+        if write_packet(
+            stream,
+            framing,
+            state,
+            play_cb::CONTAINER_SET_SLOT,
+            &container_set_slot_payload(0, state_id, slot.menu_slot, slot.stack),
+        )
+        .await
+        .is_err()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 async fn handle_teleport(

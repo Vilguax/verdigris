@@ -46,9 +46,10 @@ pub enum State {
 }
 
 pub use blocks::{
-    Block, BlocksData, ItemState, Property, block_has_property, block_id_of_name,
+    Block, BlocksData, ItemProps, ItemState, Property, block_has_property, block_id_of_name,
     block_item_of_state, blocks_data, default_state_of_name, is_air, is_fluid, item_id_of_name,
-    item_to_placed_state, property_of, state_to_block, state_with, with_property,
+    item_places_block, item_to_placed_state, max_stack_size, property_of, state_to_block,
+    state_with, with_property,
 };
 pub use bucket_tables::{
     BucketIds, bucket_ids, is_liquid_block, is_source_fluid, is_waterloggable, lava_source_state,
@@ -156,8 +157,8 @@ pub use status::{
     status_response_payload,
 };
 pub use text::{
-    Arg, ClickEvent, Component, Content, HoverEvent, SYSTEM_CHAT, Style, player_display_name,
-    root_tag_type, system_chat_payload, write_nbt,
+    Arg, ClickEvent, Component, Content, HoverEvent, SYSTEM_CHAT, Style, item_component,
+    item_name_translation_key, player_display_name, root_tag_type, system_chat_payload, write_nbt,
 };
 pub use tracking::{
     EntitySnapshot, FORCE_SYNC_TICKS, MAX_TELEPORT_DELAY, POSITION_EPSILON_SQ, TrackedState,
