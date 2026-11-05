@@ -1,5 +1,7 @@
+pub mod bridge;
 pub mod engine;
 pub mod error;
+pub mod features;
 pub mod numbers;
 pub mod order;
 pub mod palette;
@@ -10,8 +12,10 @@ pub mod rng;
 pub mod tags;
 pub mod zoom;
 
+pub use bridge::{TerrainFeatureWorld, TerrainRegion};
 pub use engine::{Decoration, DecorationContext};
 pub use error::FeatureError;
+pub use features::{DiskConfig, OreConfig, OreScratch, RuleTest, StateProvider, ore_metrics};
 pub use numbers::{FloatProvider, HeightCtx, HeightProvider, IntProvider};
 pub use order::{DECORATION_STEPS, GlobalOrder, build_order, global_order_from_features};
 pub use palette::{Physics, StatePalette};

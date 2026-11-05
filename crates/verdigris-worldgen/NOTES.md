@@ -755,3 +755,167 @@ borné (~56 entrées) une fois par chunk, hors boucle chaude.
 - Modificateurs/prédicats marqués [INCERTAIN] ci-dessus : aucun oracle de features dans
   cette session ; tests dédiés dérivés de la prose, à passer en `#[ignore]` s'ils
   divergent après relecture, jamais d'ajustement du code pour forcer un vecteur.
+
+## Socle de décoration réelle — minerais et disques (spec 09 §9)
+
+### H-région (D1, D2, spec 09 §1.2)
+La région n'est pas une fenêtre 3×3 : elle raisonne en distance de Tchebychev
+`d = max(|cx−Cx|, |cz−Cz|)`. `feature/region.rs::read_block` applique dans l'ordre :
+borne verticale d'abord (`y < −64` ou `y ≥ 320` → `void_air`, D2 prime sans consulter
+de chunk, y compris à `d ≥ 9`), puis `d > 8` → erreur, puis `d = 2..8` sans terrain → `air`
+(et non `void_air`, D1), sinon le vrai bloc. Les voisins réels à `d = 2..8` restent lisibles
+quand le terrain est prêt. `write_block` : `d ≥ 9` → erreur (pas un refus silencieux, D3) ;
+`d = 2..8` → refus silencieux (`Ok(false)`, la feature continue) ; hors borne verticale →
+`Ok(false)`. Le minerai teste explicitement le rayon d'écriture avant chaque bloc.
+
+### H-biome-filtre (D5, spec 09 §5.10) — point corrigé
+`collected_biomes` (9 chunks, §2.3) ne sert QU'À bâtir l'ensemble candidat `E_k` (gating
+d'activation `is_active`). Le modificateur `minecraft:biome` est un filtre POSITIONNEL
+distinct : pour chaque position `q`, `biome_allows` lit le biome zoomé (spec 06 §1.8) et
+n'accepte que si ce biome référence la placed feature de PREMIER NIVEAU en cours. Le moteur
+porte un « contexte de premier niveau » (`RunCtx.top_feature` = ensemble des biomes qui
+référencent la feature de tête). Les features imbriquées (composition, sélecteurs) sont
+exécutées via `RunCtx::nested()` qui met ce contexte à `None` : un `biome` imbriqué devient
+une erreur fatale maîtrisée (aucune donnée 09 ne le déclenche). Une lecture de biome à
+`d ≥ 2` remonte désormais une erreur (D5) au lieu de laisser passer : en pratique le filtre
+tourne après `in_square`/`heightmap`, donc à `d ≤ 1`, et n'erre jamais. Correction par
+rapport à l'ancien passthrough qui confondait sélection des candidats et filtre au bloc.
+
+### Minerais `ore` (spec 09 §9.2)
+`feature/features.rs::run_ore`. Ordre des tirages reproduit à la lettre : `θ = next_float()·π`
+(`π` = le `f32` std), `y0`/`y1` via deux `next_int(3)`, puis par sphère `e = next_double()`.
+`σ = size/8`, `ρ = ⌈(size/16·2+1)/2⌉`, `c = ⌈σ⌉` (tout en `f32`) ; `sin`/`cos` en `f64` de
+`f64(θ)` pour les extrémités ; rayons via le sinus tabulé spec 08 §3.1
+(`carver::sincos::sin_table().sin_t`). Élimination des sphères incluses, remplissage avec
+masque `u²`, `u²+v²`, `u²+v²+w²` et `déjà_vus` représenté par un BITSET borné au pavé
+englobant de la veine (`OreScratch.mask`, côté `t+1`, remis à zéro par veine), réutilisé
+entre veines sans réallocation (tampons `xc/yc/zc/rad` redimensionnés, jamais rétrécis ;
+`DecorationContext.ore`). Aucun court-circuit `d ≥ 2` avant la pose : chaque bloc du pavé
+passe par le test de cible et la décision d'exposition (tirages consommés comme vanilla à
+`d = 2..8`), puis `write_block` refuse silencieusement l'écriture hors rayon (D3). Décision
+d'exposition : `δ ≤ 0` accepte ; `δ ≥ 1` accepte si aucun des 6 voisins n'est de l'air ;
+sinon tirage `next_float()`, `≥ δ` accepte sinon test des voisins. Un voisin hors `[−64,319]`
+compte comme air ; un voisin à `d = 2` est lu par la région.
+Écriture DIRECTE en section (`Region::write_block`, sans mise à jour de carte). Vecteurs
+§11.1 (`ore_metrics`) couverts : size 9 → (1.125, 2, 2, 8, 8), 17 → (2.125, 2, 3, 10, 8),
+64 → (8, 5, 8, 26, 14).
+
+### `scattered_ore` (spec 09 §9.3) et `disk` (spec 09 §9.4)
+`scattered_ore` : `n = next_int(size+1)` ; par point `m = min(i,7)`, trois décalages
+`arrondi(f32(next_float()−next_float())·m)` (arrondi Java = `(x+0.5).floor()`), réussit
+toujours. L'ordre de tirage et les décalages §9.3 sont verrouillés par
+`features_vectors.rs::scattered_ore_draw_order_and_offsets_11` (rejeu indépendant via les
+primitives RNG validées § 11.2 : ensemble écrit == ensemble des positions dérivées de la
+formule, sur plusieurs graines). Écart nominal assumé : la spec §9.3 décrit une pose ORDINAIRE
+alors que l'implémentation écrit par `Region::write_block` direct comme `ore` — sans effet ici
+(voir « Pose directe vs ordinaire » ci-dessous : aucune carte vivante n'est maintenue ni relue
+dans ce socle). `disk` : `R_d = radius.tirer()`, colonne de `py+half_height`
+jusqu'à `py−half_height` (décroissant), `target` (prédicat de bloc) évalué à l'état courant,
+`state_provider` en « état facultatif » (dont `rule_based` : `disk_sand` = sandstone si le
+bloc en dessous est air sinon sand). Vecteur §11.1 : disque rayon 2 = 13 colonnes.
+
+### Tests de règle (§7.3) et fournisseurs d'état (§7.2)
+`RuleTest` couvre `always_true`, `tag_match`, `block_match`, `blockstate_match`,
+`random_block_match`, `random_blockstate_match`, `height_match`, `any_of`/`all_of`/`not`
+avec arrêt au premier résultat décisif (les tirages des règles non évaluées n'ont pas lieu ;
+`random_block_match` ne tire que si le bloc correspond). `StateProvider` couvre `simple`,
+`weighted`, `random_block`, `rule_based` ; les types non requis par ore/disk restent
+`Unsupported` et erreraient à l'exécution (jamais atteints par les features de ce socle).
+Une feature `ore`/`disk`/`scattered_ore` dont la config ne parse pas retombe sur
+`Unimplemented` plutôt que d'avorter le chargement (robustesse).
+
+### Report gaussien (spec 09 §3.5)
+`set_seed` ne vide pas le tampon de la méthode polaire : une gaussienne restante passe d'une
+feature à la suivante dans le même chunk. `FeatureRng` conserve `next_gaussian`/`have_gaussian`
+à travers `set_seed` (couvert par `rng.rs::set_seed_keeps_gaussian_buffer`). Aucune feature de
+ce socle (ore/scattered_ore/disk) ne tire de gaussienne, mais l'invariant est structurellement
+respecté pour les `clamped_normal` d'un socle ultérieur.
+
+### Pose directe vs ordinaire (spec 09 §1.3) — simplification assumée
+Les trois features écrivent par le même `Region::write_block` (chemin direct section). La
+distinction §1.3 pose ordinaire (court-circuit section-d'air, mise à jour des 4 cartes
+vivantes §1.4) vs écriture directe des minerais N'EST PAS matérialisée : aucune carte vivante
+n'est maintenue. Justification de périmètre : dans le socle fer/minerais aucune feature
+activée ne relit une carte vivante (le minerai et `disk_clay` lisent `OCEAN_FLOOR_WG` FIGÉE,
+reconstruite au chargement du chunk ; disques et minerais de la même étape ne dépendent pas
+des cartes vivantes). Écart au plan (tâches 2/3) assumé et à lever si un socle ultérieur
+active une feature d'étape ≥ 7 lisant une carte vivante : il faudra alors un second chemin
+`write_block` ordinaire mettant à jour les cartes de `TerrainFeatureWorld`.
+
+### Pont terrain → région (`feature/bridge.rs`, interface du contrat)
+`TerrainFeatureWorld` définit dans l'interface du crate le pont que les critères figés
+fer/minerais présupposent, levant la cause « contrat » :
+- `load_chunk` appelle `WorldGenerator::with_options(seed, Noise, carvers=true)` →
+  `fill_chunk` (aquifères + carvers + matériaux, pas de structures) puis convertit chaque
+  indice de la table `material().blocks` en identifiant d'ÉTAT par défaut
+  (`default_state_id`) stocké dans `states` (indexé comme `ChunkTerrain::block_id_at`).
+- Cartes `_WG` reconstruites FIGÉES à partir de la colonne d'états post-terrain (avant
+  décoration) : `WORLD_SURFACE_WG` = plus haut `!air` + 1 ; `OCEAN_FLOOR_WG` = plus haut
+  `blocks_motion` + 1 (proxy `has_collision`, exact pour les blocs de terrain pleins ;
+  eau/lave/air/neige-couche/powder_snow ne bloquent pas) ; `MOTION_BLOCKING(_NO_LEAVES)` =
+  plus haut `blocks_motion || liquid` + 1 (pas de feuilles avant décoration).
+- Biomes stockés : `material().biome_source.fill_chunk` par chunk ; `stored_biome(cx,cy,cz)`
+  indexe la grille par `(cell_y+16)·16 + (cell_z&3)·4 + (cell_x&3)`, cohérent avec le zoom
+  flou `feature/zoom.rs` (même algorithme que `material::biome_at`, même `zoom_seed(seed)`).
+- `TerrainRegion` applique D1–D5 : lecture réelle d'un chunk chargé jusqu'à `d = 8`, air si
+  non chargé à `d ≥ 2`, `void_air` hors `[−64,319]`, biome en erreur à `d ≥ 2`, écriture
+  `d ≤ 1` dans le monde partagé mutable, refus silencieux `d = 2..8`, `Err` à `d ≥ 9`.
+- Comparaison : `block_id_at` reconvertit l'état courant en identifiant de bloc
+  (`block_id_of_state`) pour confronter l'oracle (registre `minecraft:block`).
+
+### H-ordre et H-bande (D6) — harnais oracle livrés
+`tests/oracle_features/fer.rs` et `tests/oracle_features/minerais.rs` (pilote commun
+`tests/oracle_features/common.rs`, un seul binaire de test) décorent un MONDE PARTAGÉ mutable. Les 84 cibles forment le POURTOUR
+d'un carré 22×22 (cx, cz ∈ [−11, 10]). Ensemble décoré = les cibles ∪ leur anneau de rayon 1,
+BORNÉ au carré englobant des cibles : les voisins extérieurs (cx = −12/11, cz = −12/11) sont
+chargés pour les lectures mais JAMAIS décorés. Ensemble chargé = ensemble décoré ∪ son anneau.
+Preuve par l'oracle (H-bord) : avec l'anneau extérieur décoré, la porte fer relève 106 écarts,
+tous sur la colonne de bord extérieur des cibles (x = 0 de cx = −11, z = 15 de cz = 10, z = 0
+de cz = −11…), et toujours dans le même sens : Verdigris pose `iron_ore`/`deepslate_iron_ore`/
+`clay` là où l'oracle garde pierre, deepslate ou eau. Le monde de référence n'a donc reçu aucun
+débordement de ces voisins : ils n'ont pas atteint l'étape de décoration (seuls les chunks
+listés, statut `initialize_light`, sont décorés). Borner l'ensemble décoré ramène ces écarts
+à 0. Ne pas rétablir l'anneau extérieur complet : il rend l'égalité fer impossible.
+H-ordre : `cz` croissant puis `cx` croissant ; chaque chunk décoré avec ses 8 voisins via
+`Decoration::decorate_chunk_filtered` et le filtre `enabled_placed_features` de `index.json`.
+Le débordement d'un voisin dans une cible persiste dans le monde partagé (c'est la source de
+l'ambiguïté d'ordre que la bande D6 absorbe). Le fer est EXACT malgré l'ordre : `ore_iron` a
+`discard = 0` (aucune lecture d'exposition) et écrit toujours `iron_ore`/`deepslate_iron_ore`
+sur pierre/deepslate, valeur idempotente, indépendante de l'ordre ; de même `disk_clay`.
+H-bande (D6) : une case `(lx,lz)` d'une cible est « dans la bande » si elle est à moins de 8
+blocs d'un bord partagé avec un voisin DÉCORÉ (`in_band`, par bord réellement partagé, jamais
+d'OU global élargi au pourtour de la porte). Le bord extérieur d'une cible du pourtour n'est
+donc pas dans la bande (voisin non décoré) : l'égalité y est exigée exacte. Métriques
+minerais : hors bande, égalité exacte exigée ; sur l'union des cases modifiées par vanilla OU
+Verdigris, ≥ 99 % identiques (taux global + paires attendu/obtenu au diagnostic). Test de
+non-régression de la bande : `band_leaves_interior_when_neighbor_undecorated`. INCERTAIN :
+l'ordre vanilla exact de génération des chunks n'est pas spécifié par l'oracle ; H-ordre est
+l'hypothèse retenue, sans effet sur le fer (idempotent) et absorbé par la bande pour les
+minerais.
+
+### Correction carver : herbe remise sous un creux noyé
+`carver/apply.rs` : quand un carver a traversé un bloc déclencheur de surface (herbe,
+mycélium) et creuse au-dessus d'un bloc de `dirt`, ce `dirt` reçoit le matériau de surface
+QUEL QUE SOIT l'état posé (air, eau ou lave). L'ancienne garde `cat == Category::Air` le
+limitait à l'air. Preuve par l'oracle : 3 cases du chunk (10, −2) (x = 1 y = 60 z = 7,
+x = 2 y = 60 z = 8, x = 0 y = 61 z = 6) valent `grass_block` sous de l'eau dans le monde de
+référence, `dirt` avec la garde. Aucune feature du filtre fer ne pose d'herbe : l'écart venait
+du terrain. `oracle_carvers`, `oracle_materiaux`, `oracle` et `oracle_1b` restent verts après
+la correction.
+
+### Budget de la porte cargo-test (600 s)
+La borne de l'ensemble décoré réduit aussi l'ensemble chargé par test (moins de chunks
+générés qu'avec l'anneau complet). Pas de cache de grilles de biomes : un cache par
+`(cx, cz)` dans `ChunkTerrain` ne serait jamais purgé côté serveur (croissance avec chaque
+chunk généré). Les deux tests oracle tournent dans la porte par défaut, sans `#[ignore]`.
+Ils partagent un seul binaire (`tests/oracle_features/main.rs`) : cargo enchaîne les binaires
+de test l'un après l'autre mais lance les tests d'un même binaire en parallèle, ce qui superpose
+les deux générations (environ 5 min chacune en débogage) au lieu de les additionner.
+
+Les deux chemins chauds de décoration ont par ailleurs été revus : aucune boucle non bornée
+(les features activées n'emploient que `count`/`in_square`/`height_range`/`heightmap`/`biome`/
+`rarity_filter`/`block_predicate_filter` ; `ore`/`scattered_ore`/`disk` bornent toutes leurs
+boucles). `features_fer_match_oracle` et `features_minerais_match_oracle` tournent donc dans la
+porte par défaut (`cargo test --workspace`), aux côtés de `band_leaves_interior_…`, des
+vecteurs `tests/features_vectors.rs` (§11.1/§11.2, dont le tirage/décalages de `scattered_ore`
+§9.3) et de `tests/biome_block.rs`/`tests/allocation.rs` (région mémoire `TestRegion`).

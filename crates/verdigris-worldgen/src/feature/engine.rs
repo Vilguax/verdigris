@@ -5,6 +5,9 @@ use serde_json::Value;
 
 use crate::biome::biome_names;
 use crate::feature::error::FeatureError;
+use crate::feature::features::{
+    DiskConfig, OreConfig, OreScratch, run_disk, run_ore, run_scattered_ore,
+};
 use crate::feature::numbers::HeightCtx;
 use crate::feature::order::{GlobalOrder, build_order, overworld_biomes_from_features};
 use crate::feature::palette::physics_of_state;
@@ -27,10 +30,18 @@ const MAX_COMPILE_DEPTH: usize = 64;
 const BIOME_CELL_Y_MIN: i32 = -16;
 const BIOME_CELL_Y_MAX_EXCLUSIVE: i32 = 80;
 
-struct RunCtx<'a, R: Region> {
-    region: &'a R,
+struct RunCtx<'a> {
     zoom_seed: i64,
-    feature_biomes: &'a BTreeSet<u16>,
+    top_feature: Option<&'a BTreeSet<u16>>,
+}
+
+impl<'a> RunCtx<'a> {
+    fn nested(&self) -> RunCtx<'a> {
+        RunCtx {
+            zoom_seed: self.zoom_seed,
+            top_feature: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +59,9 @@ pub enum CompiledFeature {
     WeightedRandomSelector(Vec<(i32, CompiledPlaced)>),
     RandomBooleanSelector(Box<CompiledPlaced>, Box<CompiledPlaced>),
     RandomSelector(Box<CompiledPlaced>, Vec<(f32, CompiledPlaced)>),
+    Ore(Box<OreConfig>),
+    ScatteredOre(Box<OreConfig>),
+    Disk(Box<DiskConfig>),
     Unimplemented(String),
 }
 
@@ -55,6 +69,7 @@ pub enum CompiledFeature {
 pub struct DecorationContext {
     placed: Vec<Pos>,
     unimplemented: usize,
+    ore: OreScratch,
 }
 
 impl DecorationContext {
@@ -128,11 +143,23 @@ impl Decoration {
 
     pub fn decorate_chunk<R: Region>(
         &self,
-        region: &R,
+        region: &mut R,
         ctx: &mut DecorationContext,
         level_seed: i64,
         cx: i32,
         cz: i32,
+    ) -> Result<(), FeatureError> {
+        self.decorate_chunk_filtered(region, ctx, level_seed, cx, cz, None)
+    }
+
+    pub fn decorate_chunk_filtered<R: Region>(
+        &self,
+        region: &mut R,
+        ctx: &mut DecorationContext,
+        level_seed: i64,
+        cx: i32,
+        cz: i32,
+        enabled: Option<&BTreeSet<String>>,
     ) -> Result<(), FeatureError> {
         ctx.reset();
         let candidate = aggregate_stored_biomes(region, cx, cz)?;
@@ -145,6 +172,11 @@ impl Decoration {
 
         for step in 0..self.order.steps().len() {
             for (i, name) in self.order.step(step).iter().enumerate() {
+                if let Some(filter) = enabled
+                    && !filter.contains(name)
+                {
+                    continue;
+                }
                 if !self.is_active(name, &candidate) {
                     continue;
                 }
@@ -153,11 +185,10 @@ impl Decoration {
                 };
                 rng.set_feature_seed(decoration_seed, i as i32, step as i32);
                 let rc = RunCtx {
-                    region,
                     zoom_seed: seed,
-                    feature_biomes: self.allowed_biomes.get(name).unwrap_or(&empty),
+                    top_feature: Some(self.allowed_biomes.get(name).unwrap_or(&empty)),
                 };
-                run_placed(compiled, &rc, &mut rng, ctx, (min_x, 0, min_z))?;
+                run_placed(compiled, region, &rc, &mut rng, ctx, (min_x, 0, min_z))?;
             }
         }
         Ok(())
@@ -253,7 +284,21 @@ fn compile_configured(
 ) -> Result<CompiledFeature, FeatureError> {
     match cf {
         ConfiguredFeature::NoOp => Ok(CompiledFeature::NoOp),
-        ConfiguredFeature::Leaf { ty, .. } => Ok(CompiledFeature::Unimplemented(ty.clone())),
+        ConfiguredFeature::Leaf { ty, config } => match ty.as_str() {
+            "ore" => Ok(match OreConfig::compile(config) {
+                Ok(c) => CompiledFeature::Ore(Box::new(c)),
+                Err(_) => CompiledFeature::Unimplemented(ty.clone()),
+            }),
+            "scattered_ore" => Ok(match OreConfig::compile(config) {
+                Ok(c) => CompiledFeature::ScatteredOre(Box::new(c)),
+                Err(_) => CompiledFeature::Unimplemented(ty.clone()),
+            }),
+            "disk" => Ok(match DiskConfig::compile(config) {
+                Ok(c) => CompiledFeature::Disk(Box::new(c)),
+                Err(_) => CompiledFeature::Unimplemented(ty.clone()),
+            }),
+            _ => Ok(CompiledFeature::Unimplemented(ty.clone())),
+        },
         ConfiguredFeature::Sequence(v) => {
             Ok(CompiledFeature::Sequence(compile_refs(registry, v, depth)?))
         }
@@ -301,25 +346,28 @@ fn compile_refs(
 
 fn run_placed<R: Region>(
     pf: &CompiledPlaced,
-    rc: &RunCtx<R>,
+    region: &mut R,
+    rc: &RunCtx,
     rng: &mut FeatureRng,
     ctx: &mut DecorationContext,
     origin: Pos,
 ) -> Result<bool, FeatureError> {
-    run_modifiers(&pf.placement, &pf.feature, rc, rng, ctx, origin)
+    run_modifiers(&pf.placement, &pf.feature, region, rc, rng, ctx, origin)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_modifiers<R: Region>(
     mods: &[Placement],
     feature: &CompiledFeature,
-    rc: &RunCtx<R>,
+    region: &mut R,
+    rc: &RunCtx,
     rng: &mut FeatureRng,
     ctx: &mut DecorationContext,
     pos: Pos,
 ) -> Result<bool, FeatureError> {
     match mods.split_first() {
-        None => place_feature(feature, rc, rng, ctx, pos),
-        Some((head, tail)) => step(head, tail, feature, rc, rng, ctx, pos),
+        None => place_feature(feature, region, rc, rng, ctx, pos),
+        Some((head, tail)) => step(head, tail, feature, region, rc, rng, ctx, pos),
     }
 }
 
@@ -328,7 +376,8 @@ fn step<R: Region>(
     head: &Placement,
     tail: &[Placement],
     feature: &CompiledFeature,
-    rc: &RunCtx<R>,
+    region: &mut R,
+    rc: &RunCtx,
     rng: &mut FeatureRng,
     ctx: &mut DecorationContext,
     pos: Pos,
@@ -338,7 +387,7 @@ fn step<R: Region>(
         Placement::Count(p) => {
             let n = p.sample(rng).max(0);
             for _ in 0..n {
-                any |= run_modifiers(tail, feature, rc, rng, ctx, pos)?;
+                any |= run_modifiers(tail, feature, region, rc, rng, ctx, pos)?;
             }
         }
         Placement::CountOnEveryLayer(p) => {
@@ -349,8 +398,8 @@ fn step<R: Region>(
                 while i < p.sample(rng) {
                     let x = pos.0.wrapping_add(rng.next_int_bounded(16));
                     let z = pos.2.wrapping_add(rng.next_int_bounded(16));
-                    if let Some(y) = find_on_ground(rc.region, x, z, layer)? {
-                        any |= run_modifiers(tail, feature, rc, rng, ctx, (x, y, z))?;
+                    if let Some(y) = find_on_ground(region, x, z, layer)? {
+                        any |= run_modifiers(tail, feature, region, rc, rng, ctx, (x, y, z))?;
                         placed_any = true;
                     }
                     i += 1;
@@ -369,7 +418,7 @@ fn step<R: Region>(
             let noise = biome_info_value(pos.0, pos.2, 200.0);
             let count = if noise < *noise_level { *below } else { *above };
             for _ in 0..count.max(0) {
-                any |= run_modifiers(tail, feature, rc, rng, ctx, pos)?;
+                any |= run_modifiers(tail, feature, region, rc, rng, ctx, pos)?;
             }
         }
         Placement::NoiseBasedCount {
@@ -380,31 +429,31 @@ fn step<R: Region>(
             let noise = biome_info_value(pos.0, pos.2, *noise_factor);
             let count = ((noise + noise_offset) * f64::from(*ratio)).ceil() as i32;
             for _ in 0..count.max(0) {
-                any |= run_modifiers(tail, feature, rc, rng, ctx, pos)?;
+                any |= run_modifiers(tail, feature, region, rc, rng, ctx, pos)?;
             }
         }
         Placement::RarityFilter(chance) => {
             if rng.next_float() < 1.0 / (*chance as f32) {
-                any |= run_modifiers(tail, feature, rc, rng, ctx, pos)?;
+                any |= run_modifiers(tail, feature, region, rc, rng, ctx, pos)?;
             }
         }
         Placement::RandomChance(prob) => {
             if (rng.next_float() as f64) < *prob {
-                any |= run_modifiers(tail, feature, rc, rng, ctx, pos)?;
+                any |= run_modifiers(tail, feature, region, rc, rng, ctx, pos)?;
             }
         }
         Placement::InSquare => {
             let x = pos.0.wrapping_add(rng.next_int_bounded(16));
             let z = pos.2.wrapping_add(rng.next_int_bounded(16));
-            any |= run_modifiers(tail, feature, rc, rng, ctx, (x, pos.1, z))?;
+            any |= run_modifiers(tail, feature, region, rc, rng, ctx, (x, pos.1, z))?;
         }
         Placement::HeightRange(h) => {
             let y = h.sample(rng);
-            any |= run_modifiers(tail, feature, rc, rng, ctx, (pos.0, y, pos.2))?;
+            any |= run_modifiers(tail, feature, region, rc, rng, ctx, (pos.0, y, pos.2))?;
         }
         Placement::Heightmap(map) => {
-            let y = rc.region.read_heightmap(*map, pos.0, pos.2)?;
-            any |= run_modifiers(tail, feature, rc, rng, ctx, (pos.0, y, pos.2))?;
+            let y = region.read_heightmap(*map, pos.0, pos.2)?;
+            any |= run_modifiers(tail, feature, region, rc, rng, ctx, (pos.0, y, pos.2))?;
         }
         Placement::Offset(x, y, z) => {
             let dx = x.sample(rng);
@@ -415,16 +464,16 @@ fn step<R: Region>(
                 pos.1.wrapping_add(dy),
                 pos.2.wrapping_add(dz),
             );
-            any |= run_modifiers(tail, feature, rc, rng, ctx, np)?;
+            any |= run_modifiers(tail, feature, region, rc, rng, ctx, np)?;
         }
         Placement::Biome => {
-            if biome_allows(rc, pos)? {
-                any |= run_modifiers(tail, feature, rc, rng, ctx, pos)?;
+            if biome_allows(region, rc, pos)? {
+                any |= run_modifiers(tail, feature, region, rc, rng, ctx, pos)?;
             }
         }
         Placement::BlockPredicateFilter(pred) => {
-            if pred.test(rc.region, pos.0, pos.1, pos.2)? {
-                any |= run_modifiers(tail, feature, rc, rng, ctx, pos)?;
+            if pred.test(region, pos.0, pos.1, pos.2)? {
+                any |= run_modifiers(tail, feature, region, rc, rng, ctx, pos)?;
             }
         }
         Placement::SurfaceRelativeThresholdFilter {
@@ -432,22 +481,18 @@ fn step<R: Region>(
             min,
             max,
         } => {
-            let surface = i64::from(rc.region.read_heightmap(*heightmap, pos.0, pos.2)?);
+            let surface = i64::from(region.read_heightmap(*heightmap, pos.0, pos.2)?);
             let lo = surface + i64::from(*min);
             let hi = surface + i64::from(*max);
             if (lo..=hi).contains(&i64::from(pos.1)) {
-                any |= run_modifiers(tail, feature, rc, rng, ctx, pos)?;
+                any |= run_modifiers(tail, feature, region, rc, rng, ctx, pos)?;
             }
         }
         Placement::SurfaceWaterDepthFilter { max_depth } => {
-            let floor = rc
-                .region
-                .read_heightmap(Heightmap::OceanFloorWg, pos.0, pos.2)?;
-            let surface = rc
-                .region
-                .read_heightmap(Heightmap::WorldSurfaceWg, pos.0, pos.2)?;
+            let floor = region.read_heightmap(Heightmap::OceanFloorWg, pos.0, pos.2)?;
+            let surface = region.read_heightmap(Heightmap::WorldSurfaceWg, pos.0, pos.2)?;
             if surface - floor <= *max_depth {
-                any |= run_modifiers(tail, feature, rc, rng, ctx, pos)?;
+                any |= run_modifiers(tail, feature, region, rc, rng, ctx, pos)?;
             }
         }
         Placement::EnvironmentScan {
@@ -459,8 +504,8 @@ fn step<R: Region>(
             let dir = if *up { 1 } else { -1 };
             let mut cur = pos;
             for _ in 0..(*max_steps).max(0) {
-                if target.test(rc.region, cur.0, cur.1, cur.2)? {
-                    any |= run_modifiers(tail, feature, rc, rng, ctx, cur)?;
+                if target.test(region, cur.0, cur.1, cur.2)? {
+                    any |= run_modifiers(tail, feature, region, rc, rng, ctx, cur)?;
                     break;
                 }
                 let ny = cur.1 + dir;
@@ -468,7 +513,7 @@ fn step<R: Region>(
                     break;
                 }
                 if let Some(a) = allowed
-                    && !a.test(rc.region, cur.0, ny, cur.2)?
+                    && !a.test(region, cur.0, ny, cur.2)?
                 {
                     break;
                 }
@@ -478,12 +523,12 @@ fn step<R: Region>(
         Placement::RandomlySelected(list) => {
             if !list.is_empty() {
                 let pick = rng.next_int_bounded(list.len() as i32) as usize;
-                any |= step(&list[pick], tail, feature, rc, rng, ctx, pos)?;
+                any |= step(&list[pick], tail, feature, region, rc, rng, ctx, pos)?;
             }
         }
         Placement::FixedPlacement(positions) => {
             for p in positions {
-                any |= run_modifiers(tail, feature, rc, rng, ctx, *p)?;
+                any |= run_modifiers(tail, feature, region, rc, rng, ctx, *p)?;
             }
         }
         Placement::Cuboid {
@@ -504,7 +549,7 @@ fn step<R: Region>(
                                 pos.1.wrapping_add(dy),
                                 pos.2.wrapping_add(dz),
                             );
-                            any |= run_modifiers(tail, feature, rc, rng, ctx, np)?;
+                            any |= run_modifiers(tail, feature, region, rc, rng, ctx, np)?;
                         }
                     }
                 }
@@ -514,15 +559,12 @@ fn step<R: Region>(
     Ok(any)
 }
 
-fn biome_allows<R: Region>(rc: &RunCtx<R>, pos: Pos) -> Result<bool, FeatureError> {
-    if rc.feature_biomes.is_empty() {
-        return Ok(true);
-    }
-    match biome_at_block(rc.region, rc.zoom_seed, pos.0, pos.1, pos.2) {
-        Ok(b) => Ok(rc.feature_biomes.contains(&b)),
-        Err(FeatureError::Region(_)) => Ok(true),
-        Err(e) => Err(e),
-    }
+fn biome_allows<R: Region>(region: &R, rc: &RunCtx, pos: Pos) -> Result<bool, FeatureError> {
+    let set = rc.top_feature.ok_or_else(|| {
+        FeatureError::Region("biome filter without top-level feature context".to_string())
+    })?;
+    let b = biome_at_block(region, rc.zoom_seed, pos.0, pos.1, pos.2)?;
+    Ok(set.contains(&b))
 }
 
 fn find_on_ground<R: Region>(
@@ -550,11 +592,13 @@ fn find_on_ground<R: Region>(
 
 fn place_feature<R: Region>(
     feature: &CompiledFeature,
-    rc: &RunCtx<R>,
+    region: &mut R,
+    rc: &RunCtx,
     rng: &mut FeatureRng,
     ctx: &mut DecorationContext,
     pos: Pos,
 ) -> Result<bool, FeatureError> {
+    let nested = rc.nested();
     match feature {
         CompiledFeature::NoOp => Ok(false),
         CompiledFeature::Unimplemented(_) => {
@@ -562,9 +606,14 @@ fn place_feature<R: Region>(
             ctx.unimplemented += 1;
             Ok(false)
         }
+        CompiledFeature::Ore(cfg) => run_ore(cfg, region, rng, &mut ctx.ore, pos.0, pos.1, pos.2),
+        CompiledFeature::ScatteredOre(cfg) => {
+            run_scattered_ore(cfg, region, rng, pos.0, pos.1, pos.2)
+        }
+        CompiledFeature::Disk(cfg) => run_disk(cfg, region, rng, pos.0, pos.1, pos.2),
         CompiledFeature::Sequence(children) => {
             for child in children {
-                if !run_placed(child, rc, rng, ctx, pos)? {
+                if !run_placed(child, region, &nested, rng, ctx, pos)? {
                     return Ok(false);
                 }
             }
@@ -573,7 +622,7 @@ fn place_feature<R: Region>(
         CompiledFeature::Overlay(children) => {
             let mut any = false;
             for child in children {
-                any |= run_placed(child, rc, rng, ctx, pos)?;
+                any |= run_placed(child, region, &nested, rng, ctx, pos)?;
             }
             Ok(any)
         }
@@ -582,7 +631,7 @@ fn place_feature<R: Region>(
                 return Ok(false);
             }
             let pick = rng.next_int_bounded(children.len() as i32) as usize;
-            run_placed(&children[pick], rc, rng, ctx, pos)
+            run_placed(&children[pick], region, &nested, rng, ctx, pos)
         }
         CompiledFeature::WeightedRandomSelector(children) => {
             if children.is_empty() {
@@ -596,25 +645,32 @@ fn place_feature<R: Region>(
             for (w, child) in children {
                 roll -= *w;
                 if roll < 0 {
-                    return run_placed(child, rc, rng, ctx, pos);
+                    return run_placed(child, region, &nested, rng, ctx, pos);
                 }
             }
-            run_placed(&children[children.len() - 1].1, rc, rng, ctx, pos)
+            run_placed(
+                &children[children.len() - 1].1,
+                region,
+                &nested,
+                rng,
+                ctx,
+                pos,
+            )
         }
         CompiledFeature::RandomBooleanSelector(if_true, if_false) => {
             if rng.next_boolean() {
-                run_placed(if_true, rc, rng, ctx, pos)
+                run_placed(if_true, region, &nested, rng, ctx, pos)
             } else {
-                run_placed(if_false, rc, rng, ctx, pos)
+                run_placed(if_false, region, &nested, rng, ctx, pos)
             }
         }
         CompiledFeature::RandomSelector(default, entries) => {
             for (chance, child) in entries {
                 if rng.next_float() < *chance {
-                    return run_placed(child, rc, rng, ctx, pos);
+                    return run_placed(child, region, &nested, rng, ctx, pos);
                 }
             }
-            run_placed(default, rc, rng, ctx, pos)
+            run_placed(default, region, &nested, rng, ctx, pos)
         }
     }
 }
@@ -639,7 +695,7 @@ mod tests {
 
     #[test]
     fn sequence_stops_at_first_failure_overlay_runs_all() {
-        let region = TestRegion::new((0, 0));
+        let mut region = TestRegion::new((0, 0));
         let seq = CompiledPlaced {
             placement: Vec::new(),
             feature: CompiledFeature::Sequence(vec![leaf(2), leaf(3)]),
@@ -650,13 +706,12 @@ mod tests {
         };
         let fb = BTreeSet::new();
         let rc = RunCtx {
-            region: &region,
             zoom_seed: 0,
-            feature_biomes: &fb,
+            top_feature: Some(&fb),
         };
         let mut rng = FeatureRng::new(1);
         let mut ctx = DecorationContext::new();
-        run_placed(&seq, &rc, &mut rng, &mut ctx, (0, 0, 0)).unwrap();
+        run_placed(&seq, &mut region, &rc, &mut rng, &mut ctx, (0, 0, 0)).unwrap();
         assert_eq!(
             ctx.placed().len(),
             2,
@@ -665,27 +720,26 @@ mod tests {
 
         let mut rng2 = FeatureRng::new(1);
         let mut ctx2 = DecorationContext::new();
-        run_placed(&ovl, &rc, &mut rng2, &mut ctx2, (0, 0, 0)).unwrap();
+        run_placed(&ovl, &mut region, &rc, &mut rng2, &mut ctx2, (0, 0, 0)).unwrap();
         assert_eq!(ctx2.placed().len(), 5, "overlay runs every child");
     }
 
     #[test]
     fn in_square_consumes_two_int_draws() {
-        let region = TestRegion::new((0, 0));
+        let mut region = TestRegion::new((0, 0));
         let pf = CompiledPlaced {
             placement: vec![Placement::InSquare],
             feature: CompiledFeature::Unimplemented("test".to_string()),
         };
         let fb = BTreeSet::new();
         let rc = RunCtx {
-            region: &region,
             zoom_seed: 0,
-            feature_biomes: &fb,
+            top_feature: Some(&fb),
         };
         let mut rng = FeatureRng::new(5);
         let probe = rng.clone();
         let mut ctx = DecorationContext::new();
-        run_placed(&pf, &rc, &mut rng, &mut ctx, (0, 64, 0)).unwrap();
+        run_placed(&pf, &mut region, &rc, &mut rng, &mut ctx, (0, 64, 0)).unwrap();
         assert_eq!(ctx.placed().len(), 1);
         let mut check = probe;
         check.next_int_bounded(16);
@@ -710,63 +764,66 @@ mod tests {
     #[test]
     fn decorate_chunk_runs_and_reuses_buffers() {
         let dec = load();
-        let mut region = TestRegion::new((0, 0));
-        region.set_default_biome(0);
-        for cx in -8..=8 {
-            for cz in -8..=8 {
-                region.set_terrain_ready(cx, cz, true);
+        let fresh = || {
+            let mut region = TestRegion::new((0, 0));
+            region.set_default_biome(0);
+            for cx in -8..=8 {
+                for cz in -8..=8 {
+                    region.set_terrain_ready(cx, cz, true);
+                }
             }
-        }
+            region
+        };
         let mut ctx = DecorationContext::new();
-        dec.decorate_chunk(&region, &mut ctx, 20261029, 0, 0)
+        let mut region = fresh();
+        dec.decorate_chunk(&mut region, &mut ctx, 20261029, 0, 0)
             .expect("decorates");
         let cap_after_first = ctx.placed_capacity();
-        dec.decorate_chunk(&region, &mut ctx, 20261029, 0, 0)
+        let mut region = fresh();
+        dec.decorate_chunk(&mut region, &mut ctx, 20261029, 0, 0)
             .expect("decorates again");
         assert_eq!(ctx.placed_capacity(), cap_after_first);
     }
 
     #[test]
     fn fixed_placement_emits_configured_positions() {
-        let region = TestRegion::new((0, 0));
+        let mut region = TestRegion::new((0, 0));
         let pf = CompiledPlaced {
             placement: vec![Placement::FixedPlacement(vec![(1, 2, 3), (4, 5, 6)])],
             feature: CompiledFeature::Unimplemented("test".to_string()),
         };
         let fb = BTreeSet::new();
         let rc = RunCtx {
-            region: &region,
             zoom_seed: 0,
-            feature_biomes: &fb,
+            top_feature: Some(&fb),
         };
         let mut rng = FeatureRng::new(1);
         let mut ctx = DecorationContext::new();
-        run_placed(&pf, &rc, &mut rng, &mut ctx, (0, 0, 0)).unwrap();
+        run_placed(&pf, &mut region, &rc, &mut rng, &mut ctx, (0, 0, 0)).unwrap();
         assert_eq!(ctx.placed(), &[(1, 2, 3), (4, 5, 6)]);
     }
 
     #[test]
     fn count_on_every_layer_without_ground_emits_nothing() {
-        let region = TestRegion::new((0, 0));
+        let mut region = TestRegion::new((0, 0));
         let pf = CompiledPlaced {
             placement: vec![Placement::CountOnEveryLayer(IntProvider::Constant(6))],
             feature: CompiledFeature::Unimplemented("test".to_string()),
         };
         let fb = BTreeSet::new();
         let rc = RunCtx {
-            region: &region,
             zoom_seed: 0,
-            feature_biomes: &fb,
+            top_feature: Some(&fb),
         };
         let mut rng = FeatureRng::new(1);
         let mut ctx = DecorationContext::new();
-        run_placed(&pf, &rc, &mut rng, &mut ctx, (0, 0, 0)).unwrap();
+        run_placed(&pf, &mut region, &rc, &mut rng, &mut ctx, (0, 0, 0)).unwrap();
         assert!(ctx.placed().is_empty());
     }
 
     #[test]
     fn randomly_selected_picks_then_applies_offset() {
-        let region = TestRegion::new((0, 0));
+        let mut region = TestRegion::new((0, 0));
         let pf = CompiledPlaced {
             placement: vec![Placement::RandomlySelected(vec![Placement::Offset(
                 IntProvider::Constant(1),
@@ -777,13 +834,12 @@ mod tests {
         };
         let fb = BTreeSet::new();
         let rc = RunCtx {
-            region: &region,
             zoom_seed: 0,
-            feature_biomes: &fb,
+            top_feature: Some(&fb),
         };
         let mut rng = FeatureRng::new(1);
         let mut ctx = DecorationContext::new();
-        run_placed(&pf, &rc, &mut rng, &mut ctx, (10, 20, 30)).unwrap();
+        run_placed(&pf, &mut region, &rc, &mut rng, &mut ctx, (10, 20, 30)).unwrap();
         assert_eq!(ctx.placed(), &[(11, 19, 32)]);
         assert_eq!(ctx.unimplemented_hits(), 1);
     }

@@ -4,9 +4,11 @@ use serde_json::Value;
 
 use crate::feature::error::{FeatureError, strip_ns};
 use crate::feature::numbers::{HeightCtx, HeightProvider, IntProvider};
-use crate::feature::palette::{block_state_range, fluid_id_of_state, physics_of_state};
+use crate::feature::palette::{
+    block_state_range, fluid_id_of_state, fluid_name_of_id, physics_of_state,
+};
 use crate::feature::region::{Heightmap, Region, WORLD_MAX_Y_EXCLUSIVE, WORLD_MIN_Y};
-use crate::feature::tags::{fluid_name, resolve_block_tag, resolve_fluid_tag};
+use crate::feature::tags::{resolve_block_tag, resolve_fluid_tag};
 use crate::material::Simplex;
 
 pub type Pos = (i32, i32, i32);
@@ -169,7 +171,7 @@ impl BlockPredicate {
             BlockPredicate::MatchingFluids { fluids, offset } => {
                 let (ox, oy, oz) = *offset;
                 let s = u32::from(region.read_block(x + ox, y + oy, z + oz)?);
-                match fluid_name(fluid_id_of_state(s)) {
+                match fluid_name_of_id(fluid_id_of_state(s)) {
                     Some(name) => Ok(fluids.contains(&name)),
                     None => Ok(false),
                 }

@@ -97,22 +97,22 @@ impl Region for TestRegion {
     }
 
     fn read_block(&self, x: i32, y: i32, z: i32) -> Result<u16, FeatureError> {
+        if !(WORLD_MIN_Y..WORLD_MAX_Y_EXCLUSIVE).contains(&y) {
+            return Ok(VOID_AIR);
+        }
         let d = chunk_distance(self.center, x, z);
         if d > READ_RADIUS {
             return Err(FeatureError::Region(format!(
                 "read_block chunk distance {d} > {READ_RADIUS}"
             )));
         }
-        if !(WORLD_MIN_Y..WORLD_MAX_Y_EXCLUSIVE).contains(&y) {
-            return Ok(VOID_AIR);
-        }
-        if let Some(&b) = self.blocks.get(&(x, y, z)) {
-            return Ok(b);
-        }
         let cx = x >> 4;
         let cz = z >> 4;
         if d >= 2 && !self.is_terrain_ready(cx, cz) {
             return Ok(AIR);
+        }
+        if let Some(&b) = self.blocks.get(&(x, y, z)) {
+            return Ok(b);
         }
         Ok(AIR)
     }
@@ -143,6 +143,11 @@ impl Region for TestRegion {
 
     fn write_block(&mut self, x: i32, y: i32, z: i32, state: u16) -> Result<bool, FeatureError> {
         let d = chunk_distance(self.center, x, z);
+        if d > READ_RADIUS {
+            return Err(FeatureError::Region(format!(
+                "write_block chunk distance {d} > {READ_RADIUS}"
+            )));
+        }
         if d > WRITE_RADIUS {
             return Ok(false);
         }
@@ -173,10 +178,45 @@ mod tests {
     }
 
     #[test]
+    fn vertical_oob_primes_over_distance() {
+        let r = TestRegion::new((0, 0));
+        assert_eq!(r.read_block(16 * 9, -65, 0).unwrap(), VOID_AIR);
+        assert_eq!(r.read_block(16 * 20, 320, 0).unwrap(), VOID_AIR);
+    }
+
+    #[test]
+    fn terrain_chunk_at_distance_two_reads_real_block() {
+        let mut r = TestRegion::new((0, 0));
+        r.set_terrain_ready(2, 0, true);
+        r.set_block_preset(16 * 2 + 3, 10, 5, 42);
+        assert_eq!(r.read_block(16 * 2 + 3, 10, 5).unwrap(), 42);
+    }
+
+    #[test]
     fn unready_chunk_reads_air() {
         let mut r = TestRegion::new((0, 0));
         r.set_terrain_ready(3, 0, false);
         assert_eq!(r.read_block(16 * 3, 0, 0).unwrap(), AIR);
+    }
+
+    #[test]
+    fn heightmap_empty_chunk_is_floor_without_error() {
+        let r = TestRegion::new((0, 0));
+        assert_eq!(
+            r.read_heightmap(Heightmap::OceanFloorWg, 16 * 5 + 2, 3)
+                .unwrap(),
+            WORLD_MIN_Y
+        );
+    }
+
+    #[test]
+    fn heightmap_distance_nine_is_error() {
+        let r = TestRegion::new((0, 0));
+        assert!(
+            r.read_heightmap(Heightmap::OceanFloorWg, 16 * 9, 0)
+                .is_err()
+        );
+        assert!(r.read_heightmap(Heightmap::OceanFloorWg, 16 * 8, 0).is_ok());
     }
 
     #[test]
@@ -191,6 +231,13 @@ mod tests {
         let mut r = TestRegion::new((0, 0));
         assert!(!r.write_block(32, 0, 0, 5).unwrap());
         assert!(r.write_block(0, 0, 0, 5).unwrap());
+    }
+
+    #[test]
+    fn write_distance_nine_is_error() {
+        let mut r = TestRegion::new((0, 0));
+        assert!(r.write_block(16 * 9, 0, 0, 5).is_err());
+        assert!(r.write_block(16 * 8, 0, 0, 5).is_ok());
     }
 
     #[test]

@@ -99,7 +99,6 @@ pub fn apply_carvers(
                             t.post[idx >> 6] |= 1u64 << (idx & 63);
                         }
                         if reached_surface
-                            && cat == Category::Air
                             && yy > min_y
                             && Some(t.block_ids[idx - 1]) == ctx.blocks.dirt
                         {

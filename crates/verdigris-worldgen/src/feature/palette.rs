@@ -138,6 +138,12 @@ impl Physics {
     pub fn is_solid_render(&self) -> bool {
         self.flag("solid_render")
     }
+    pub fn has_collision(&self) -> bool {
+        self.flag("has_collision")
+    }
+    pub fn blocks_motion(&self) -> bool {
+        self.flag("has_collision")
+    }
 
     pub fn face(&self, face: &str, dir: &str) -> bool {
         let fb = match face_bits().get(face) {
@@ -174,12 +180,61 @@ pub(crate) fn block_state_range(name: &str) -> Option<(u32, u32)> {
         .map(|d| (d.first_state, d.first_state + d.state_count))
 }
 
+pub(crate) fn default_state_id(name: &str) -> Option<u32> {
+    let full = full_key(name);
+    block_defs().get(&full).map(|d| d.default_state)
+}
+
+fn state_to_block_id_table() -> &'static Vec<u16> {
+    static T: OnceLock<Vec<u16>> = OnceLock::new();
+    T.get_or_init(|| {
+        let arr = match blocks_value().get("blocks").and_then(Value::as_array) {
+            Some(a) => a,
+            None => return Vec::new(),
+        };
+        let mut max_state = 0u32;
+        for b in arr {
+            let first = b.get("first_state").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let count = b.get("state_count").and_then(Value::as_u64).unwrap_or(1) as u32;
+            max_state = max_state.max(first + count);
+        }
+        let mut table = vec![0u16; max_state as usize];
+        for b in arr {
+            let Some(id) = b.get("id").and_then(Value::as_u64) else {
+                continue;
+            };
+            let first = b.get("first_state").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let count = b.get("state_count").and_then(Value::as_u64).unwrap_or(1) as u32;
+            for s in first..first + count {
+                table[s as usize] = id as u16;
+            }
+        }
+        table
+    })
+}
+
+pub(crate) fn block_id_of_state(state_id: u32) -> u16 {
+    state_to_block_id_table()
+        .get(state_id as usize)
+        .copied()
+        .unwrap_or(0)
+}
+
 pub(crate) fn physics_of_state(state_id: u32) -> Physics {
     physics_for_state(state_id)
 }
 
 pub(crate) fn fluid_id_of_state(state_id: u32) -> u16 {
     physics_for_state(state_id).fluid
+}
+
+pub(crate) fn fluid_name_of_id(id: u16) -> Option<String> {
+    physics_value()
+        .get("fluids")
+        .and_then(Value::as_array)
+        .and_then(|a| a.get(id as usize))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn physics_for_state(state_id: u32) -> Physics {

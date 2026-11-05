@@ -53,11 +53,13 @@ fn plains_activates_features_deterministically() {
     let mut region = TestRegion::new((0, 0));
     region.set_default_biome(plains);
     let mut ctx = DecorationContext::new();
-    dec.decorate_chunk(&region, &mut ctx, 20261029, 0, 0)
+    dec.decorate_chunk(&mut region, &mut ctx, 20261029, 0, 0)
         .unwrap();
     let hits = ctx.unimplemented_hits();
     assert!(hits > 0, "plains should activate block-placing features");
-    dec.decorate_chunk(&region, &mut ctx, 20261029, 0, 0)
+    let mut region = TestRegion::new((0, 0));
+    region.set_default_biome(plains);
+    dec.decorate_chunk(&mut region, &mut ctx, 20261029, 0, 0)
         .unwrap();
     assert_eq!(
         ctx.unimplemented_hits(),
@@ -72,7 +74,7 @@ fn biome_absent_from_overworld_activates_no_features() {
     let mut region = TestRegion::new((0, 0));
     region.set_default_biome(60000);
     let mut ctx = DecorationContext::new();
-    dec.decorate_chunk(&region, &mut ctx, 20261029, 0, 0)
+    dec.decorate_chunk(&mut region, &mut ctx, 20261029, 0, 0)
         .unwrap();
     assert_eq!(
         ctx.unimplemented_hits(),
@@ -87,9 +89,9 @@ fn aggregation_reads_stored_biomes_of_the_nine_chunks() {
     let plains = biome_names()
         .id_of("minecraft:plains")
         .expect("plains biome id");
-    let region = CountingRegion::new(plains);
+    let mut region = CountingRegion::new(plains);
     let mut ctx = DecorationContext::new();
-    dec.decorate_chunk(&region, &mut ctx, 20261029, 0, 0)
+    dec.decorate_chunk(&mut region, &mut ctx, 20261029, 0, 0)
         .unwrap();
     assert!(
         region.neighbor_reads.get() > 0,
