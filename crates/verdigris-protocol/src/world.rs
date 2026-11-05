@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use crate::blocks::default_state_of_name;
 use crate::chunk::{ChunkColumn, MIN_Y, WORLD_HEIGHT, block_index};
@@ -72,14 +72,51 @@ impl ChunkGenerator for FlatGenerator {
 
 pub type SharedChunk = Arc<Mutex<ChunkColumn>>;
 
+type ChunkSlot = Arc<OnceLock<SharedChunk>>;
+
+struct GenerationLimit {
+    free: Mutex<usize>,
+    available: Condvar,
+}
+
+struct GenerationPermit<'a> {
+    limit: &'a GenerationLimit,
+}
+
+impl GenerationLimit {
+    fn new(permits: usize) -> Self {
+        GenerationLimit {
+            free: Mutex::new(permits.max(1)),
+            available: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> GenerationPermit<'_> {
+        let mut free = self.free.lock().unwrap();
+        while *free == 0 {
+            free = self.available.wait(free).unwrap();
+        }
+        *free -= 1;
+        GenerationPermit { limit: self }
+    }
+}
+
+impl Drop for GenerationPermit<'_> {
+    fn drop(&mut self) {
+        *self.limit.free.lock().unwrap() += 1;
+        self.limit.available.notify_one();
+    }
+}
+
 struct WorldInner {
-    cache: HashMap<(i32, i32), SharedChunk>,
+    cache: HashMap<(i32, i32), ChunkSlot>,
     dirty: HashSet<(i32, i32)>,
 }
 
 pub struct World {
     generator: Box<dyn ChunkGenerator>,
     loader: Option<Box<dyn ChunkLoader>>,
+    limit: Option<GenerationLimit>,
     inner: Mutex<WorldInner>,
 }
 
@@ -88,6 +125,7 @@ impl World {
         World {
             generator,
             loader: None,
+            limit: None,
             inner: Mutex::new(WorldInner {
                 cache: HashMap::new(),
                 dirty: HashSet::new(),
@@ -99,6 +137,7 @@ impl World {
         World {
             generator,
             loader: Some(loader),
+            limit: None,
             inner: Mutex::new(WorldInner {
                 cache: HashMap::new(),
                 dirty: HashSet::new(),
@@ -106,19 +145,30 @@ impl World {
         }
     }
 
+    pub fn with_generation_limit(mut self, permits: usize) -> Self {
+        self.limit = Some(GenerationLimit::new(permits));
+        self
+    }
+
     pub fn flat() -> Result<Self, PlayError> {
         Ok(World::new(Box::new(FlatGenerator::new()?)))
     }
 
     pub fn chunk(&self, chunk_x: i32, chunk_z: i32) -> SharedChunk {
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(existing) = inner.cache.get(&(chunk_x, chunk_z)) {
-            return existing.clone();
-        }
-        let column = self.load_or_generate(chunk_x, chunk_z);
-        let shared = Arc::new(Mutex::new(column));
-        inner.cache.insert((chunk_x, chunk_z), Arc::clone(&shared));
-        shared
+        let slot = {
+            let mut inner = self.inner.lock().unwrap();
+            Arc::clone(
+                inner
+                    .cache
+                    .entry((chunk_x, chunk_z))
+                    .or_insert_with(|| Arc::new(OnceLock::new())),
+            )
+        };
+        slot.get_or_init(|| {
+            let _permit = self.limit.as_ref().map(GenerationLimit::acquire);
+            Arc::new(Mutex::new(self.load_or_generate(chunk_x, chunk_z)))
+        })
+        .clone()
     }
 
     fn load_or_generate(&self, chunk_x: i32, chunk_z: i32) -> ChunkColumn {
@@ -172,7 +222,9 @@ impl World {
         let coords: Vec<(i32, i32)> = inner.dirty.drain().collect();
         let mut out = Vec::with_capacity(coords.len());
         for (x, z) in coords {
-            if let Some(shared) = inner.cache.get(&(x, z)) {
+            if let Some(slot) = inner.cache.get(&(x, z))
+                && let Some(shared) = slot.get()
+            {
                 let column = shared.lock().unwrap().clone();
                 out.push((x, z, column));
             }
@@ -185,11 +237,18 @@ impl World {
             .lock()
             .unwrap()
             .cache
-            .contains_key(&(chunk_x, chunk_z))
+            .get(&(chunk_x, chunk_z))
+            .is_some_and(|slot| slot.get().is_some())
     }
 
     pub fn loaded_len(&self) -> usize {
-        self.inner.lock().unwrap().cache.len()
+        self.inner
+            .lock()
+            .unwrap()
+            .cache
+            .values()
+            .filter(|slot| slot.get().is_some())
+            .count()
     }
 
     pub fn dirty_len(&self) -> usize {
@@ -367,5 +426,152 @@ mod tests {
         world.set_state(0, 320, 0, 1);
         assert_eq!(world.state_at(0, -65, 0), 0);
         assert_eq!(world.state_at(0, 320, 0), 0);
+    }
+
+    struct Slow {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ChunkGenerator for Slow {
+        fn generate(&self, _chunk_x: i32, _chunk_z: i32) -> ChunkColumn {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            ChunkColumn::empty(0)
+        }
+    }
+
+    struct Gate {
+        entered: Mutex<std::sync::mpsc::Sender<()>>,
+        proceed: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl ChunkGenerator for Gate {
+        fn generate(&self, _chunk_x: i32, _chunk_z: i32) -> ChunkColumn {
+            self.entered.lock().unwrap().send(()).unwrap();
+            self.proceed.lock().unwrap().recv().unwrap();
+            ChunkColumn::empty(0)
+        }
+    }
+
+    struct Peak {
+        active: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    impl ChunkGenerator for Peak {
+        fn generate(&self, _chunk_x: i32, _chunk_z: i32) -> ChunkColumn {
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            ChunkColumn::empty(0)
+        }
+    }
+
+    #[test]
+    fn generation_limit_bounds_concurrent_generations() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let world = Arc::new(
+            World::new(Box::new(Peak {
+                active: Arc::clone(&active),
+                peak: Arc::clone(&peak),
+            }))
+            .with_generation_limit(2),
+        );
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            for _ in 0..3 {
+                let world = Arc::clone(&world);
+                handles.push(std::thread::spawn(move || {
+                    world.chunk(i, 0);
+                }));
+            }
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(world.loaded_len(), 8);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn concurrent_requests_of_same_chunk_generate_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let world = Arc::new(World::new(Box::new(Counting {
+            calls: Arc::clone(&calls),
+        })));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let world = Arc::clone(&world);
+            handles.push(std::thread::spawn(move || world.chunk(2, 5)));
+        }
+
+        let first = handles.pop().unwrap().join().unwrap();
+        for handle in handles {
+            let other = handle.join().unwrap();
+            assert!(Arc::ptr_eq(&first, &other));
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(world.loaded_len(), 1);
+    }
+
+    #[test]
+    fn distinct_chunks_generate_in_parallel() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let world = Arc::new(World::new(Box::new(Slow {
+            calls: Arc::clone(&calls),
+        })));
+
+        let start = std::time::Instant::now();
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let world = Arc::clone(&world);
+            handles.push(std::thread::spawn(move || {
+                world.chunk(i, 0);
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let elapsed = start.elapsed();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 8);
+        assert_eq!(world.loaded_len(), 8);
+        assert!(
+            elapsed < std::time::Duration::from_millis(8 * 50),
+            "génération hors verrou: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn uninitialized_slot_is_not_observable() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+        let world = Arc::new(World::new(Box::new(Gate {
+            entered: Mutex::new(entered_tx),
+            proceed: Mutex::new(proceed_rx),
+        })));
+
+        let worker = {
+            let world = Arc::clone(&world);
+            std::thread::spawn(move || {
+                world.chunk(0, 0);
+            })
+        };
+
+        entered_rx.recv().unwrap();
+        assert!(!world.is_chunk_loaded(0, 0));
+        assert_eq!(world.loaded_len(), 0);
+        world.mark_dirty(0, 0);
+        assert!(world.take_dirty().is_empty());
+
+        proceed_tx.send(()).unwrap();
+        worker.join().unwrap();
+
+        assert!(world.is_chunk_loaded(0, 0));
+        assert_eq!(world.loaded_len(), 1);
     }
 }

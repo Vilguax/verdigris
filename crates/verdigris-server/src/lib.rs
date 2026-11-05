@@ -95,6 +95,13 @@ const PLAY_TELEPORT_ID: i32 = 1;
 const PLAY_SPAWN_XZ: f64 = 0.5;
 const PLAY_SPAWN_FALLBACK: [f64; 3] = [PLAY_SPAWN_XZ, 0.0, PLAY_SPAWN_XZ];
 const CHUNK_SEND_YIELD_STRIDE: usize = 8;
+
+fn chunk_gen_permits() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1))
+        .unwrap_or(1)
+        .max(1)
+}
 pub const REASON_PROTOCOL_ERROR_PREFIX: &str = "Paquet invalide: ";
 pub const REASON_CONNECTION_LOST: &str = "Connexion interrompue";
 pub const REASON_INVALID_SEQUENCE: &str = "séquence d'interaction négative";
@@ -563,7 +570,9 @@ pub async fn serve(bind: &str) -> std::io::Result<()> {
     let metrics = setup.metrics();
     let generator = setup.into_generator().map_err(std::io::Error::other)?;
     let loader = DiskLoader::new(Arc::clone(&store));
-    let world = Arc::new(World::with_loader(generator, Box::new(loader)));
+    let world = Arc::new(
+        World::with_loader(generator, Box::new(loader)).with_generation_limit(chunk_gen_permits()),
+    );
     info!(
         monde = %store.base().display(),
         generateur = kind.as_str(),
@@ -628,7 +637,10 @@ where
     let players = Arc::new(PlayerRegistry::new(DEFAULT_MOTD, DEFAULT_MAX_PLAYERS));
     let generator = FlatGenerator::new().map_err(std::io::Error::other)?;
     let loader = DiskLoader::new(Arc::clone(&store));
-    let world = Arc::new(World::with_loader(Box::new(generator), Box::new(loader)));
+    let world = Arc::new(
+        World::with_loader(Box::new(generator), Box::new(loader))
+            .with_generation_limit(chunk_gen_permits()),
+    );
     info!(monde = %store.base().display(), "monde plat partagé prêt");
     run_core(listener, keep_alive, world, store, players, None, shutdown).await
 }
@@ -645,7 +657,10 @@ where
     let store = Arc::new(ChunkStore::from_env());
     let generator = FlatGenerator::new().map_err(std::io::Error::other)?;
     let loader = DiskLoader::new(Arc::clone(&store));
-    let world = Arc::new(World::with_loader(Box::new(generator), Box::new(loader)));
+    let world = Arc::new(
+        World::with_loader(Box::new(generator), Box::new(loader))
+            .with_generation_limit(chunk_gen_permits()),
+    );
     info!(monde = %store.base().display(), "monde plat partagé prêt");
     run_core(listener, keep_alive, world, store, players, None, shutdown).await
 }
@@ -3785,6 +3800,11 @@ mod tests {
         let invalid = build_env_filter(Some("!!!nope"));
         let default = build_env_filter(None);
         assert_eq!(invalid.to_string(), default.to_string());
+    }
+
+    #[test]
+    fn gen_permits_are_at_least_one() {
+        assert!(super::chunk_gen_permits() >= 1);
     }
 
     #[test]
