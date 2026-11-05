@@ -11,7 +11,7 @@ use crate::feature::region::{
     WORLD_MIN_Y, WRITE_RADIUS, chunk_distance,
 };
 
-struct LoadedChunk {
+pub struct ProtoChunk {
     states: Vec<u16>,
     ocean_floor_wg: Vec<i32>,
     world_surface_wg: Vec<i32>,
@@ -20,60 +20,35 @@ struct LoadedChunk {
     biome: Arc<[u16]>,
 }
 
-pub struct TerrainFeatureWorld<'g> {
-    generator: &'g WorldGenerator,
-    scratch: ChunkTerrain,
-    search: SearchState,
-    index_to_state: Vec<u16>,
-    min_y: i32,
-    height: usize,
-    qy_count: usize,
-    chunks: HashMap<(i32, i32), LoadedChunk>,
+fn index_to_state_table(generator: &WorldGenerator) -> Vec<u16> {
+    generator
+        .material()
+        .blocks
+        .iter()
+        .map(|name| default_state_id(name).unwrap_or(0) as u16)
+        .collect()
 }
 
-impl<'g> TerrainFeatureWorld<'g> {
-    pub fn new(generator: &'g WorldGenerator) -> Self {
-        let min_y = generator.min_y();
+impl ProtoChunk {
+    pub fn from_terrain(
+        generator: &WorldGenerator,
+        cx: i32,
+        cz: i32,
+        terrain: &ChunkTerrain,
+        search: &mut SearchState,
+    ) -> ProtoChunk {
         let height = generator.height();
-        let qy_count = generator.material().biome_source.quart_y_count();
-        let index_to_state: Vec<u16> = generator
-            .material()
-            .blocks
-            .iter()
-            .map(|name| default_state_id(name).unwrap_or(0) as u16)
-            .collect();
-        Self {
-            scratch: generator.terrain(),
-            generator,
-            search: SearchState::new(),
-            index_to_state,
-            min_y,
-            height,
-            qy_count,
-            chunks: HashMap::new(),
-        }
-    }
+        let min_y = generator.min_y();
+        let index_to_state = index_to_state_table(generator);
 
-    pub fn is_loaded(&self, cx: i32, cz: i32) -> bool {
-        self.chunks.contains_key(&(cx, cz))
-    }
-
-    pub fn load_chunk(&mut self, cx: i32, cz: i32) -> Result<(), VolumeError> {
-        if self.chunks.contains_key(&(cx, cz)) {
-            return Ok(());
-        }
-        let generator = self.generator;
-        generator.fill_chunk(cx, cz, &mut self.scratch)?;
-        let height = self.height;
-        let min_y = self.min_y;
         let mut states = vec![0u16; height * 256];
         for lz in 0..CHUNK_WIDTH {
             for lx in 0..CHUNK_WIDTH {
                 let base = (lx + CHUNK_WIDTH * lz) * height;
                 for j in 0..height {
                     let y = min_y + j as i32;
-                    let idx = self.scratch.block_id_at(lx, y, lz);
-                    states[base + j] = self.index_to_state[idx as usize];
+                    let idx = terrain.block_id_at(lx, y, lz);
+                    states[base + j] = index_to_state[idx as usize];
                 }
             }
         }
@@ -113,33 +88,137 @@ impl<'g> TerrainFeatureWorld<'g> {
             }
         }
 
-        let biome = generator
-            .material()
-            .biome_source
-            .grid(cx, cz, &mut self.search);
+        let biome = generator.material().biome_source.grid(cx, cz, search);
 
-        self.chunks.insert(
-            (cx, cz),
-            LoadedChunk {
-                states,
-                ocean_floor_wg,
-                world_surface_wg,
-                motion_blocking,
-                motion_blocking_no_leaves,
-                biome,
-            },
-        );
+        ProtoChunk {
+            states,
+            ocean_floor_wg,
+            world_surface_wg,
+            motion_blocking,
+            motion_blocking_no_leaves,
+            biome,
+        }
+    }
+
+    pub fn empty(
+        generator: &WorldGenerator,
+        cx: i32,
+        cz: i32,
+        search: &mut SearchState,
+    ) -> ProtoChunk {
+        let height = generator.height();
+        let min_y = generator.min_y();
+        let biome = generator.material().biome_source.grid(cx, cz, search);
+        ProtoChunk {
+            states: vec![0u16; height * 256],
+            ocean_floor_wg: vec![min_y; 256],
+            world_surface_wg: vec![min_y; 256],
+            motion_blocking: vec![min_y; 256],
+            motion_blocking_no_leaves: vec![min_y; 256],
+            biome,
+        }
+    }
+}
+
+pub struct TerrainFeatureWorld {
+    generator: Arc<WorldGenerator>,
+    scratch: ChunkTerrain,
+    search: SearchState,
+    min_y: i32,
+    height: usize,
+    qy_count: usize,
+    chunks: HashMap<(i32, i32), ProtoChunk>,
+}
+
+impl TerrainFeatureWorld {
+    pub fn new(generator: Arc<WorldGenerator>) -> Self {
+        let min_y = generator.min_y();
+        let height = generator.height();
+        let qy_count = generator.material().biome_source.quart_y_count();
+        Self {
+            scratch: generator.terrain(),
+            generator,
+            search: SearchState::new(),
+            min_y,
+            height,
+            qy_count,
+            chunks: HashMap::new(),
+        }
+    }
+
+    pub fn generator(&self) -> &Arc<WorldGenerator> {
+        &self.generator
+    }
+
+    pub fn material_default_states(&self) -> Vec<u16> {
+        index_to_state_table(&self.generator)
+    }
+
+    pub fn is_loaded(&self, cx: i32, cz: i32) -> bool {
+        self.chunks.contains_key(&(cx, cz))
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn insert_chunk(&mut self, cx: i32, cz: i32, proto: ProtoChunk) {
+        self.chunks.entry((cx, cz)).or_insert(proto);
+    }
+
+    pub fn remove_chunk(&mut self, cx: i32, cz: i32) -> bool {
+        self.chunks.remove(&(cx, cz)).is_some()
+    }
+
+    pub fn load_chunk(&mut self, cx: i32, cz: i32) -> Result<(), VolumeError> {
+        if self.chunks.contains_key(&(cx, cz)) {
+            return Ok(());
+        }
+        let generator = Arc::clone(&self.generator);
+        generator.fill_chunk(cx, cz, &mut self.scratch)?;
+        let proto = ProtoChunk::from_terrain(&generator, cx, cz, &self.scratch, &mut self.search);
+        self.chunks.insert((cx, cz), proto);
         Ok(())
     }
 
-    pub fn region(&mut self, cx: i32, cz: i32) -> TerrainRegion<'_, 'g> {
+    pub fn region(&mut self, cx: i32, cz: i32) -> TerrainRegion<'_> {
         TerrainRegion {
             world: self,
             center: (cx, cz),
         }
     }
 
+    pub fn state_at(&self, cx: i32, cz: i32, lx: usize, y: i32, lz: usize) -> u16 {
+        if lx >= CHUNK_WIDTH || lz >= CHUNK_WIDTH {
+            return 0;
+        }
+        if y < self.min_y || y >= self.min_y + self.height as i32 {
+            return 0;
+        }
+        match self.chunks.get(&(cx, cz)) {
+            Some(ch) => {
+                let j = (y - self.min_y) as usize;
+                ch.states[j + (lx + CHUNK_WIDTH * lz) * self.height]
+            }
+            None => 0,
+        }
+    }
+
+    pub fn column_states(&self, cx: i32, cz: i32) -> Option<&[u16]> {
+        self.chunks.get(&(cx, cz)).map(|ch| ch.states.as_slice())
+    }
+
+    pub fn column_biomes(&self, cx: i32, cz: i32) -> Option<&[u16]> {
+        self.chunks.get(&(cx, cz)).map(|ch| &*ch.biome)
+    }
+
     pub fn block_id_at(&self, cx: i32, cz: i32, lx: usize, y: i32, lz: usize) -> u16 {
+        if lx >= CHUNK_WIDTH || lz >= CHUNK_WIDTH {
+            return 0;
+        }
+        if y < self.min_y || y >= self.min_y + self.height as i32 {
+            return 0;
+        }
         match self.chunks.get(&(cx, cz)) {
             Some(ch) => {
                 let j = (y - self.min_y) as usize;
@@ -151,6 +230,14 @@ impl<'g> TerrainFeatureWorld<'g> {
         }
     }
 
+    pub fn min_y(&self) -> i32 {
+        self.min_y
+    }
+
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
     fn column_index(&self, x: i32, y: i32, z: i32) -> usize {
         let lx = (x & 15) as usize;
         let lz = (z & 15) as usize;
@@ -158,7 +245,7 @@ impl<'g> TerrainFeatureWorld<'g> {
         j + (lx + CHUNK_WIDTH * lz) * self.height
     }
 
-    fn heightmap_value(&self, map: Heightmap, ch: &LoadedChunk, x: i32, z: i32) -> i32 {
+    fn heightmap_value(&self, map: Heightmap, ch: &ProtoChunk, x: i32, z: i32) -> i32 {
         let col = (x & 15) as usize + CHUNK_WIDTH * (z & 15) as usize;
         match map {
             Heightmap::OceanFloorWg | Heightmap::OceanFloor => ch.ocean_floor_wg[col],
@@ -168,7 +255,7 @@ impl<'g> TerrainFeatureWorld<'g> {
         }
     }
 
-    fn biome_cell(&self, ch: &LoadedChunk, cell_x: i32, cell_y: i32, cell_z: i32) -> u16 {
+    fn biome_cell(&self, ch: &ProtoChunk, cell_x: i32, cell_y: i32, cell_z: i32) -> u16 {
         let gx = (cell_x & 3) as usize;
         let gz = (cell_z & 3) as usize;
         let top = self.qy_count as i32 - 1 - 16;
@@ -179,12 +266,12 @@ impl<'g> TerrainFeatureWorld<'g> {
     }
 }
 
-pub struct TerrainRegion<'a, 'g> {
-    world: &'a mut TerrainFeatureWorld<'g>,
+pub struct TerrainRegion<'a> {
+    world: &'a mut TerrainFeatureWorld,
     center: (i32, i32),
 }
 
-impl Region for TerrainRegion<'_, '_> {
+impl Region for TerrainRegion<'_> {
     fn center(&self) -> (i32, i32) {
         self.center
     }
@@ -263,6 +350,135 @@ impl Region for TerrainRegion<'_, '_> {
                 Ok(true)
             }
             None => Ok(false),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk_fill::WorldGenerator;
+
+    fn world() -> TerrainFeatureWorld {
+        let generator = Arc::new(WorldGenerator::new(1).expect("generator"));
+        TerrainFeatureWorld::new(generator)
+    }
+
+    fn insert_empty(world: &mut TerrainFeatureWorld, cx: i32, cz: i32) {
+        let proto = {
+            let generator = Arc::clone(world.generator());
+            let mut search = SearchState::new();
+            ProtoChunk::empty(&generator, cx, cz, &mut search)
+        };
+        world.insert_chunk(cx, cz, proto);
+    }
+
+    #[test]
+    fn state_at_out_of_bounds_never_panics() {
+        let mut world = world();
+        let min_y = world.min_y();
+        let top = min_y + world.height() as i32;
+
+        assert_eq!(world.state_at(0, 0, 0, min_y, 0), 0);
+        assert_eq!(world.state_at(-5, 7, 0, min_y, 0), 0);
+        assert_eq!(world.state_at(0, 0, 0, min_y - 1, 0), 0);
+        assert_eq!(world.state_at(0, 0, 0, min_y - 1000, 0), 0);
+        assert_eq!(world.state_at(0, 0, 0, top, 0), 0);
+        assert_eq!(world.state_at(0, 0, 0, i32::MIN, 0), 0);
+        assert_eq!(world.state_at(0, 0, 16, 0, 0), 0);
+        assert_eq!(world.state_at(0, 0, 0, 0, 16), 0);
+        assert_eq!(world.state_at(0, 0, usize::MAX, 0, usize::MAX), 0);
+
+        insert_empty(&mut world, 0, 0);
+        assert_eq!(world.state_at(0, 0, 0, min_y, 0), 0);
+        assert_eq!(world.state_at(0, 0, 0, min_y - 1, 0), 0);
+        assert_eq!(world.state_at(0, 0, 0, top, 0), 0);
+        assert_eq!(world.state_at(0, 0, 0, top + 500, 0), 0);
+        assert_eq!(world.state_at(0, 0, 16, min_y, 0), 0);
+        assert_eq!(world.state_at(0, 0, 0, min_y, 16), 0);
+        assert_eq!(world.state_at(0, 0, usize::MAX, i32::MAX, usize::MAX), 0);
+    }
+
+    #[test]
+    fn block_id_at_out_of_bounds_never_panics() {
+        let mut world = world();
+        let min_y = world.min_y();
+        let top = min_y + world.height() as i32;
+        insert_empty(&mut world, 2, -3);
+
+        assert_eq!(world.block_id_at(2, -3, 0, min_y, 0), 0);
+        assert_eq!(world.block_id_at(2, -3, 0, min_y - 1, 0), 0);
+        assert_eq!(world.block_id_at(2, -3, 0, top, 0), 0);
+        assert_eq!(world.block_id_at(2, -3, 0, i32::MIN, 0), 0);
+        assert_eq!(world.block_id_at(2, -3, 16, min_y, 0), 0);
+        assert_eq!(world.block_id_at(2, -3, 0, min_y, 99), 0);
+        assert_eq!(world.block_id_at(9, 9, 0, min_y, 0), 0);
+    }
+
+    #[test]
+    fn empty_proto_is_air_with_floor_heightmaps() {
+        let mut world = world();
+        let min_y = world.min_y();
+        insert_empty(&mut world, 0, 0);
+        assert_eq!(world.chunk_count(), 1);
+
+        for lz in 0..CHUNK_WIDTH {
+            for lx in 0..CHUNK_WIDTH {
+                for j in 0..world.height() {
+                    let y = min_y + j as i32;
+                    assert_eq!(world.state_at(0, 0, lx, y, lz), 0);
+                    assert_eq!(world.block_id_at(0, 0, lx, y, lz), 0);
+                }
+            }
+        }
+
+        let biomes = world.column_biomes(0, 0).expect("biomes présents");
+        assert!(!biomes.is_empty());
+
+        let region = world.region(0, 0);
+        for map in [
+            Heightmap::OceanFloorWg,
+            Heightmap::WorldSurfaceWg,
+            Heightmap::MotionBlocking,
+            Heightmap::MotionBlockingNoLeaves,
+        ] {
+            assert_eq!(region.read_heightmap(map, 0, 0).unwrap(), min_y);
+        }
+
+        assert!(world.remove_chunk(0, 0));
+        assert_eq!(world.chunk_count(), 0);
+        assert!(!world.remove_chunk(0, 0));
+    }
+
+    #[test]
+    fn region_far_reads_air_then_err_before_and_after_release() {
+        let mut world = world();
+        insert_empty(&mut world, 0, 0);
+        insert_empty(&mut world, 3, 0);
+
+        {
+            let region = world.region(0, 0);
+            for d in 2..=READ_RADIUS {
+                let x = d * CHUNK_WIDTH as i32;
+                assert_eq!(region.read_block(x, 0, 0).unwrap(), AIR);
+            }
+            let out = (READ_RADIUS + 1) * CHUNK_WIDTH as i32;
+            assert!(region.read_block(out, 0, 0).is_err());
+            assert_eq!(
+                region.read_block(3 * CHUNK_WIDTH as i32, 0, 0).unwrap(),
+                AIR
+            );
+        }
+
+        assert!(world.remove_chunk(3, 0));
+        let region = world.region(0, 0);
+        assert_eq!(
+            region.read_block(3 * CHUNK_WIDTH as i32, 0, 0).unwrap(),
+            AIR
+        );
+        for d in 2..=READ_RADIUS {
+            let x = d * CHUNK_WIDTH as i32;
+            assert_eq!(region.read_block(x, 0, 0).unwrap(), AIR);
         }
     }
 }

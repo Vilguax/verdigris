@@ -10,6 +10,8 @@ use verdigris_protocol::{
 };
 use verdigris_worldgen::{AquiferMode, ChunkTerrain, SearchState, WorldGenerator};
 
+use crate::decoration::DecoratedGenerator;
+
 pub const GENERATOR_ENV: &str = "VERDIGRIS_GENERATOR";
 pub const SEED_ENV: &str = "VERDIGRIS_SEED";
 pub const DEFAULT_SEED: i64 = 20_261_029;
@@ -198,6 +200,7 @@ pub enum GeneratorSetup {
     Noise {
         generator: Arc<WorldGenerator>,
         metrics: Arc<GenMetrics>,
+        seed: i64,
     },
 }
 
@@ -213,6 +216,7 @@ impl GeneratorSetup {
                 Ok(GeneratorSetup::Noise {
                     generator,
                     metrics: Arc::new(GenMetrics::default()),
+                    seed,
                 })
             }
         }
@@ -228,9 +232,11 @@ impl GeneratorSetup {
     pub fn into_generator(self) -> Result<Box<dyn ChunkGenerator>, String> {
         match self {
             GeneratorSetup::Flat => Ok(Box::new(FlatGenerator::new().map_err(|e| e.to_string())?)),
-            GeneratorSetup::Noise { generator, metrics } => {
-                Ok(Box::new(NoiseGenerator::new(generator, metrics)?))
-            }
+            GeneratorSetup::Noise {
+                generator,
+                metrics,
+                seed,
+            } => Ok(Box::new(DecoratedGenerator::new(generator, seed, metrics)?)),
         }
     }
 }

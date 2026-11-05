@@ -12,7 +12,7 @@ pub mod rng;
 pub mod tags;
 pub mod zoom;
 
-pub use bridge::{TerrainFeatureWorld, TerrainRegion};
+pub use bridge::{ProtoChunk, TerrainFeatureWorld, TerrainRegion};
 pub use engine::{Decoration, DecorationContext};
 pub use error::FeatureError;
 pub use features::{DiskConfig, OreConfig, OreScratch, RuleTest, StateProvider, ore_metrics};

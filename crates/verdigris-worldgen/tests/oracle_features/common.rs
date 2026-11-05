@@ -93,10 +93,11 @@ pub fn generate(name: &str, index_str: &str) -> Generated {
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
 
-    let generator =
-        WorldGenerator::with_options(seed, AquiferMode::Noise, true).expect("generator");
+    let generator = std::sync::Arc::new(
+        WorldGenerator::with_options(seed, AquiferMode::Noise, true).expect("generator"),
+    );
     let decoration = Decoration::embedded().expect("decoration");
-    let mut world = TerrainFeatureWorld::new(&generator);
+    let mut world = TerrainFeatureWorld::new(generator);
 
     let target_set: HashSet<(i32, i32)> = targets.iter().copied().collect();
     let (min_cx, max_cx) = (

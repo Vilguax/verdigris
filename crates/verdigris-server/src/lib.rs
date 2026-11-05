@@ -1,3 +1,4 @@
+mod decoration;
 mod generator;
 mod give;
 mod interaction;
