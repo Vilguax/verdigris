@@ -1,4 +1,5 @@
 pub mod boxes;
+pub mod cache;
 pub mod data;
 pub mod fill;
 pub mod quantize;
@@ -6,6 +7,7 @@ pub mod search;
 pub mod tree;
 
 pub use boxes::{ParamBox, dist};
+pub use cache::DEFAULT_BIOME_CACHE_CAPACITY;
 pub use data::{BiomeNames, RawEntry, biome_entries, biome_names};
 pub use fill::BiomeSource;
 pub use quantize::{q, q_entry};

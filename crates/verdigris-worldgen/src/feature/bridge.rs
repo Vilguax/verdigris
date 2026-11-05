@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::biome::SearchState;
 use crate::chunk_fill::{CHUNK_WIDTH, ChunkTerrain, WorldGenerator};
@@ -16,7 +17,7 @@ struct LoadedChunk {
     world_surface_wg: Vec<i32>,
     motion_blocking: Vec<i32>,
     motion_blocking_no_leaves: Vec<i32>,
-    biome: Vec<u16>,
+    biome: Arc<[u16]>,
 }
 
 pub struct TerrainFeatureWorld<'g> {
@@ -27,7 +28,6 @@ pub struct TerrainFeatureWorld<'g> {
     min_y: i32,
     height: usize,
     qy_count: usize,
-    cells: usize,
     chunks: HashMap<(i32, i32), LoadedChunk>,
 }
 
@@ -36,7 +36,6 @@ impl<'g> TerrainFeatureWorld<'g> {
         let min_y = generator.min_y();
         let height = generator.height();
         let qy_count = generator.material().biome_source.quart_y_count();
-        let cells = generator.material().biome_source.cell_count();
         let index_to_state: Vec<u16> = generator
             .material()
             .blocks
@@ -51,7 +50,6 @@ impl<'g> TerrainFeatureWorld<'g> {
             min_y,
             height,
             qy_count,
-            cells,
             chunks: HashMap::new(),
         }
     }
@@ -115,11 +113,10 @@ impl<'g> TerrainFeatureWorld<'g> {
             }
         }
 
-        let mut biome = vec![0u16; self.cells];
-        generator
+        let biome = generator
             .material()
             .biome_source
-            .fill_chunk(cx, cz, &mut self.search, &mut biome);
+            .grid(cx, cz, &mut self.search);
 
         self.chunks.insert(
             (cx, cz),

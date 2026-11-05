@@ -8,9 +8,7 @@ use verdigris_protocol::{
     ChunkColumn, ChunkGenerator, FlatGenerator, biome_index, block_index, default_state_of_name,
     plains_biome_id,
 };
-use verdigris_worldgen::{
-    AquiferMode, BiomeSource, ChunkTerrain, SearchState, WorldGenerator, WorldgenData,
-};
+use verdigris_worldgen::{AquiferMode, ChunkTerrain, SearchState, WorldGenerator};
 
 pub const GENERATOR_ENV: &str = "VERDIGRIS_GENERATOR";
 pub const SEED_ENV: &str = "VERDIGRIS_SEED";
@@ -97,7 +95,6 @@ fn state_of(name: &str) -> Result<u16, String> {
 
 pub struct NoiseGenerator {
     generator: Arc<WorldGenerator>,
-    biomes: Arc<BiomeSource>,
     metrics: Arc<GenMetrics>,
     states: Vec<u16>,
     biome: u16,
@@ -107,10 +104,6 @@ pub struct NoiseGenerator {
 
 impl NoiseGenerator {
     pub fn new(generator: Arc<WorldGenerator>, metrics: Arc<GenMetrics>) -> Result<Self, String> {
-        let data = WorldgenData::embedded().map_err(|err| err.to_string())?;
-        let biomes = data
-            .build_biome_source(generator.seed())
-            .map_err(|err| err.to_string())?;
         let states = generator
             .material()
             .blocks
@@ -123,7 +116,6 @@ impl NoiseGenerator {
             min_y: generator.min_y(),
             height: generator.height(),
             generator,
-            biomes: Arc::new(biomes),
             metrics,
         })
     }
@@ -158,7 +150,6 @@ impl NoiseGenerator {
 
 struct Scratch {
     terrain: ChunkTerrain,
-    biome_cells: Vec<u16>,
     state: SearchState,
 }
 
@@ -173,20 +164,18 @@ impl ChunkGenerator for NoiseGenerator {
             let mut slot = cell.borrow_mut();
             let scratch = slot.get_or_insert_with(|| Scratch {
                 terrain: self.generator.terrain(),
-                biome_cells: vec![self.biome; self.biomes.cell_count()],
                 state: SearchState::new(),
             });
-            self.biomes.fill_chunk(
-                chunk_x,
-                chunk_z,
-                &mut scratch.state,
-                &mut scratch.biome_cells,
-            );
+            let biome_cells =
+                self.generator
+                    .material()
+                    .biome_source
+                    .grid(chunk_x, chunk_z, &mut scratch.state);
             match self
                 .generator
                 .fill_chunk(chunk_x, chunk_z, &mut scratch.terrain)
             {
-                Ok(()) => self.build_column(&scratch.terrain, &scratch.biome_cells),
+                Ok(()) => self.build_column(&scratch.terrain, &biome_cells),
                 Err(err) => {
                     error!(
                         x = chunk_x,

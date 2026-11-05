@@ -912,6 +912,34 @@ Ils partagent un seul binaire (`tests/oracle_features/main.rs`) : cargo enchaîn
 de test l'un après l'autre mais lance les tests d'un même binaire en parallèle, ce qui superpose
 les deux générations (environ 5 min chacune en débogage) au lieu de les additionner.
 
+## Cache de grilles de biomes (perf/cache-biomes)
+
+Le poste d'optimisation annoncé plus haut (« cache des grilles voisines côté serveur »)
+est désormais réalisé, mais porté par `BiomeSource` lui-même et non par `ChunkTerrain` :
+un champ `BiomeGridCache` unique partagé par les trois lecteurs (`MaterialRules::apply`,
+`feature/bridge.rs::load_chunk`, `NoiseGenerator::generate`), tous passant déjà par
+`generator.material().biome_source`. La seconde source construite côté serveur a été
+supprimée pour que le partage soit effectif. Capacité par défaut 4096, configurable via
+`BiomeSource::with_cache_capacity` / `WorldgenData::build_biome_source_with_capacity`.
+
+Éviction FIFO : `HashMap<(i32,i32), Arc<[u16]>>` plus une `VecDeque` d'ordre d'insertion ;
+une clé n'est poussée qu'à sa première insertion (un second écrivain écrase la valeur sans
+re-pousser), donc la file ne contient jamais de clé périmée et la borne reste exacte. Les
+grilles évincées survivent via leurs `Arc` déjà clonés. Le verrou (`Mutex`, pas de sharding)
+n'est tenu que le temps d'un `get`/`insert`, jamais pendant le calcul d'une grille.
+
+`state.reset()` reste le premier effet observable sur `SearchState`, sur chaque chemin de
+`fill_chunk` comme de `grid`, hit ou miss : le cache n'est consulté qu'après. L'invariant
+d'ordre de parcours est isolé dans `fill_grid_computed` (corps historique sans le reset),
+réutilisé par les deux. Les six portes oracle restent vertes sans toucher leurs attentes.
+
+Mesures (informatives, jamais une porte). Avant (fourni) : `WorldGenerator::fill_chunk`
+≈ 414 ms/chunk, `BiomeSource::fill_chunk` ≈ 48 ms, mesuré le 2026-11-05, graine 20261029,
+machine 20 cœurs, build release. Après : la grille centrale produite par `apply` est relue
+en hit par `generate`, et le voisinage 3×3 partage ses bords d'un chunk au suivant ; le
+coût mesurable est reporté par `bench_ordered_zone_ms_per_chunk` (`#[ignore]` par défaut,
+`cargo test -p verdigris-worldgen --test biome_cache -- --ignored --nocapture`).
+
 Les deux chemins chauds de décoration ont par ailleurs été revus : aucune boucle non bornée
 (les features activées n'emploient que `count`/`in_square`/`height_range`/`heightmap`/`biome`/
 `rarity_filter`/`block_predicate_filter` ; `ore`/`scattered_ore`/`disk` bornent toutes leurs

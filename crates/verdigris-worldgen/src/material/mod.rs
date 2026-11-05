@@ -190,12 +190,8 @@ impl MaterialRules {
         for dz in -1i32..=1 {
             for dx in -1i32..=1 {
                 let goff = (((dz + 1) * 3 + (dx + 1)) as usize) * cells;
-                self.biome_source.fill_chunk(
-                    cx + dx,
-                    cz + dz,
-                    &mut out.bsearch,
-                    &mut out.biome_grids[goff..goff + cells],
-                );
+                let g = self.biome_source.grid(cx + dx, cz + dz, &mut out.bsearch);
+                out.biome_grids[goff..goff + cells].copy_from_slice(&g);
             }
         }
 

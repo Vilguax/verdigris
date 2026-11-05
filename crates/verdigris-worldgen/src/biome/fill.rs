@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use crate::biome::cache::{BiomeGridCache, DEFAULT_BIOME_CACHE_CAPACITY};
 use crate::biome::quantize::q;
 use crate::biome::search::{BiomeTree, SearchState};
 use crate::df::eval::eval_point;
@@ -15,6 +18,7 @@ pub struct BiomeSource {
     tree: &'static BiomeTree,
     min_y: i32,
     height: usize,
+    cache: BiomeGridCache,
 }
 
 impl BiomeSource {
@@ -29,6 +33,31 @@ impl BiomeSource {
         min_y: i32,
         height: usize,
     ) -> Self {
+        Self::with_cache_capacity(
+            temperature,
+            vegetation,
+            continents,
+            erosion,
+            depth,
+            ridges,
+            min_y,
+            height,
+            DEFAULT_BIOME_CACHE_CAPACITY,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_cache_capacity(
+        temperature: Node,
+        vegetation: Node,
+        continents: Node,
+        erosion: Node,
+        depth: Node,
+        ridges: Node,
+        min_y: i32,
+        height: usize,
+        capacity: usize,
+    ) -> Self {
         BiomeSource {
             temperature,
             vegetation,
@@ -39,6 +68,7 @@ impl BiomeSource {
             tree: BiomeTree::embedded(),
             min_y,
             height,
+            cache: BiomeGridCache::new(capacity),
         }
     }
 
@@ -94,8 +124,7 @@ impl BiomeSource {
         self.tree.search(state, &target)
     }
 
-    pub fn fill_chunk(&self, cx: i32, cz: i32, state: &mut SearchState, out: &mut [u16]) {
-        state.reset();
+    fn fill_grid_computed(&self, cx: i32, cz: i32, state: &mut SearchState, out: &mut [u16]) {
         let x0 = 16i32.wrapping_mul(cx);
         let z0 = 16i32.wrapping_mul(cz);
         let qy_count = self.quart_y_count();
@@ -118,5 +147,46 @@ impl BiomeSource {
                 }
             }
         }
+    }
+
+    pub fn grid(&self, cx: i32, cz: i32, state: &mut SearchState) -> Arc<[u16]> {
+        state.reset();
+        if let Some(g) = self.cache.get((cx, cz)) {
+            return g;
+        }
+        let mut buf = vec![0u16; self.cell_count()];
+        self.fill_grid_computed(cx, cz, state, &mut buf);
+        let arc: Arc<[u16]> = Arc::from(buf);
+        self.cache.insert((cx, cz), arc.clone());
+        arc
+    }
+
+    pub fn fill_chunk(&self, cx: i32, cz: i32, state: &mut SearchState, out: &mut [u16]) {
+        state.reset();
+        if let Some(g) = self.cache.get((cx, cz)) {
+            out.copy_from_slice(&g);
+            return;
+        }
+        self.fill_grid_computed(cx, cz, state, out);
+        self.cache.insert((cx, cz), Arc::from(&out[..]));
+    }
+
+    pub fn compute_grid_uncached(&self, cx: i32, cz: i32, state: &mut SearchState) -> Vec<u16> {
+        state.reset();
+        let mut buf = vec![0u16; self.cell_count()];
+        self.fill_grid_computed(cx, cz, state, &mut buf);
+        buf
+    }
+
+    pub fn cache_stats(&self) -> (u64, u64) {
+        self.cache.stats()
+    }
+
+    pub fn cache_len(&self) -> usize {
+        self.cache.len()
+    }
+
+    pub fn reset_cache_stats(&self) {
+        self.cache.reset_stats();
     }
 }

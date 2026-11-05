@@ -318,6 +318,14 @@ impl WorldgenData {
     }
 
     pub fn build_biome_source(&self, seed: i64) -> Result<crate::biome::BiomeSource, DataError> {
+        self.build_biome_source_with_capacity(seed, crate::biome::DEFAULT_BIOME_CACHE_CAPACITY)
+    }
+
+    pub fn build_biome_source_with_capacity(
+        &self,
+        seed: i64,
+        capacity: usize,
+    ) -> Result<crate::biome::BiomeSource, DataError> {
         let assets = self.assets(seed)?;
         let functions = self.density_functions()?;
         let overworld = self.overworld()?;
@@ -348,7 +356,7 @@ impl WorldgenData {
             Ok(builder.build(value)?)
         };
 
-        Ok(crate::biome::BiomeSource::new(
+        Ok(crate::biome::BiomeSource::with_cache_capacity(
             field("temperature")?,
             field("vegetation")?,
             field("continents")?,
@@ -357,6 +365,7 @@ impl WorldgenData {
             field("ridges")?,
             min_y,
             height.max(0) as usize,
+            capacity,
         ))
     }
 
