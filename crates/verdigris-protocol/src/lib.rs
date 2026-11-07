@@ -5,6 +5,7 @@ pub mod chunkfile;
 pub mod clientbound;
 pub mod commands;
 pub mod config;
+pub mod container;
 pub mod entitydata;
 pub mod error;
 pub mod framing;
@@ -20,6 +21,7 @@ pub mod play;
 pub mod playerlist;
 pub mod portal_tables;
 pub mod primitives;
+pub mod static_registries;
 pub mod status;
 pub mod text;
 pub mod tracking;
@@ -46,10 +48,10 @@ pub enum State {
 }
 
 pub use blocks::{
-    Block, BlocksData, ItemProps, ItemState, Property, block_has_property, block_id_of_name,
-    block_item_of_state, blocks_data, default_state_of_name, is_air, is_fluid, item_id_of_name,
-    item_places_block, item_to_placed_state, max_stack_size, property_of, state_to_block,
-    state_with, with_property,
+    Block, BlocksData, EquipSlot, ItemProps, ItemState, Property, block_has_property,
+    block_id_of_name, block_item_of_state, blocks_data, default_state_of_name, equip_slot, is_air,
+    is_fluid, item_id_of_name, item_places_block, item_to_placed_state, max_stack_size,
+    property_of, state_to_block, state_with, with_property,
 };
 pub use bucket_tables::{
     BucketIds, bucket_ids, is_liquid_block, is_source_fluid, is_waterloggable, lava_source_state,
@@ -85,6 +87,12 @@ pub use commands::{
 pub use config::{
     MAX_KNOWN_PACKS, client_has_core, decode_known_packs, known_packs_payload, packet_ids,
     registry_data_payload, server_known_pack, update_tags_payload,
+};
+pub use container::{
+    ClickType, ContainerClick, HashedStack, MAX_CHANGED_SLOTS, MAX_HASHED_COMPONENTS,
+    container_close_payload, container_set_content_payload, decode_container_click,
+    decode_container_close, decode_hashed_stack, open_screen_payload, set_cursor_item_payload,
+    set_player_inventory_payload,
 };
 pub use entitydata::{
     EntityDataValue, HumanoidArm, Pose, append_entity_data_entries, set_entity_data_payload,
@@ -151,6 +159,11 @@ pub use primitives::{
     fits_i16, pack_degrees, quantize, read_f32, read_f64, read_i16, read_i32, read_i64,
     read_string, read_u16, write_f32, write_f64, write_i16, write_i32, write_i64, write_string,
     write_u16,
+};
+pub use static_registries::{
+    BLOCK_ENTITY_TYPE_REGISTRY, ENTITY_TYPE_REGISTRY, MENU_REGISTRY, SOUND_EVENT_REGISTRY,
+    static_registries_game_version, static_registries_sha1, static_registry_id,
+    static_registry_len, static_registry_name,
 };
 pub use status::{
     StatusInfo, encode_pong, encode_status_response, pong_payload, status_json,

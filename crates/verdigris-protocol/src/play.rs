@@ -51,6 +51,11 @@ pub mod packet_ids {
         pub const COMMAND_SUGGESTIONS: i32 = 0x0F;
         pub const ENTITY_EVENT: i32 = 0x22;
         pub const SET_TIME: i32 = 0x73;
+        pub const CONTAINER_CLOSE: i32 = 0x11;
+        pub const CONTAINER_SET_CONTENT: i32 = 0x12;
+        pub const OPEN_SCREEN: i32 = 0x3C;
+        pub const SET_CURSOR_ITEM: i32 = 0x62;
+        pub const SET_PLAYER_INVENTORY: i32 = 0x6E;
     }
 
     pub mod serverbound {
@@ -79,6 +84,8 @@ pub mod packet_ids {
         pub const CLIENT_INFORMATION: i32 = 0x0E;
         pub const PUNCH: i32 = 0x2E;
         pub const COMMAND_SUGGESTION: i32 = 0x0F;
+        pub const CONTAINER_CLICK: i32 = 0x12;
+        pub const CONTAINER_CLOSE: i32 = 0x13;
     }
 }
 
@@ -362,7 +369,7 @@ pub struct KeepAlive {
     pub id: i64,
 }
 
-fn take_var_int(cursor: &mut &[u8]) -> Result<i32, ProtocolError> {
+pub(crate) fn take_var_int(cursor: &mut &[u8]) -> Result<i32, ProtocolError> {
     match read_var_int(cursor)? {
         Some((value, consumed)) => {
             *cursor = &cursor[consumed..];
@@ -480,7 +487,7 @@ pub struct MovePlayerStatus {
     pub flags: u8,
 }
 
-fn take_u8(cursor: &mut &[u8]) -> Result<u8, ProtocolError> {
+pub(crate) fn take_u8(cursor: &mut &[u8]) -> Result<u8, ProtocolError> {
     match cursor.split_first() {
         Some((&byte, rest)) => {
             *cursor = rest;
@@ -490,7 +497,7 @@ fn take_u8(cursor: &mut &[u8]) -> Result<u8, ProtocolError> {
     }
 }
 
-fn ensure_consumed(cursor: &[u8]) -> Result<(), ProtocolError> {
+pub(crate) fn ensure_consumed(cursor: &[u8]) -> Result<(), ProtocolError> {
     if cursor.is_empty() {
         Ok(())
     } else {
@@ -711,7 +718,7 @@ pub struct PickItemFromBlock {
     pub include_data: bool,
 }
 
-fn take_i16(cursor: &mut &[u8]) -> Result<i16, ProtocolError> {
+pub(crate) fn take_i16(cursor: &mut &[u8]) -> Result<i16, ProtocolError> {
     match read_u16(cursor)? {
         Some((value, consumed)) => {
             *cursor = &cursor[consumed..];
@@ -721,7 +728,7 @@ fn take_i16(cursor: &mut &[u8]) -> Result<i16, ProtocolError> {
     }
 }
 
-fn take_bool(cursor: &mut &[u8]) -> Result<bool, ProtocolError> {
+pub(crate) fn take_bool(cursor: &mut &[u8]) -> Result<bool, ProtocolError> {
     Ok(take_u8(cursor)? != 0)
 }
 
@@ -1338,6 +1345,13 @@ mod tests {
         assert_eq!(packet_ids::clientbound::SET_EQUIPMENT, 0x68);
         assert_eq!(packet_ids::clientbound::SWING_ANIMATION, 0x7B);
         assert_eq!(packet_ids::serverbound::PUNCH, 0x2E);
+        assert_eq!(packet_ids::serverbound::CONTAINER_CLICK, 0x12);
+        assert_eq!(packet_ids::serverbound::CONTAINER_CLOSE, 0x13);
+        assert_eq!(packet_ids::clientbound::CONTAINER_CLOSE, 0x11);
+        assert_eq!(packet_ids::clientbound::CONTAINER_SET_CONTENT, 0x12);
+        assert_eq!(packet_ids::clientbound::OPEN_SCREEN, 0x3C);
+        assert_eq!(packet_ids::clientbound::SET_CURSOR_ITEM, 0x62);
+        assert_eq!(packet_ids::clientbound::SET_PLAYER_INVENTORY, 0x6E);
     }
 
     #[test]

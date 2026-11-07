@@ -30,6 +30,17 @@ pub struct ItemState {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ItemProps {
     pub max_stack_size: Option<u8>,
+    #[serde(default)]
+    pub equip_slot: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EquipSlot {
+    Head,
+    Chest,
+    Legs,
+    Feet,
+    Offhand,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +64,7 @@ pub struct Blocks {
     items: HashMap<i32, i32>,
     steps: Vec<Vec<i32>>,
     max_stack: Vec<u8>,
+    equip: Vec<Option<EquipSlot>>,
     placing_items: HashSet<i32>,
 }
 
@@ -98,6 +110,7 @@ fn blocks() -> &'static Blocks {
             .collect();
         let steps = data.blocks.iter().map(mixed_radix_steps).collect();
         let max_stack = build_max_stack(&data);
+        let equip = build_equip_slots(&data);
         let placing_items = data.items.iter().map(|entry| entry.item).collect();
 
         Blocks {
@@ -107,9 +120,34 @@ fn blocks() -> &'static Blocks {
             items,
             steps,
             max_stack,
+            equip,
             placing_items,
         }
     })
+}
+
+fn build_equip_slots(data: &BlocksData) -> Vec<Option<EquipSlot>> {
+    let highest = data.item_ids.values().copied().max().unwrap_or(-1);
+    let mut table = vec![None; (highest + 1).max(0) as usize];
+    for (name, &id) in &data.item_ids {
+        let slot = data
+            .item_props
+            .get(name)
+            .and_then(|props| props.equip_slot.as_deref());
+        let value = match slot {
+            None | Some("body") | Some("saddle") => None,
+            Some("head") => Some(EquipSlot::Head),
+            Some("chest") => Some(EquipSlot::Chest),
+            Some("legs") => Some(EquipSlot::Legs),
+            Some("feet") => Some(EquipSlot::Feet),
+            Some("offhand") => Some(EquipSlot::Offhand),
+            Some(other) => panic!(
+                "item_props.{name}.equip_slot valeur inattendue {other:?} pour l'objet {name} (id {id})"
+            ),
+        };
+        table[id as usize] = value;
+    }
+    table
 }
 
 fn build_max_stack(data: &BlocksData) -> Vec<u8> {
@@ -249,6 +287,13 @@ pub fn max_stack_size(item_id: i32) -> u8 {
     table.get(item_id as usize).copied().unwrap_or(0)
 }
 
+pub fn equip_slot(item_id: i32) -> Option<EquipSlot> {
+    if item_id < 0 {
+        return None;
+    }
+    blocks().equip.get(item_id as usize).copied().flatten()
+}
+
 pub fn item_places_block(item_id: i32) -> bool {
     blocks().placing_items.contains(&item_id)
 }
@@ -351,6 +396,50 @@ mod tests {
         assert_eq!(max_stack_size(diamond), 64);
         assert_eq!(max_stack_size(ender_pearl), 16);
         assert_eq!(max_stack_size(sword), 1);
+    }
+
+    #[test]
+    fn equip_slot_categories_connues() {
+        let of = |name: &str| equip_slot(item_id_of_name(name).unwrap());
+        assert_eq!(of("minecraft:diamond_helmet"), Some(EquipSlot::Head));
+        assert_eq!(of("minecraft:carved_pumpkin"), Some(EquipSlot::Head));
+        assert_eq!(of("minecraft:elytra"), Some(EquipSlot::Chest));
+        assert_eq!(of("minecraft:leather_leggings"), Some(EquipSlot::Legs));
+        assert_eq!(of("minecraft:leather_boots"), Some(EquipSlot::Feet));
+        assert_eq!(of("minecraft:shield"), Some(EquipSlot::Offhand));
+        assert_eq!(of("minecraft:stone"), None);
+        assert_eq!(of("minecraft:diamond"), None);
+    }
+
+    #[test]
+    fn equip_slot_hors_table_est_none() {
+        assert_eq!(equip_slot(-1), None);
+        assert_eq!(equip_slot(i32::MAX), None);
+    }
+
+    #[test]
+    fn equip_slot_histogramme() {
+        let data = blocks_data();
+        let mut head = 0;
+        let mut chest = 0;
+        let mut legs = 0;
+        let mut feet = 0;
+        let mut offhand = 0;
+        let mut none = 0;
+        for &id in data.item_ids.values() {
+            match equip_slot(id) {
+                Some(EquipSlot::Head) => head += 1,
+                Some(EquipSlot::Chest) => chest += 1,
+                Some(EquipSlot::Legs) => legs += 1,
+                Some(EquipSlot::Feet) => feet += 1,
+                Some(EquipSlot::Offhand) => offhand += 1,
+                None => none += 1,
+            }
+        }
+        assert_eq!(
+            (head, chest, legs, feet, offhand, none),
+            (16, 8, 7, 7, 1, 1619)
+        );
     }
 
     #[test]
